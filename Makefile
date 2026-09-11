@@ -194,7 +194,7 @@ mcp-doctor:
 			echo "[warn] .mcp.json command: $$CMD (expected $(MCP_PYTHON))"; \
 		fi; \
 	else \
-		echo "[warn] .mcp.json not found in repo root"; \
+		echo "[warn] .mcp.json not found in repo root — run ./Scripts/setup-mcp.sh"; \
 	fi
 	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then \
 		echo "[ok] FCP bridge listening on 127.0.0.1:9876"; \

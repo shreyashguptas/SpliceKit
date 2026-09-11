@@ -136,7 +136,8 @@ usage() {
   After patching:
     - Launch: ~/Applications/SpliceKit/Final Cut Pro.app
     - Connect: 127.0.0.1:9876 (JSON-RPC)
-    - MCP config: .mcp.json is created in current directory
+    - MCP config: .mcp.json is created in the repo root
+    - Claude Desktop: run ./Scripts/setup-mcp.sh
 
   Requirements:
     - macOS 14+
