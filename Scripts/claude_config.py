@@ -28,20 +28,38 @@ def load(path: str) -> dict:
     return cfg
 
 
+def servers_of(cfg: dict, path: str) -> dict:
+    """Return the mcpServers mapping, refusing anything that isn't one.
+
+    A hand-edited config can easily end up with a list or a string here. Bailing
+    out with an explanation beats a traceback the user has to decode.
+    """
+    servers = cfg.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        sys.exit(
+            f"[X] {path} has an \"mcpServers\" value of type "
+            f"{type(servers).__name__}, expected an object. Fix it, then re-run."
+        )
+    return servers
+
+
 def show(path: str) -> int:
-    entry = load(path).get("mcpServers", {}).get("splicekit")
-    if entry:
+    entry = servers_of(load(path), path).get("splicekit")
+    if isinstance(entry, dict):
         print("[+] splicekit entry present:")
         print(f"      command: {entry.get('command')}")
         print(f"      args:    {entry.get('args')}")
         return 0
+    if entry is not None:
+        print(f"[!] splicekit entry is a {type(entry).__name__}, expected an object")
+        return 1
     print("[!] No splicekit entry yet")
     return 1
 
 
 def write(path: str, python_path: str, server_path: str) -> int:
     cfg = load(path)
-    servers = cfg.setdefault("mcpServers", {})
+    servers = servers_of(cfg, path)
     preserved = sorted(name for name in servers if name != "splicekit")
     servers["splicekit"] = {"command": python_path, "args": [server_path]}
 
