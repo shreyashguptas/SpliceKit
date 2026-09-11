@@ -498,6 +498,12 @@ log "Speech recognition and microphone permissions configured"
 step "Step 7: Setting up MCP server"
 
 MCP_SERVER="$REPO_DIR/mcp/server.py"
+
+# What the completion banner will say about MCP. Starts pessimistic and is
+# upgraded only where a config is actually written, so the summary can never
+# tell the user they are configured when they are not.
+MCP_STATUS_LINE="Not configured — run ./Scripts/setup-mcp.sh"
+
 if [[ -f "$MCP_SERVER" ]]; then
     # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
     # package, which makes the server fail to start with no obvious cause.
@@ -517,6 +523,21 @@ if [[ -f "$MCP_SERVER" ]]; then
         # Fall back to an absolute system python3: MCP clients are launched by
         # the OS and do not necessarily inherit this shell's PATH.
         MCP_FALLBACK="$(command -v python3 || true)"
+
+        # A relative PATH entry (a bare `.`, say) makes `command -v` hand back
+        # something like ./python3. The config has to hold a path that resolves
+        # from any working directory, so pin it down before using it.
+        case "$MCP_FALLBACK" in
+            ""|/*) ;;
+            *)
+                if MCP_FALLBACK_DIR="$(cd "$(dirname "$MCP_FALLBACK")" >/dev/null 2>&1 && pwd)"; then
+                    MCP_FALLBACK="$MCP_FALLBACK_DIR/$(basename "$MCP_FALLBACK")"
+                else
+                    MCP_FALLBACK=""
+                fi
+                ;;
+        esac
+
         if [[ -z "$MCP_FALLBACK" ]]; then
             MCP_FALLBACK="/usr/bin/python3"
         fi
@@ -550,6 +571,7 @@ if [[ -f "$MCP_SERVER" ]]; then
         # servers for the project, and clobbering it would delete them silently.
         if "$MCP_PYTHON" "$MCP_MERGE_TOOL" write "$MCP_CONFIG" "$MCP_PYTHON" "$MCP_SERVER"; then
             log "MCP config written to $MCP_CONFIG"
+            MCP_STATUS_LINE="Configured in .mcp.json (restart Claude Code to load)"
         else
             warn "Could not update $MCP_CONFIG — see the error above"
         fi
@@ -570,6 +592,7 @@ if [[ -f "$MCP_SERVER" ]]; then
 }
 MCPJSON
         log "MCP config written to $MCP_CONFIG"
+        MCP_STATUS_LINE="Configured in .mcp.json (restart Claude Code to load)"
     fi
     info "For Claude Desktop, run: ./Scripts/setup-mcp.sh"
 else
@@ -600,7 +623,7 @@ ${BOLD}Python client:${NC}
   python3 $REPO_DIR/Scripts/splicekit_client.py
 
 ${BOLD}MCP server:${NC}
-  Configured in .mcp.json (restart Claude Code to load)
+  $MCP_STATUS_LINE
 
 ${BOLD}Quick test:${NC}
   echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc 127.0.0.1 $BRIDGE_PORT
