@@ -64,3 +64,8 @@ edit-helper.yml
 
 # Claude Code per-project memory (never commit)
 .claude/
+
+# MCP client config — generated per machine by Scripts/setup-mcp.sh.
+# It holds absolute paths to this checkout and to the user's virtualenv,
+# so committing it hands everyone else a path that only works on one Mac.
+.mcp.json

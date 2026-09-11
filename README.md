@@ -164,7 +164,7 @@ The GUI patcher sets up the MCP server for you. If you skipped that step — or 
 ### Claude Desktop (one command)
 
 ```bash
-./Scripts/setup-claude-desktop.sh
+./Scripts/setup-mcp.sh
 ```
 
 Creates the Python environment if it's missing, then adds a `splicekit` entry to
@@ -172,6 +172,10 @@ Creates the Python environment if it's missing, then adds a `splicekit` entry to
 paths for *this* checkout. It works from any folder, on any Mac, for any user — nothing is
 hardcoded. Other MCP servers and settings already in that file are left alone, and the
 previous version is saved alongside it as `claude_desktop_config.json.bak`.
+
+The same command also generates this checkout's `.mcp.json` for Claude Code. That file is
+git-ignored on purpose: it contains absolute paths valid only on the machine that generated
+it, so committing it hands everyone else a broken config.
 
 Then:
 
@@ -185,7 +189,7 @@ Then:
 Confirm the wiring at any time, changing nothing:
 
 ```bash
-./Scripts/setup-claude-desktop.sh --check
+./Scripts/setup-mcp.sh --check
 ```
 
 It reports the Python environment, the config entry, whether a patched Final Cut Pro exists,

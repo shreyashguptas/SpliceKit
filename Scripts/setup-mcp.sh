@@ -1,14 +1,18 @@
 #!/bin/bash
 #
-# Wire this SpliceKit checkout into the Claude Desktop app.
+# Wire this SpliceKit checkout into your MCP clients.
 #
-# Creates the MCP virtualenv if it is missing, then adds a "splicekit" entry to
-# Claude Desktop's config file using absolute paths discovered at runtime — so
-# this works on any Mac, for any user, from any checkout location.
+# Creates the MCP virtualenv if it is missing, then writes a "splicekit" entry
+# into both Claude Desktop's config and this checkout's .mcp.json (Claude Code),
+# using absolute paths discovered at runtime — so this works on any Mac, for any
+# user, from any checkout location.
+#
+# .mcp.json is deliberately git-ignored: it holds absolute paths that are only
+# valid on the machine that generated it.
 #
 # Usage:
-#   ./scripts/setup-claude-desktop.sh
-#   ./scripts/setup-claude-desktop.sh --check    # report status, change nothing
+#   ./Scripts/setup-mcp.sh
+#   ./Scripts/setup-mcp.sh --check    # report status, change nothing
 #
 set -euo pipefail
 
@@ -19,6 +23,7 @@ VENV_PYTHON="$VENV_DIR/bin/python"
 MCP_SERVER="$REPO_DIR/mcp/server.py"
 CLAUDE_DIR="$HOME/Library/Application Support/Claude"
 CLAUDE_CONFIG="$CLAUDE_DIR/claude_desktop_config.json"
+PROJECT_CONFIG="$REPO_DIR/.mcp.json"
 BRIDGE_PORT=9876
 
 CHECK_ONLY=false
@@ -87,6 +92,20 @@ else
     # Merge, never overwrite: every other server and preference is preserved.
     "$(host_python)" "$CONFIG_TOOL" write "$CLAUDE_CONFIG" "$VENV_PYTHON" "$MCP_SERVER"
     log "Config updated: $CLAUDE_CONFIG"
+fi
+
+# ------------------------------------------------------------------
+step "Project config for Claude Code (.mcp.json)"
+# ------------------------------------------------------------------
+if $CHECK_ONLY; then
+    if [[ -f "$PROJECT_CONFIG" ]]; then
+        "$(host_python)" "$CONFIG_TOOL" show "$PROJECT_CONFIG" || true
+    else
+        warn "Not generated yet: $PROJECT_CONFIG"
+    fi
+else
+    "$(host_python)" "$CONFIG_TOOL" write "$PROJECT_CONFIG" "$VENV_PYTHON" "$MCP_SERVER"
+    log "Generated: $PROJECT_CONFIG (git-ignored — paths are machine-specific)"
 fi
 
 # ------------------------------------------------------------------
