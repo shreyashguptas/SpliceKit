@@ -161,6 +161,37 @@ Prefer the terminal? `./patcher/patch_fcp.sh` does the same job.
 
 The GUI patcher sets up the MCP server for you. If you skipped that step — or you're running from a repo checkout — here's the manual path.
 
+### Claude Desktop (one command)
+
+```bash
+./Scripts/setup-claude-desktop.sh
+```
+
+Creates the Python environment if it's missing, then adds a `splicekit` entry to
+`~/Library/Application Support/Claude/claude_desktop_config.json`, filling in the absolute
+paths for *this* checkout. It works from any folder, on any Mac, for any user — nothing is
+hardcoded. Other MCP servers and settings already in that file are left alone, and the
+previous version is saved alongside it as `claude_desktop_config.json.bak`.
+
+Then:
+
+1. **Quit Final Cut Pro**, open the patched copy from `~/Applications/SpliceKit/`, and leave
+   it running. Both copies identify themselves to macOS as the same app, so opening one while
+   the other is running just switches to the copy that's already open — the most common reason
+   this appears not to work.
+2. **Quit Claude Desktop completely** (Cmd+Q — closing the window isn't enough) and reopen it,
+   so it reloads the config.
+
+Confirm the wiring at any time, changing nothing:
+
+```bash
+./Scripts/setup-claude-desktop.sh --check
+```
+
+It reports the Python environment, the config entry, whether a patched Final Cut Pro exists,
+and whether its bridge is live. Prefer to edit by hand? **Settings → Developer → Edit Config**
+in Claude Desktop, then use the JSON shown further down.
+
 ### One-line setup
 
 ```bash
