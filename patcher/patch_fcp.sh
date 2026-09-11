@@ -505,16 +505,32 @@ if [[ -f "$MCP_SERVER" ]]; then
     # import the server really performs — an interpreter that merely exists, or
     # a half-finished install, would otherwise be written into the config.
     MCP_VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
+    # A relative override must be anchored, or the path we write into the config
+    # would only resolve from the directory the patcher happened to run in.
+    case "$MCP_VENV_DIR" in
+        /*) ;;
+        *)  MCP_VENV_DIR="$REPO_DIR/$MCP_VENV_DIR" ;;
+    esac
+
     MCP_PYTHON="$MCP_VENV_DIR/bin/python"
     if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
-        # Write an absolute path: MCP clients are launched by the OS and do not
-        # necessarily inherit the PATH that resolved `python3` in this shell.
-        MCP_PYTHON="$(command -v python3 || true)"
-        if [[ -z "$MCP_PYTHON" ]]; then
-            MCP_PYTHON="/usr/bin/python3"
+        # Fall back to an absolute system python3: MCP clients are launched by
+        # the OS and do not necessarily inherit this shell's PATH.
+        MCP_FALLBACK="$(command -v python3 || true)"
+        if [[ -z "$MCP_FALLBACK" ]]; then
+            MCP_FALLBACK="/usr/bin/python3"
         fi
-        warn "No usable MCP virtualenv at $MCP_VENV_DIR — falling back to $MCP_PYTHON"
-        warn "Run 'make mcp-setup' (or ./Scripts/setup-mcp.sh) for a working server"
+
+        if [[ -x "$MCP_FALLBACK" ]] && "$MCP_FALLBACK" -c "import mcp.server.fastmcp" 2>/dev/null; then
+            MCP_PYTHON="$MCP_FALLBACK"
+            warn "No MCP virtualenv at $MCP_VENV_DIR — using $MCP_PYTHON"
+        else
+            # Nothing here can run the server. Writing this interpreter anyway
+            # would produce a config that fails at launch, which is exactly what
+            # the import check exists to prevent — so write nothing.
+            MCP_PYTHON=""
+            warn "No Python with the mcp package found (checked $MCP_VENV_DIR and $MCP_FALLBACK)"
+        fi
     fi
 
     # Absolute path: this must land next to the repo, not in the caller's cwd.
@@ -524,7 +540,12 @@ if [[ -f "$MCP_SERVER" ]]; then
     # Only claim success where something was actually written — a patch run that
     # reports "MCP config written" after deliberately skipping the write sends
     # the user looking in the wrong place when the server doesn't appear.
-    if [[ -f "$MCP_MERGE_TOOL" ]]; then
+    if [[ -z "$MCP_PYTHON" ]]; then
+        # No interpreter can actually run the server, so there is no honest
+        # value to write. Leave any existing config alone and say what to run.
+        warn "Not writing $MCP_CONFIG — no usable Python to run the MCP server"
+        warn "Run ./Scripts/setup-mcp.sh, which creates the venv and writes the config"
+    elif [[ -f "$MCP_MERGE_TOOL" ]]; then
         # Merge rather than overwrite. This file can already hold other MCP
         # servers for the project, and clobbering it would delete them silently.
         if "$MCP_PYTHON" "$MCP_MERGE_TOOL" write "$MCP_CONFIG" "$MCP_PYTHON" "$MCP_SERVER"; then

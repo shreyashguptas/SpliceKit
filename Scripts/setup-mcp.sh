@@ -20,7 +20,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Honour the same override the Makefile accepts (MCP_VENV ?= ...), so that
 # `make mcp-setup` and this script never disagree about where the venv lives.
+# A relative override has to be pinned down first: we invoke make with -C, which
+# resolves it against the repo, while a bare check here would resolve it against
+# whatever directory the user happened to run this from.
 VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
+case "$VENV_DIR" in
+    /*) ;;
+    *)  VENV_DIR="$REPO_DIR/$VENV_DIR" ;;
+esac
 VENV_PYTHON="$VENV_DIR/bin/python"
 MCP_SERVER="$REPO_DIR/mcp/server.py"
 CLAUDE_DIR="$HOME/Library/Application Support/Claude"
@@ -80,7 +87,8 @@ elif $CHECK_ONLY; then
     warn "Missing or incomplete — run without --check to create it"
 else
     warn "Creating virtualenv (this takes a few seconds)…"
-    make -C "$REPO_DIR" mcp-setup
+    # Pass the resolved path explicitly so make cannot pick a different one.
+    make -C "$REPO_DIR" MCP_VENV="$VENV_DIR" mcp-setup
     if ! "$VENV_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
         err "Virtualenv created but the mcp package failed to import."
         exit 1
