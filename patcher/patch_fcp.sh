@@ -501,10 +501,19 @@ MCP_SERVER="$REPO_DIR/mcp/server.py"
 if [[ -f "$MCP_SERVER" ]]; then
     # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
     # package, which makes the server fail to start with no obvious cause.
-    MCP_PYTHON="$HOME/.venvs/splicekit-mcp/bin/python"
-    if [[ ! -x "$MCP_PYTHON" ]]; then
-        MCP_PYTHON="python3"
-        warn "No virtualenv at ~/.venvs/splicekit-mcp — falling back to python3"
+    # Honour the same MCP_VENV override the Makefile accepts, and require the
+    # import the server really performs — an interpreter that merely exists, or
+    # a half-finished install, would otherwise be written into the config.
+    MCP_VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
+    MCP_PYTHON="$MCP_VENV_DIR/bin/python"
+    if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
+        # Write an absolute path: MCP clients are launched by the OS and do not
+        # necessarily inherit the PATH that resolved `python3` in this shell.
+        MCP_PYTHON="$(command -v python3 || true)"
+        if [[ -z "$MCP_PYTHON" ]]; then
+            MCP_PYTHON="/usr/bin/python3"
+        fi
+        warn "No usable MCP virtualenv at $MCP_VENV_DIR — falling back to $MCP_PYTHON"
         warn "Run 'make mcp-setup' (or ./Scripts/setup-mcp.sh) for a working server"
     fi
 
@@ -512,10 +521,17 @@ if [[ -f "$MCP_SERVER" ]]; then
     MCP_CONFIG="$REPO_DIR/.mcp.json"
     MCP_MERGE_TOOL="$REPO_DIR/Scripts/claude_config.py"
 
+    # Only claim success where something was actually written — a patch run that
+    # reports "MCP config written" after deliberately skipping the write sends
+    # the user looking in the wrong place when the server doesn't appear.
     if [[ -f "$MCP_MERGE_TOOL" ]]; then
         # Merge rather than overwrite. This file can already hold other MCP
         # servers for the project, and clobbering it would delete them silently.
-        "$MCP_PYTHON" "$MCP_MERGE_TOOL" write "$MCP_CONFIG" "$MCP_PYTHON" "$MCP_SERVER"
+        if "$MCP_PYTHON" "$MCP_MERGE_TOOL" write "$MCP_CONFIG" "$MCP_PYTHON" "$MCP_SERVER"; then
+            log "MCP config written to $MCP_CONFIG"
+        else
+            warn "Could not update $MCP_CONFIG — see the error above"
+        fi
     elif [[ -f "$MCP_CONFIG" ]]; then
         # Nothing to merge with safely — leave the existing file alone rather
         # than destroying entries we cannot read.
@@ -532,8 +548,8 @@ if [[ -f "$MCP_SERVER" ]]; then
   }
 }
 MCPJSON
+        log "MCP config written to $MCP_CONFIG"
     fi
-    log "MCP config written to $MCP_CONFIG"
     info "For Claude Desktop, run: ./Scripts/setup-mcp.sh"
 else
     warn "MCP server not found at $MCP_SERVER"

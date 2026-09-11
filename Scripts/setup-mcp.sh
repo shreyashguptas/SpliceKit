@@ -18,7 +18,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VENV_DIR="$HOME/.venvs/splicekit-mcp"
+# Honour the same override the Makefile accepts (MCP_VENV ?= ...), so that
+# `make mcp-setup` and this script never disagree about where the venv lives.
+VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
 VENV_PYTHON="$VENV_DIR/bin/python"
 MCP_SERVER="$REPO_DIR/mcp/server.py"
 CLAUDE_DIR="$HOME/Library/Application Support/Claude"
@@ -26,8 +28,23 @@ CLAUDE_CONFIG="$CLAUDE_DIR/claude_desktop_config.json"
 PROJECT_CONFIG="$REPO_DIR/.mcp.json"
 BRIDGE_PORT=9876
 
+# Reject anything we don't recognise. A typo like --chek must not silently fall
+# through to the mutating path and rewrite the user's configs.
 CHECK_ONLY=false
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=true
+case "$#" in
+    0) ;;
+    1)
+        case "$1" in
+            --check) CHECK_ONLY=true ;;
+            -h|--help) printf 'Usage: %s [--check]\n' "$0"; exit 0 ;;
+            *) printf 'Unknown option: %s\nUsage: %s [--check]\n' "$1" "$0" >&2; exit 2 ;;
+        esac
+        ;;
+    *)
+        printf 'Too many arguments.\nUsage: %s [--check]\n' "$0" >&2
+        exit 2
+        ;;
+esac
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
@@ -54,14 +71,17 @@ log "MCP server: $MCP_SERVER"
 # ------------------------------------------------------------------
 step "Python environment"
 # ------------------------------------------------------------------
-if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import mcp" 2>/dev/null; then
+# Probe the import the server actually performs (mcp/server.py imports
+# mcp.server.fastmcp). A bare `import mcp` can succeed against a partial install
+# and leave us writing a config that fails at launch. Matches `make mcp-doctor`.
+if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
     log "Ready: $VENV_PYTHON ($("$VENV_PYTHON" --version 2>&1))"
 elif $CHECK_ONLY; then
     warn "Missing or incomplete — run without --check to create it"
 else
     warn "Creating virtualenv (this takes a few seconds)…"
     make -C "$REPO_DIR" mcp-setup
-    if ! "$VENV_PYTHON" -c "import mcp" 2>/dev/null; then
+    if ! "$VENV_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
         err "Virtualenv created but the mcp package failed to import."
         exit 1
     fi
@@ -82,8 +102,14 @@ if $CHECK_ONLY; then
 else
     mkdir -p "$CLAUDE_DIR"
     if [[ -f "$CLAUDE_CONFIG" ]]; then
-        cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.bak"
-        log "Backed up existing config to: $(basename "$CLAUDE_CONFIG").bak"
+        # Write the backup once only. Re-running would otherwise overwrite it
+        # with a config we already edited, losing the untouched original.
+        if [[ -e "$CLAUDE_CONFIG.bak" ]]; then
+            log "Keeping existing backup: $(basename "$CLAUDE_CONFIG").bak"
+        else
+            cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.bak"
+            log "Backed up original config to: $(basename "$CLAUDE_CONFIG").bak"
+        fi
     else
         echo '{}' > "$CLAUDE_CONFIG"
         log "Created a new config file"

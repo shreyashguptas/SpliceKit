@@ -170,8 +170,12 @@ The GUI patcher sets up the MCP server for you. If you skipped that step — or 
 Creates the Python environment if it's missing, then adds a `splicekit` entry to
 `~/Library/Application Support/Claude/claude_desktop_config.json`, filling in the absolute
 paths for *this* checkout. It works from any folder, on any Mac, for any user — nothing is
-hardcoded. Other MCP servers and settings already in that file are left alone, and the
-previous version is saved alongside it as `claude_desktop_config.json.bak`.
+hardcoded. Other MCP servers and settings already in that file are left alone, and your
+original is saved once alongside it as `claude_desktop_config.json.bak` — re-running never
+overwrites that backup, so the untouched original stays recoverable.
+
+Set `MCP_VENV` to put the virtualenv somewhere other than `~/.venvs/splicekit-mcp`; the
+script honours the same override as the `Makefile`.
 
 The same command also generates this checkout's `.mcp.json` for Claude Code. That file is
 git-ignored on purpose: it contains absolute paths valid only on the machine that generated
