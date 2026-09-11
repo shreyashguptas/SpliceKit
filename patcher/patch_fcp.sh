@@ -510,7 +510,19 @@ if [[ -f "$MCP_SERVER" ]]; then
 
     # Absolute path: this must land next to the repo, not in the caller's cwd.
     MCP_CONFIG="$REPO_DIR/.mcp.json"
-    cat > "$MCP_CONFIG" << MCPJSON
+    MCP_MERGE_TOOL="$REPO_DIR/Scripts/claude_config.py"
+
+    if [[ -f "$MCP_MERGE_TOOL" ]]; then
+        # Merge rather than overwrite. This file can already hold other MCP
+        # servers for the project, and clobbering it would delete them silently.
+        "$MCP_PYTHON" "$MCP_MERGE_TOOL" write "$MCP_CONFIG" "$MCP_PYTHON" "$MCP_SERVER"
+    elif [[ -f "$MCP_CONFIG" ]]; then
+        # Nothing to merge with safely — leave the existing file alone rather
+        # than destroying entries we cannot read.
+        warn "Cannot find $MCP_MERGE_TOOL; leaving existing $MCP_CONFIG untouched"
+        warn "Add the splicekit entry by hand, or run ./Scripts/setup-mcp.sh"
+    else
+        cat > "$MCP_CONFIG" << MCPJSON
 {
   "mcpServers": {
     "splicekit": {
@@ -520,6 +532,7 @@ if [[ -f "$MCP_SERVER" ]]; then
   }
 }
 MCPJSON
+    fi
     log "MCP config written to $MCP_CONFIG"
     info "For Claude Desktop, run: ./Scripts/setup-mcp.sh"
 else
