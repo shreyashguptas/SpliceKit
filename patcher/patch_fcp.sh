@@ -498,18 +498,29 @@ step "Step 7: Setting up MCP server"
 
 MCP_SERVER="$REPO_DIR/mcp/server.py"
 if [[ -f "$MCP_SERVER" ]]; then
-    MCP_CONFIG=".mcp.json"
+    # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
+    # package, which makes the server fail to start with no obvious cause.
+    MCP_PYTHON="$HOME/.venvs/splicekit-mcp/bin/python"
+    if [[ ! -x "$MCP_PYTHON" ]]; then
+        MCP_PYTHON="python3"
+        warn "No virtualenv at ~/.venvs/splicekit-mcp — falling back to python3"
+        warn "Run 'make mcp-setup' (or ./Scripts/setup-mcp.sh) for a working server"
+    fi
+
+    # Absolute path: this must land next to the repo, not in the caller's cwd.
+    MCP_CONFIG="$REPO_DIR/.mcp.json"
     cat > "$MCP_CONFIG" << MCPJSON
 {
   "mcpServers": {
     "splicekit": {
-      "command": "python3",
+      "command": "$MCP_PYTHON",
       "args": ["$MCP_SERVER"]
     }
   }
 }
 MCPJSON
     log "MCP config written to $MCP_CONFIG"
+    info "For Claude Desktop, run: ./Scripts/setup-mcp.sh"
 else
     warn "MCP server not found at $MCP_SERVER"
 fi
