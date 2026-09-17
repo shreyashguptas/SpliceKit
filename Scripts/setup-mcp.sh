@@ -143,6 +143,30 @@ else
 fi
 
 # ------------------------------------------------------------------
+step "Claude Code user scope"
+# ------------------------------------------------------------------
+# .mcp.json above only applies while Claude Code runs from inside this checkout.
+# Editing happens over the bridge in the running Final Cut Pro, not against files
+# on disk, so there is no reason to be in this directory — register the server at
+# user scope as well and it works from anywhere, including the folder the footage
+# actually lives in.
+if ! command -v claude >/dev/null 2>&1; then
+    warn "The 'claude' CLI is not on PATH — skipping user-scope registration"
+    warn "Claude Code will still work when run from $REPO_DIR"
+elif claude mcp get splicekit >/dev/null 2>&1; then
+    log "Already registered at user scope (works from any directory)"
+elif $CHECK_ONLY; then
+    warn "Not registered at user scope — run without --check to add it"
+else
+    if claude mcp add --scope user splicekit "$VENV_PYTHON" "$MCP_SERVER" >/dev/null 2>&1; then
+        log "Registered at user scope — Claude Code can use it from any directory"
+    else
+        warn "Could not register at user scope. Add it by hand with:"
+        warn "  claude mcp add --scope user splicekit \"$VENV_PYTHON\" \"$MCP_SERVER\""
+    fi
+fi
+
+# ------------------------------------------------------------------
 step "Patched Final Cut Pro"
 # ------------------------------------------------------------------
 # The patcher's --dest and --app-name mean the copy is not necessarily at the
