@@ -146,8 +146,10 @@ fi
 step "Patched Final Cut Pro"
 # ------------------------------------------------------------------
 # The patcher's --dest and --app-name mean the copy is not necessarily at the
-# default path under a default name, so look for any app under ~/Applications
-# that actually carries the injected dylib rather than probing fixed names.
+# default path under a default name, so look for any app in either Applications
+# folder that actually carries the injected dylib rather than probing fixed
+# names. The stock Final Cut Pro sitting beside it has no SpliceKit load
+# command, so it can never match.
 PATCHED_APP=""
 while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
@@ -155,12 +157,12 @@ while IFS= read -r candidate; do
         PATCHED_APP="$candidate"
         break
     fi
-done < <(find "$HOME/Applications" -maxdepth 2 -name "*.app" -type d 2>/dev/null)
+done < <(find /Applications "$HOME/Applications" -maxdepth 2 -name "*.app" -type d 2>/dev/null)
 
 if [[ -n "$PATCHED_APP" ]]; then
     log "Found: $PATCHED_APP"
 else
-    warn "No patched Final Cut Pro found under ~/Applications/"
+    warn "No patched Final Cut Pro found in /Applications or ~/Applications"
     warn "Create one first:  ./Scripts/install.sh"
 fi
 
@@ -177,7 +179,7 @@ cat <<EOF
 1. Quit Final Cut Pro if it's open. The patched copy and the App Store copy
    share one app identity, so opening one while the other runs just switches
    to the copy already running.
-2. Open the patched Final Cut Pro from ~/Applications/ and leave it
+2. Open the patched Final Cut Pro from /Applications and leave it
    open — the MCP server talks to the bridge inside the running app.
 3. Fully quit Claude Desktop (Cmd+Q) and reopen it, so it reloads the config.
 4. Ask Claude to do something in Final Cut Pro. Re-run this script with

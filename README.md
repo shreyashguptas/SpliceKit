@@ -152,8 +152,7 @@ It does three things:
 
 1. **Ensures a Python 3.10+ interpreter.** The `mcp` package requires 3.10 or newer and
    macOS ships 3.9, so on a fresh Mac this installs `python@3.12` via Homebrew.
-2. **Patches Final Cut Pro.** Copies your install to `~/Applications/FCP-Modified/` as
-   *Final Cut Pro Modified*, injects the SpliceKit dylib, and re-signs it.
+2. **Patches Final Cut Pro.** Copies your install to `/Applications/Final Cut Pro Modified.app`, injects the SpliceKit dylib, and re-signs it.
    **Your original Final Cut Pro is never touched**, and it keeps its own name so the two
    are easy to tell apart.
 3. **Wires up the MCP server**, so Claude Desktop and Claude Code can drive the editor.
@@ -172,14 +171,14 @@ Defaults live at the top of `Scripts/install.sh` and can be overridden per-run:
 
 ```bash
 ./Scripts/install.sh --app-name "Final Cut Pro Modified"   # what the copy is called
-./Scripts/install.sh --dest ~/Applications/FCP-Modified    # where it goes
+./Scripts/install.sh --dest /Applications                   # where it goes
 ./Scripts/install.sh --source "/Applications/Final Cut Pro.app"
 ```
 
 ### Uninstalling
 
 ```bash
-./patcher/patch_fcp.sh --dest ~/Applications/FCP-Modified --uninstall
+./patcher/patch_fcp.sh --app-name "Final Cut Pro Modified" --uninstall
 ```
 
 > **Note:** `patcher/patch_fcp.sh` and `Scripts/setup-mcp.sh` are the individual steps
@@ -220,7 +219,7 @@ it, so committing it hands everyone else a broken config.
 
 Then:
 
-1. **Quit Final Cut Pro**, open the patched copy from `~/Applications/SpliceKit/`, and leave
+1. **Quit Final Cut Pro**, open the patched copy from `/Applications`, and leave
    it running. Both copies identify themselves to macOS as the same app, so opening one while
    the other is running just switches to the copy that's already open — the most common reason
    this appears not to work.
@@ -298,7 +297,7 @@ The MCP server connects to the SpliceKit bridge running inside Final Cut Pro on 
 
 Short answers: **Yes, it's safe. Yes, it's legal. No, Apple won't ban you.**
 
-- **Your FCP stays untouched.** SpliceKit makes a *copy* in `~/Applications/SpliceKit/`. Your App Store FCP is never modified. Your libraries, projects, and media files are not touched by the install.
+- **Your FCP stays untouched.** SpliceKit makes a *copy* under its own name in `/Applications`. Your App Store FCP is never modified. Your libraries, projects, and media files are not touched by the install.
 - **It's legal.** Reverse engineering for interoperability is explicitly protected under [DMCA §1201(f)](https://www.law.cornell.edu/uscode/text/17/1201) (US) and the EU Software Directive. SpliceKit is MIT licensed.
 - **Apple doesn't ban Apple IDs for running modded local apps.** There's no precedent, and the mechanism (dyld injection + code signing) is the same one used by BetterTouchTool, Alfred, Hammerspoon, accessibility tools, and every Xcode debugger session.
 - **The realistic risks** are that FCP updates can break compatibility (just re-patch) and that private APIs can behave unexpectedly in edge cases (Cmd+Z is your friend).

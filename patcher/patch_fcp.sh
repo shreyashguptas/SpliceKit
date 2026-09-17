@@ -27,7 +27,7 @@ if [[ -z "${SOURCE_APP:-}" ]]; then
         SOURCE_APP="$STANDARD_APP"  # will fail with a clear error later
     fi
 fi
-DEFAULT_DEST="$HOME/Applications/SpliceKit"
+DEFAULT_DEST="/Applications"
 DEST_DIR="${DEST_DIR:-$DEFAULT_DEST}"
 APP_NAME="$(basename "$SOURCE_APP")"
 BRIDGE_PORT=9876
@@ -118,7 +118,7 @@ usage() {
     ./patch_fcp.sh [options]
 
   Options:
-    --dest DIR       Destination directory (default: ~/Applications/SpliceKit)
+    --dest DIR       Destination directory (default: /Applications)
     --source APP     Source FCP app (default: /Applications/Final Cut Pro.app)
     --app-name NAME  Name for the patched copy (default: same as the source).
                      e.g. --app-name "Final Cut Pro Modified" also sets the
@@ -138,7 +138,7 @@ usage() {
     6. Sets up the MCP server config
 
   After patching:
-    - Launch: ~/Applications/SpliceKit/Final Cut Pro.app
+    - Launch: the renamed copy in /Applications
     - Connect: 127.0.0.1:9876 (JSON-RPC)
     - MCP config: .mcp.json is created in the repo root
     - Claude Desktop: run ./Scripts/setup-mcp.sh
@@ -187,18 +187,56 @@ APP_DISPLAY_NAME="$(basename "$APP_NAME" .app)"
 
 MODDED_APP="$DEST_DIR/$APP_NAME"
 
+# Refuse to write the patched copy over the app being copied. The destination
+# defaults to /Applications, which is also where the source lives, so without a
+# distinct --app-name the two paths collide and the "copy" would patch the real
+# Final Cut Pro in place — destroying the untouched original the whole design
+# depends on. Compare resolved paths so ".."  and symlinks cannot slip past.
+resolve_path() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"; }
+if [[ "$(resolve_path "$MODDED_APP")" == "$(resolve_path "$SOURCE_APP")" ]]; then
+    err "The patched copy would overwrite the original Final Cut Pro:"
+    err "  source:      $SOURCE_APP"
+    err "  destination: $MODDED_APP"
+    err ""
+    err "Give the copy its own name, for example:"
+    err "  --app-name \"Final Cut Pro Modified\""
+    err "or send it somewhere else with --dest."
+    exit 1
+fi
+
 # ============================================================
 # Uninstall
 # ============================================================
 if $UNINSTALL; then
     step "Uninstalling SpliceKit"
-    if [[ -d "$DEST_DIR" ]]; then
-        info "Removing $DEST_DIR"
-        rm -rf "$DEST_DIR"
+
+    # Remove the app bundle, never the directory holding it. This used to be
+    # `rm -rf "$DEST_DIR"`, which is only safe while the copy lives in a
+    # subdirectory of its own — point --dest at an Applications folder and
+    # uninstalling would take every other app in it with it.
+    if [[ -d "$MODDED_APP" ]]; then
+        if pgrep -f "$MODDED_APP/Contents/MacOS/Final Cut Pro" >/dev/null 2>&1; then
+            err "$APP_DISPLAY_NAME is running. Quit it (Cmd+Q) and re-run."
+            exit 1
+        fi
+        info "Removing $MODDED_APP"
+        rm -rf "$MODDED_APP"
         log "Modded FCP removed"
     else
-        warn "Nothing to uninstall at $DEST_DIR"
+        warn "Nothing to uninstall at $MODDED_APP"
     fi
+
+    # Tidy up an empty container left behind by the old nested layout, but only
+    # if it is empty and is not itself an Applications folder.
+    case "$DEST_DIR" in
+        "$HOME/Applications"|/Applications) ;;
+        *)
+            if [[ -d "$DEST_DIR" ]] && [[ -z "$(ls -A "$DEST_DIR" 2>/dev/null)" ]]; then
+                rmdir "$DEST_DIR" 2>/dev/null && info "Removed empty $DEST_DIR"
+            fi
+            ;;
+    esac
+
     exit 0
 fi
 
@@ -467,7 +505,25 @@ log "Speech recognition and microphone permissions configured"
 if [[ -n "$APP_NAME_OVERRIDE" ]]; then
     plist_set CFBundleDisplayName "$APP_DISPLAY_NAME"
     plist_set CFBundleName "$APP_DISPLAY_NAME"
-    log "Bundle retitled: $APP_DISPLAY_NAME"
+
+    # Info.plist alone is not enough. Final Cut Pro ships a localized
+    # InfoPlist.strings in each .lproj, and a localized CFBundleDisplayName
+    # overrides the one in Info.plist — so Finder, the Dock and Launchpad kept
+    # showing "Final Cut Pro" for the copy, indistinguishable from the original
+    # sitting next to it. Retitle every locale, not just English, or the name
+    # reverts for anyone running the Mac in another language.
+    localized=0
+    for strings_file in "$MODDED_APP"/Contents/Resources/*.lproj/InfoPlist.strings; do
+        [[ -f "$strings_file" ]] || continue
+        for key in CFBundleDisplayName CFBundleName; do
+            if plutil -extract "$key" raw "$strings_file" >/dev/null 2>&1; then
+                plutil -replace "$key" -string "$APP_DISPLAY_NAME" "$strings_file" 2>/dev/null || true
+            fi
+        done
+        localized=$((localized + 1))
+    done
+
+    log "Bundle retitled: $APP_DISPLAY_NAME (Info.plist + $localized localizations)"
 fi
 
 # ============================================================

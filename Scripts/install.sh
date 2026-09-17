@@ -26,7 +26,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Defaults. Override with the flags below or by exporting these before running.
 APP_NAME="${SPLICEKIT_APP_NAME:-Final Cut Pro Modified}"
-DEST_DIR="${SPLICEKIT_DEST_DIR:-$HOME/Applications/FCP-Modified}"
+DEST_DIR="${SPLICEKIT_DEST_DIR:-/Applications}"
 SOURCE_APP="${SPLICEKIT_SOURCE_APP:-}"
 PYTHON_FORMULA="python@3.12"
 DISK_NEEDED_GB=10
