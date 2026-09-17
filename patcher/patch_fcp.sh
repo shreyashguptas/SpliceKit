@@ -120,6 +120,10 @@ usage() {
   Options:
     --dest DIR       Destination directory (default: ~/Applications/SpliceKit)
     --source APP     Source FCP app (default: /Applications/Final Cut Pro.app)
+    --app-name NAME  Name for the patched copy (default: same as the source).
+                     e.g. --app-name "Final Cut Pro Modified" also sets the
+                     Finder/Dock/menu-bar title. The bundle identifier is never
+                     changed, so the App Store licence keeps working.
     --no-copy        Skip copying (use existing modded copy)
     --rebuild        Rebuild dylib only and redeploy
     --uninstall      Remove the modded copy
@@ -155,11 +159,13 @@ EOF
 NO_COPY=false
 REBUILD_ONLY=false
 UNINSTALL=false
+APP_NAME_OVERRIDE="${APP_NAME_OVERRIDE:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dest)     DEST_DIR="$2"; shift 2 ;;
         --source)   SOURCE_APP="$2"; shift 2 ;;
+        --app-name) APP_NAME_OVERRIDE="$2"; shift 2 ;;
         --no-copy)  NO_COPY=true; shift ;;
         --rebuild)  REBUILD_ONLY=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
@@ -167,6 +173,17 @@ while [[ $# -gt 0 ]]; do
         *)          err "Unknown option: $1"; usage ;;
     esac
 done
+
+# Resolve the bundle name AFTER parsing, so --source is honoured (it used to be
+# computed from the default source before the flag was read) and so --app-name
+# survives --rebuild / --no-copy, which otherwise looked for the source's name
+# in the destination and failed against a renamed bundle.
+if [[ -n "$APP_NAME_OVERRIDE" ]]; then
+    APP_NAME="${APP_NAME_OVERRIDE%.app}.app"
+else
+    APP_NAME="$(basename "$SOURCE_APP")"
+fi
+APP_DISPLAY_NAME="$(basename "$APP_NAME" .app)"
 
 MODDED_APP="$DEST_DIR/$APP_NAME"
 
@@ -416,6 +433,44 @@ else
 fi
 
 # ============================================================
+# Step 4b: Bundle metadata
+#
+# Every Info.plist write has to happen BEFORE signing. Code signing seals
+# Contents/Info.plist, so editing it afterwards leaves the app reporting
+# "invalid Info.plist (plist or signature have been modified)" and macOS
+# refuses to launch it. These edits used to live in Step 6, after the signing
+# step, which meant the patcher always finished with a broken signature.
+# ============================================================
+step "Step 4b: Configuring bundle metadata"
+
+PLIST="$MODDED_APP/Contents/Info.plist"
+
+plist_set() {
+    local key="$1" value="$2"
+    /usr/libexec/PlistBuddy -c "Set :$key '$value'" "$PLIST" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :$key string '$value'" "$PLIST" 2>/dev/null \
+        || true
+}
+
+# Speech and microphone usage descriptions for transcript + command palette dictation.
+plist_set NSSpeechRecognitionUsageDescription \
+    "SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro."
+plist_set NSMicrophoneUsageDescription \
+    "SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro."
+log "Speech recognition and microphone permissions configured"
+
+# Retitle the copy when --app-name was given, so it is distinguishable from the
+# stock app in Finder, the Dock and the menu bar. CFBundleIdentifier is left
+# alone on purpose: it ties to the Mac App Store receipt and the FCP licence,
+# and changing it makes the copy read as unlicensed. CFBundleExecutable is left
+# alone too — the injected binary is still Contents/MacOS/Final Cut Pro.
+if [[ -n "$APP_NAME_OVERRIDE" ]]; then
+    plist_set CFBundleDisplayName "$APP_DISPLAY_NAME"
+    plist_set CFBundleName "$APP_DISPLAY_NAME"
+    log "Bundle retitled: $APP_DISPLAY_NAME"
+fi
+
+# ============================================================
 # Step 5: Create entitlements and re-sign
 # ============================================================
 step "Step 5: Re-signing (this takes a moment)"
@@ -487,10 +542,8 @@ defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>
 defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
 log "CloudContent defaults set"
 
-# Add speech and microphone usage descriptions for transcript + command palette dictation
-/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-log "Speech recognition and microphone permissions configured"
+# NOTE: Info.plist edits belong in Step 4b, before signing. Writing to the
+# bundle here would invalidate the signature made in Step 5.
 
 # ============================================================
 # Step 7: Create MCP config

@@ -137,31 +137,68 @@ Drop Blackmagic RAW (`.braw`) and VP9/WebM files straight onto your timeline —
 
 ---
 
-## Install in 60 Seconds
+## Install
 
-The easiest path is the GUI patcher. Download the latest release, open it, click the button.
+One command, from a clean clone of this repo:
 
-[![Installation Guide](https://img.youtube.com/vi/NxbInKlXQVs/maxresdefault.jpg)](https://www.youtube.com/watch?v=NxbInKlXQVs)
+```bash
+make install
+```
 
-1. Download **SpliceKit** from the [latest release](https://github.com/elliotttate/SpliceKit/releases/latest)
-2. Unzip and open the app
-3. Click **Patch** — it handles the rest
+That is the supported way to install this fork. It is idempotent — run it again any
+time, it only does the work that is still missing.
 
-<img src="docs/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
+It does three things:
 
-The patcher copies Final Cut Pro to `~/Applications/SpliceKit/`, injects the SpliceKit dylib, re-signs it, and sets up the MCP server. **Your original Final Cut Pro is never touched.**
+1. **Ensures a Python 3.10+ interpreter.** The `mcp` package requires 3.10 or newer and
+   macOS ships 3.9, so on a fresh Mac this installs `python@3.12` via Homebrew.
+2. **Patches Final Cut Pro.** Copies your install to `~/Applications/FCP-Modified/` as
+   *Final Cut Pro Modified*, injects the SpliceKit dylib, and re-signs it.
+   **Your original Final Cut Pro is never touched**, and it keeps its own name so the two
+   are easy to tell apart.
+3. **Wires up the MCP server**, so Claude Desktop and Claude Code can drive the editor.
 
-Once done, click **Launch FCP** in the patcher, or open the new copy from `~/Applications/SpliceKit/`. Press **Cmd+Shift+P** to open the Command Palette and you're off.
+Then open the app and press **Cmd+Shift+P** for the Command Palette.
 
-Prefer the terminal? `./patcher/patch_fcp.sh` does the same job.
+To see what is and isn't set up without changing anything:
+
+```bash
+make install-check
+```
+
+### Customising the install
+
+Defaults live at the top of `Scripts/install.sh` and can be overridden per-run:
+
+```bash
+./Scripts/install.sh --app-name "Final Cut Pro Modified"   # what the copy is called
+./Scripts/install.sh --dest ~/Applications/FCP-Modified    # where it goes
+./Scripts/install.sh --source "/Applications/Final Cut Pro.app"
+```
+
+### Uninstalling
+
+```bash
+./patcher/patch_fcp.sh --dest ~/Applications/FCP-Modified --uninstall
+```
+
+> **Note:** `patcher/patch_fcp.sh` and `Scripts/setup-mcp.sh` are the individual steps
+> `make install` runs. You can call them directly when you are working on the patcher
+> itself, but for installing, use `make install` — it sequences them and handles the
+> Python prerequisite that neither one does on its own.
+>
+> The GUI patcher in the upstream releases is **not** the right way to install this fork:
+> it ships upstream's build, which still bundles the Sentry crash reporter this fork
+> removed. Build from this checkout instead.
 
 ---
 
 ## Connect It to Claude (or any MCP client)
 
-The GUI patcher sets up the MCP server for you. If you skipped that step — or you're running from a repo checkout — here's the manual path.
+`make install` already did this. What follows describes what it set up, and is the
+path to re-run if you ever need to repair the wiring on its own.
 
-### Claude Desktop (one command)
+### Claude Desktop
 
 ```bash
 ./Scripts/setup-mcp.sh

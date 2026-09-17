@@ -11,9 +11,6 @@ CPP_LIBS = -lc++
 INSTALL_NAME = -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit
 SPLICEKIT_VERSION = $(shell awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $$2); print $$2; exit }' patcher/SpliceKit/Configuration/Version.xcconfig)
 VERSION_DEFINE = -DSPLICEKIT_VERSION=\"$(SPLICEKIT_VERSION)\"
-SENTRY_FRAMEWORK_DIR = patcher/Frameworks
-SENTRY_FRAMEWORK = $(SENTRY_FRAMEWORK_DIR)/Sentry.framework
-SENTRY_FLAGS = -F $(SENTRY_FRAMEWORK_DIR) -ObjC -framework Sentry
 DSYM = $(OUTPUT).dSYM
 
 # Read canonical source list from Sources/SOURCES.txt
@@ -119,7 +116,15 @@ MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework Core
 MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor install install-check
+
+# One command to set up a fresh machine: Python 3.10+, a patched and renamed
+# copy of Final Cut Pro, and the MCP server wired into Claude. Safe to re-run.
+install:
+	@bash Scripts/install.sh
+
+install-check:
+	@bash Scripts/install.sh --check
 
 all: $(OUTPUT)
 
@@ -160,14 +165,30 @@ MCP_PYTHON = $(MCP_VENV)/bin/python
 MCP_REQUIREMENTS = mcp/requirements.txt
 
 mcp-setup:
-	@PY="$$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"; \
-	if [ -z "$$PY" ]; then echo "[mcp-setup] python3 not found in PATH"; exit 1; fi; \
+	@PY=""; \
+	for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do \
+		p="$$(command -v $$c 2>/dev/null)" || continue; \
+		[ -n "$$p" ] || continue; \
+		"$$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null || continue; \
+		PY="$$p"; break; \
+	done; \
+	if [ -z "$$PY" ]; then \
+		echo "[mcp-setup] No Python 3.10+ found in PATH."; \
+		echo "[mcp-setup] The mcp package requires Python >= 3.10; macOS ships 3.9."; \
+		echo "[mcp-setup] Install one, then re-run:  brew install python@3.12"; \
+		exit 1; \
+	fi; \
 	echo "[mcp-setup] Using interpreter: $$PY ($$($$PY --version 2>&1))"; \
 	if [ ! -x "$(MCP_PYTHON)" ]; then \
 		echo "[mcp-setup] Creating venv at $(MCP_VENV)"; \
 		"$$PY" -m venv "$(MCP_VENV)"; \
+	elif ! "$(MCP_PYTHON)" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then \
+		echo "[mcp-setup] Existing venv runs $$("$(MCP_PYTHON)" --version 2>&1), which is too old for mcp."; \
+		echo "[mcp-setup] Recreating it with $$PY"; \
+		rm -rf "$(MCP_VENV)"; \
+		"$$PY" -m venv "$(MCP_VENV)"; \
 	else \
-		echo "[mcp-setup] Reusing venv at $(MCP_VENV)"; \
+		echo "[mcp-setup] Reusing venv at $(MCP_VENV) ($$("$(MCP_PYTHON)" --version 2>&1))"; \
 	fi
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet pip
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet -r $(MCP_REQUIREMENTS)
@@ -229,9 +250,6 @@ url-import-tools:
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-$(SENTRY_FRAMEWORK): Scripts/ensure_sentry_framework.sh
-	@bash Scripts/ensure_sentry_framework.sh
-
 $(BUILD_DIR)/lua: | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/lua
 
@@ -259,17 +277,17 @@ $(LUA_LIB): $(LUA_OBJS) | $(BUILD_DIR)
 	libtool -static -o $@ $^
 	@echo "Built: $(LUA_LIB)"
 
-$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h $(SENTRY_FRAMEWORK) | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
-		-I Sources -I $(LUA_DIR) -F $(SENTRY_FRAMEWORK_DIR) -c $< -o $@
+		-I Sources -I $(LUA_DIR) -c $< -o $@
 
-$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h $(SENTRY_FRAMEWORK) | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
-		-I Sources -I $(LUA_DIR) -F $(SENTRY_FRAMEWORK_DIR) -c $< -o $@
+		-I Sources -I $(LUA_DIR) -c $< -o $@
 
-$(OUTPUT): $(OBJS) $(LUA_LIB) $(SENTRY_FRAMEWORK) | $(BUILD_DIR)
+$(OUTPUT): $(OBJS) $(LUA_LIB) | $(BUILD_DIR)
 	$(CC) $(ARCHS) $(MIN_VERSION) $(FRAMEWORKS) $(LINKER_FLAGS) \
-		$(INSTALL_NAME) $(OBJS) $(LUA_LIB) $(SENTRY_FLAGS) $(CPP_LIBS) -o $(OUTPUT)
+		$(INSTALL_NAME) $(OBJS) $(LUA_LIB) $(CPP_LIBS) -o $(OUTPUT)
 	@# -undefined dynamic_lookup lets calls into FCP internals resolve at load time,
 	@# but it also silently permits unresolved SpliceKit_* symbols (missing .m files
 	@# not listed in SOURCES.txt). Those become NULL in the host and crash FCP with
@@ -385,10 +403,6 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
 	cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
-	@if [ -f "$(HOME)/Library/Application Support/SpliceKit/SpliceKitSentryConfig.plist" ]; then \
-		cp "$(HOME)/Library/Application Support/SpliceKit/SpliceKitSentryConfig.plist" "$(FW_DIR)/Versions/A/Resources/SpliceKitSentryConfig.plist"; \
-		echo "Copied runtime Sentry config into framework resources"; \
-	fi
 		@# Create framework symlinks. Use -n so repeated deploys replace the
 		@# symlink itself instead of following it into Versions/A.
 		@cd "$(FW_DIR)/Versions" && ln -sfn A Current
