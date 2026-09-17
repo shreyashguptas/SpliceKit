@@ -117,7 +117,7 @@ elif pgrep -x Claude >/dev/null 2>&1; then
     err "Claude Desktop is running — it would overwrite this config."
     err ""
     err "Quit it completely (Cmd+Q, not just closing the window), then re-run:"
-    err "  ./Scripts/setup-mcp.sh"
+    err "  make install"
     err ""
     err "Everything else below is still set up; only the Claude Desktop entry"
     err "was skipped."
@@ -231,7 +231,7 @@ if [[ -n "$PATCHED_APP" ]]; then
     log "Found: $PATCHED_APP"
 else
     warn "No patched Final Cut Pro found in /Applications or ~/Applications"
-    warn "Create one first:  ./Scripts/install.sh"
+    warn "Create one first:  make install"
 fi
 
 if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
@@ -257,5 +257,5 @@ EOF
 if $CLAUDE_DESKTOP_SKIPPED; then
     echo
     err "Claude Desktop was NOT configured — it was running. Quit it (Cmd+Q) and"
-    err "re-run this script, or it will not see the splicekit server."
+    err "re-run 'make install', or it will not see the splicekit server."
 fi

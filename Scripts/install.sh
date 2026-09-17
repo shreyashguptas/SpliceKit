@@ -290,10 +290,29 @@ ensure_python() {
 ensure_patched_app() {
     step "Patched Final Cut Pro"
 
+    # Already patched means update, not skip. Re-running after changing the
+    # source should put those changes into the app you actually launch — this
+    # used to report "already patched" and do nothing, so edits never reached
+    # it. --rebuild skips only the 7GB copy: it rebuilds the dylib from the
+    # current source, reinstalls the framework, re-injects, retitles and
+    # re-signs, replacing the existing app in place. No second copy, no
+    # versioned duplicates, same path and same name.
     if is_patched; then
         log "Already patched: $MODDED_APP"
-        info "Rebuild the dylib into it with:"
-        info "  ./patcher/patch_fcp.sh --dest '$DEST_DIR' --app-name '$APP_NAME' --rebuild"
+
+        if $CHECK_ONLY; then
+            info "Re-running would rebuild the dylib into it from current source"
+            return 0
+        fi
+
+        if pgrep -f "$MODDED_APP/Contents/MacOS/Final Cut Pro" >/dev/null 2>&1; then
+            err "$APP_NAME is running, and rebuilding replaces its framework."
+            err "Quit it (Cmd+Q) and re-run: make install"
+            exit 1
+        fi
+
+        info "Rebuilding the dylib from current source and redeploying..."
+        "$REPO_DIR/patcher/patch_fcp.sh" --dest "$DEST_DIR" --app-name "$APP_NAME" --rebuild
         return 0
     fi
 
