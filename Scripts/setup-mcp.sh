@@ -53,6 +53,8 @@ case "$#" in
         ;;
 esac
 
+CLAUDE_DESKTOP_SKIPPED=false
+
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
@@ -107,6 +109,19 @@ if $CHECK_ONLY; then
     else
         warn "No config file yet at: $CLAUDE_CONFIG"
     fi
+elif pgrep -x Claude >/dev/null 2>&1; then
+    # Claude Desktop owns this file and rewrites it wholesale when it saves its
+    # own preferences, dropping keys it did not have in memory. Writing while it
+    # runs looks like it worked and then silently loses the entry minutes later,
+    # which is indistinguishable from "MCP is broken". Refuse instead.
+    err "Claude Desktop is running — it would overwrite this config."
+    err ""
+    err "Quit it completely (Cmd+Q, not just closing the window), then re-run:"
+    err "  ./Scripts/setup-mcp.sh"
+    err ""
+    err "Everything else below is still set up; only the Claude Desktop entry"
+    err "was skipped."
+    CLAUDE_DESKTOP_SKIPPED=true
 else
     mkdir -p "$CLAUDE_DIR"
     if [[ -f "$CLAUDE_CONFIG" ]]; then
@@ -238,3 +253,9 @@ cat <<EOF
 4. Ask Claude to do something in Final Cut Pro. Re-run this script with
    --check at any time to confirm the wiring.
 EOF
+
+if $CLAUDE_DESKTOP_SKIPPED; then
+    echo
+    err "Claude Desktop was NOT configured — it was running. Quit it (Cmd+Q) and"
+    err "re-run this script, or it will not see the splicekit server."
+fi
