@@ -167,6 +167,35 @@ else
 fi
 
 # ------------------------------------------------------------------
+step "Any other MCP client"
+# ------------------------------------------------------------------
+# Nothing here is Claude-specific. The server speaks MCP over stdio, the
+# standard transport, and depends only on the reference `mcp` package — so any
+# client that speaks the protocol can drive Final Cut Pro with it. The steps
+# above just write the config files two particular clients happen to read.
+# These are the details to hand to anything else.
+cat <<EOF
+Transport: stdio
+Command:   $VENV_PYTHON
+Arguments: $MCP_SERVER
+
+Most clients take this shape of JSON:
+
+  {
+    "mcpServers": {
+      "splicekit": {
+        "command": "$VENV_PYTHON",
+        "args": ["$MCP_SERVER"]
+      }
+    }
+  }
+
+Clients that take a single command line instead:
+
+  $VENV_PYTHON $MCP_SERVER
+EOF
+
+# ------------------------------------------------------------------
 step "Patched Final Cut Pro"
 # ------------------------------------------------------------------
 # The patcher's --dest and --app-name mean the copy is not necessarily at the

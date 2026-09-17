@@ -197,6 +197,28 @@ Defaults live at the top of `Scripts/install.sh` and can be overridden per-run:
 `make install` already did this. What follows describes what it set up, and is the
 path to re-run if you ever need to repair the wiring on its own.
 
+### Nothing here is Claude-specific
+
+The server speaks **MCP over stdio** — the standard transport — and depends only on the
+reference `mcp` package. It exposes plain MCP tools and knows nothing about which client
+is calling. Any client that speaks the protocol can drive Final Cut Pro with it: Cursor,
+Zed, Cline, Continue, your own script against an MCP SDK, or whatever ships next.
+
+The setup script writes config files for Claude Desktop and Claude Code because those are
+two clients that read known locations. Point anything else at the same two values —
+`./Scripts/setup-mcp.sh --check` prints them, and a ready-to-paste JSON block:
+
+```
+Transport: stdio
+Command:   ~/.venvs/splicekit-mcp/bin/python
+Arguments: <this checkout>/mcp/server.py
+```
+
+The editing itself is client-agnostic for a deeper reason: tools talk to a JSON-RPC bridge
+inside the running Final Cut Pro on `127.0.0.1:9876`, not to files on disk. Any process
+that can reach that port can drive the editor — the MCP server is one convenient way in,
+not the only one.
+
 ### Claude Desktop
 
 ```bash
