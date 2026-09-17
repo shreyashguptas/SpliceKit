@@ -44,6 +44,12 @@ credentials.json
 
 # Swift packages
 Package.resolved
+# ...except the transcription helpers. These are applications, not libraries, so
+# their lockfile belongs in the repo. Ignoring it let FluidAudio float from the
+# 0.12 series the source was written against to 0.15.7, which renamed the
+# transcription API — a clean checkout then failed to build, and the Parakeet
+# engine reported a missing binary instead of a broken build.
+!tools/*/Package.resolved
 
 # Release binaries (use GitHub Releases instead)
 patcher/SpliceKitPatcher-v*.zip

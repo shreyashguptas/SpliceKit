@@ -175,6 +175,34 @@ Defaults live at the top of `Scripts/install.sh` and can be overridden per-run:
 ./Scripts/install.sh --source "/Applications/Final Cut Pro.app"
 ```
 
+### Transcription engines and their dependencies
+
+The transcript panel's **Parakeet** engine and the caption panel's **Whisper**
+engines run on-device, but they are the only part of this project with
+third-party dependencies. `make install` builds them from `tools/` and installs
+them into the patched app; the build is cached, so re-running is cheap.
+
+```bash
+make transcribers                             # build/install the Parakeet engine
+./Scripts/build-transcribers.sh --all         # also the caption panel's Whisper engines
+```
+
+Only **Parakeet** is built by default. Whisper is opt-in: WhisperKit pulls a
+much larger dependency tree and its models are 800 MB–1.5 GB, so nothing
+downloads it unless you ask for it.
+
+The first build downloads Swift packages, and the first *transcription*
+downloads a ~475 MB speech model from HuggingFace into
+`~/Library/Application Support/FluidAudio/`. Nothing else in SpliceKit needs the
+network, and no audio or project data ever leaves the machine.
+
+See [docs/THIRD_PARTY_DEPENDENCIES.md](docs/THIRD_PARTY_DEPENDENCIES.md) for the
+full pinned list, where everything is stored, and how to remove it. The **FCP
+Native** engine needs none of it.
+
+If these fail to build, the patch still succeeds — you lose those engines, not
+Final Cut Pro.
+
 ### Uninstalling
 
 ```bash

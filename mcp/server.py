@@ -2734,8 +2734,16 @@ def get_transcript() -> str:
             lines.append(f"  [{w['index']:3d}] {w['startTime']:7.2f}s - {w['endTime']:7.2f}s "
                          f"({conf:3.0f}%) [{speaker}] \"{w['text']}\"")
 
-    if r.get('error'):
-        lines.append(f"\nError: {r['error']}")
+    # The bridge reports the failure reason in `errorMessage` (see
+    # SpliceKitTranscriptPanel getState). Reading only `error` meant every failed
+    # transcription came back as a bare "Status: error" with no explanation,
+    # which is indistinguishable from the feature being broken.
+    detail = r.get('errorMessage') or r.get('error')
+    if detail:
+        lines.append(f"\nError: {detail}")
+    elif r.get('status') == 'error':
+        lines.append("\nError: transcription failed, but the bridge reported no reason. "
+                     "Check the SpliceKit log panel in Final Cut Pro for [Transcript] lines.")
 
     return "\n".join(lines)
 

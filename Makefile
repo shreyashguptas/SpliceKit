@@ -29,10 +29,15 @@ LUA_SRCS = $(filter-out $(LUA_DIR)/lua.c $(LUA_DIR)/luac.c, $(wildcard $(LUA_DIR
 LUA_OBJS = $(patsubst $(LUA_DIR)/%.c, $(BUILD_DIR)/lua/%.o, $(LUA_SRCS))
 LUA_LIB = $(BUILD_DIR)/liblua.a
 
-# Modded app paths — auto-detect standard or Creator Studio edition
+# Modded app paths. `make install` puts the patched copy in /Applications under
+# a distinct name, beside the untouched original — check there first, or these
+# targets deploy into a stale location and report success against an app that
+# is not the one being launched. The ~/Applications paths are kept for installs
+# made by older versions of the patcher.
+MODDED_APP_MODIFIED = /Applications/Final Cut Pro Modified.app
 MODDED_APP_STANDARD = $(HOME)/Applications/SpliceKit/Final Cut Pro.app
 MODDED_APP_CREATOR = $(HOME)/Applications/SpliceKit/Final Cut Pro Creator Studio.app
-MODDED_APP = $(shell if [ -d "$(MODDED_APP_STANDARD)" ]; then echo "$(MODDED_APP_STANDARD)"; elif [ -d "$(MODDED_APP_CREATOR)" ]; then echo "$(MODDED_APP_CREATOR)"; else echo "$(MODDED_APP_STANDARD)"; fi)
+MODDED_APP = $(shell if [ -d "$(MODDED_APP_MODIFIED)" ]; then echo "$(MODDED_APP_MODIFIED)"; elif [ -d "$(MODDED_APP_STANDARD)" ]; then echo "$(MODDED_APP_STANDARD)"; elif [ -d "$(MODDED_APP_CREATOR)" ]; then echo "$(MODDED_APP_CREATOR)"; else echo "$(MODDED_APP_MODIFIED)"; fi)
 FW_DIR = $(MODDED_APP)/Contents/Frameworks/SpliceKit.framework
 ENTITLEMENTS = entitlements.plist
 REGISTER_PRO_EXTENSION_APP = $(MODDED_APP)/Contents/Helpers/RegisterProExtension.app
@@ -48,12 +53,14 @@ AUDIO_BUS_PROBE_INFO = $(AUDIO_BUS_PROBE_DIR)/Info.plist
 AUDIO_BUS_PROBE_SOURCE = $(AUDIO_BUS_PROBE_DIR)/SpliceKitAudioBusProbe.c
 AUDIO_BUS_PROBE_INSTALL_DIR = $(HOME)/Library/Audio/Plug-Ins/Components
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
-PARAKEET_PKG_DIR = patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber
-PARAKEET_RELEASE_BIN = $(PARAKEET_PKG_DIR)/.build/release/parakeet-transcriber
-PARAKEET_DEBUG_BIN = $(PARAKEET_PKG_DIR)/.build/debug/parakeet-transcriber
-WHISPER_PKG_DIR = patcher/SpliceKitPatcher.app/Contents/Resources/tools/whisper-transcriber
-WHISPER_RELEASE_BIN = $(WHISPER_PKG_DIR)/.build/release/whisper-transcriber
-WHISPER_DEBUG_BIN = $(WHISPER_PKG_DIR)/.build/debug/whisper-transcriber
+# Transcription helpers (Parakeet for the transcript panel, Whisper for the
+# caption panel). These used to point at
+# patcher/SpliceKitPatcher.app/Contents/Resources/tools/..., a directory that
+# only exists inside a release tarball — so on a source checkout the copy below
+# was silently skipped and both engines failed at runtime. They are now built
+# from tools/<name> by Scripts/build-transcribers.sh and cached in build/.
+PARAKEET_BIN = $(BUILD_DIR)/parakeet-transcriber
+WHISPER_BIN = $(BUILD_DIR)/whisper-transcriber
 
 BRAW_SOURCE_DIR = Plugins/BRAW/Sources
 BRAW_PRIVATE_DIR = $(BRAW_SOURCE_DIR)/Private
@@ -116,7 +123,7 @@ MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework Core
 MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor install install-check
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor install install-check transcribers
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
 # copy of Final Cut Pro, and the MCP server wired into Claude. Safe to re-run.
@@ -125,6 +132,12 @@ install:
 
 install-check:
 	@bash Scripts/install.sh --check
+
+# Build the Parakeet/Whisper CLI helpers on their own and install them into the
+# patched app plus Application Support. `make install` does this already; this
+# target exists for retrying after a failed dependency download.
+transcribers:
+	@bash Scripts/build-transcribers.sh --framework "$(FW_DIR)"
 
 all: $(OUTPUT)
 
@@ -427,20 +440,12 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 	@cp $(SILENCE_DETECTOR) "$(TOOLS_DIR)/silence-detector" 2>/dev/null || true
 	@cp $(STRUCTURE_ANALYZER) "$(TOOLS_DIR)/structure-analyzer" 2>/dev/null || true
 	@cp $(MIXER_APP) "$(TOOLS_DIR)/SpliceKitMixer" 2>/dev/null || true
-	@if [ -f "$(PARAKEET_RELEASE_BIN)" ]; then \
-		cp "$(PARAKEET_RELEASE_BIN)" "$(TOOLS_DIR)/parakeet-transcriber"; \
-		cp "$(PARAKEET_RELEASE_BIN)" "$(FW_DIR)/Versions/A/Resources/parakeet-transcriber"; \
-	elif [ -f "$(PARAKEET_DEBUG_BIN)" ]; then \
-		cp "$(PARAKEET_DEBUG_BIN)" "$(TOOLS_DIR)/parakeet-transcriber"; \
-		cp "$(PARAKEET_DEBUG_BIN)" "$(FW_DIR)/Versions/A/Resources/parakeet-transcriber"; \
-	fi
-	@if [ -f "$(WHISPER_RELEASE_BIN)" ]; then \
-		cp "$(WHISPER_RELEASE_BIN)" "$(TOOLS_DIR)/whisper-transcriber"; \
-		cp "$(WHISPER_RELEASE_BIN)" "$(FW_DIR)/Versions/A/Resources/whisper-transcriber"; \
-	elif [ -f "$(WHISPER_DEBUG_BIN)" ]; then \
-		cp "$(WHISPER_DEBUG_BIN)" "$(TOOLS_DIR)/whisper-transcriber"; \
-		cp "$(WHISPER_DEBUG_BIN)" "$(FW_DIR)/Versions/A/Resources/whisper-transcriber"; \
-	fi
+	@# Build (cached) and install the Parakeet/Whisper CLIs into both the
+	@# framework Resources and Application Support. Non-fatal by design.
+	@bash Scripts/build-transcribers.sh --framework "$(FW_DIR)" || \
+		echo "[!] Transcription helpers unavailable — see build/*-build.log"
+	@cp "$(PARAKEET_BIN)" "$(TOOLS_DIR)/parakeet-transcriber" 2>/dev/null || true
+	@cp "$(WHISPER_BIN)" "$(TOOLS_DIR)/whisper-transcriber" 2>/dev/null || true
 	@# Create plugins directory
 	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/plugins"
 	@# Copy Lua example scripts

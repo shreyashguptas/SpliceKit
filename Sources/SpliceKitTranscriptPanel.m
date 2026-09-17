@@ -1476,6 +1476,49 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 #pragma mark - Speech Recognition Authorization
 
+// SFSpeechRecognizerAuthorizationStatus
+typedef NS_ENUM(NSInteger, SpliceKitSpeechAuthStatus) {
+    SpliceKitSpeechAuthNotDetermined = 0,
+    SpliceKitSpeechAuthDenied        = 1,
+    SpliceKitSpeechAuthRestricted    = 2,
+    SpliceKitSpeechAuthAuthorized    = 3,
+};
+
+static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
+    switch (status) {
+        case SpliceKitSpeechAuthNotDetermined: return @"notDetermined";
+        case SpliceKitSpeechAuthDenied:        return @"denied";
+        case SpliceKitSpeechAuthRestricted:    return @"restricted";
+        case SpliceKitSpeechAuthAuthorized:    return @"authorized";
+        default: return [NSString stringWithFormat:@"unknown(%ld)", (long)status];
+    }
+}
+
+/// Human-readable reason the Apple Speech engine cannot run, or nil when it can.
+/// Kept separate from the request flow so both the pre-flight check and the
+/// failure path describe the same state in the same words.
+- (NSString *)speechAuthorizationBlockedReasonForStatus:(NSInteger)status {
+    switch (status) {
+        case SpliceKitSpeechAuthAuthorized:
+            return nil;
+        case SpliceKitSpeechAuthRestricted:
+            return @"Speech recognition is restricted on this Mac (Screen Time or an MDM "
+                   @"profile blocks it). Use the Parakeet or FCP Native engine instead.";
+        case SpliceKitSpeechAuthDenied:
+        default:
+            return [NSString stringWithFormat:
+                @"Speech recognition permission was denied (status: %@).\n\n"
+                @"Grant it in System Settings > Privacy & Security > Speech Recognition, "
+                @"enable \"%@\", then quit and reopen the app.\n\n"
+                @"If it is not listed there, the app has never been able to ask — use the "
+                @"Parakeet engine instead, which needs no permission.",
+                SpliceKitSpeechAuthStatusName(status),
+                [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"]
+                    ?: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"]
+                    ?: @"Final Cut Pro"];
+    }
+}
+
 - (void)requestSpeechAuthorizationWithCompletion:(void(^)(BOOL authorized))completion {
     if (!SFSpeechRecognizerClass) {
         SpliceKit_log(@"[Transcript] Speech framework not loaded");
@@ -1483,34 +1526,45 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         return;
     }
 
-    // Check current authorization status
-    // SFSpeechRecognizerAuthorizationStatus: 0=notDetermined, 1=denied, 2=restricted, 3=authorized
     SEL statusSel = NSSelectorFromString(@"authorizationStatus");
     NSInteger status = ((NSInteger (*)(Class, SEL))objc_msgSend)(SFSpeechRecognizerClass, statusSel);
-    SpliceKit_log(@"[Transcript] Speech authorization status: %ld", (long)status);
+    SpliceKit_log(@"[Transcript] Speech authorization status: %@", SpliceKitSpeechAuthStatusName(status));
 
-    if (status == 3) { // authorized
+    if (status == SpliceKitSpeechAuthAuthorized) {
         completion(YES);
         return;
     }
 
-    if (status == 0) { // notDetermined — request it, which should trigger the system dialog
+    if (status == SpliceKitSpeechAuthNotDetermined) {
+        // The patched bundle carries NSSpeechRecognitionUsageDescription (added by
+        // patcher/patch_fcp.sh Step 4b), so this genuinely can present the system
+        // dialog and register the app in the Speech Recognition privacy pane.
+        // Ask on the main queue: the prompt is UI, and this is reached from a
+        // background transcription queue.
         SpliceKit_log(@"[Transcript] Requesting speech recognition authorization...");
-        SEL reqSel = NSSelectorFromString(@"requestAuthorization:");
-        ((void (*)(Class, SEL, id))objc_msgSend)(SFSpeechRecognizerClass, reqSel,
-            ^(NSInteger newStatus) {
-                SpliceKit_log(@"[Transcript] Authorization callback: %ld", (long)newStatus);
-                // Always proceed — FCP's process can't show the permission dialog (no
-                // NSSpeechRecognitionUsageDescription), so authorization will typically
-                // return denied. On-device recognition often works regardless.
-                completion(YES);
-            });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SEL reqSel = NSSelectorFromString(@"requestAuthorization:");
+            ((void (*)(Class, SEL, id))objc_msgSend)(SFSpeechRecognizerClass, reqSel,
+                ^(NSInteger newStatus) {
+                    SpliceKit_log(@"[Transcript] Authorization callback: %@",
+                                  SpliceKitSpeechAuthStatusName(newStatus));
+                    // Honour the answer. This used to proceed unconditionally on the
+                    // assumption that the dialog could never appear, which turned a
+                    // denial into a transcription that failed later with no reason
+                    // attached — indistinguishable from the feature being broken.
+                    if (newStatus != SpliceKitSpeechAuthAuthorized) {
+                        [self setErrorState:[self speechAuthorizationBlockedReasonForStatus:newStatus]];
+                        completion(NO);
+                        return;
+                    }
+                    completion(YES);
+                });
+        });
         return;
     }
 
-    // denied or restricted — still try, on-device recognition may work without full authorization
-    SpliceKit_log(@"[Transcript] Speech auth status %ld, attempting anyway (on-device may work)", (long)status);
-    completion(YES);
+    [self setErrorState:[self speechAuthorizationBlockedReasonForStatus:status]];
+    completion(NO);
 }
 
 #pragma mark - Transcribe Timeline
@@ -1544,13 +1598,11 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         } else {
             [self requestSpeechAuthorizationWithCompletion:^(BOOL authorized) {
                 if (!authorized) {
-                    // Framework not loaded vs. permission denied are different problems
-                    Class srClass = objc_getClass("SFSpeechRecognizer");
-                    if (!srClass) {
+                    // The authorization helper already set a specific error for a
+                    // denial or restriction. Only the "framework never loaded" case
+                    // reaches here without one, so don't overwrite the better message.
+                    if (!objc_getClass("SFSpeechRecognizer")) {
                         [self setErrorState:@"Apple Speech framework not available. "
-                                            "Use Parakeet or FCP Native engine instead."];
-                    } else {
-                        [self setErrorState:@"Apple Speech not authorized. "
                                             "Use Parakeet or FCP Native engine instead."];
                     }
                     return;
@@ -2625,23 +2677,28 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 }
             } @catch (NSException *e) {}
 
-            NSString *home = NSHomeDirectory();
+            // Name the command that actually installs it. The old text pointed at
+            // "the SpliceKit patcher app" and a path to copy a binary into by
+            // hand — neither of which exists in a source checkout, so anyone who
+            // followed it got nowhere.
             NSString *msg = [NSString stringWithFormat:
-                @"Parakeet transcriber not found.\n\n"
-                @"To fix this, either:\n"
-                @"  1. Re-run the SpliceKit patcher app\n"
-                @"  2. Or copy the binary manually to:\n"
-                @"     %@/Applications/SpliceKit/tools/parakeet-transcriber\n\n"
-                @"You can also switch to \"Apple Speech\" engine in the dropdown above.%@",
-                home, xcodeCheck];
+                @"Parakeet transcriber not installed.\n\n"
+                @"Build and install it from your SpliceKit checkout:\n"
+                @"    make install\n\n"
+                @"(or 'make transcribers' to build just this). The first build "
+                @"downloads the speech dependencies and takes a few minutes.\n\n"
+                @"Meanwhile, the \"FCP Native\" engine in the dropdown above needs "
+                @"no extra binary.%@",
+                xcodeCheck];
             [self setErrorState:msg];
             SpliceKit_log(@"[Transcript] ERROR: Parakeet transcriber not found and could not be built.");
-            SpliceKit_log(@"[Transcript] FIX: Re-run SpliceKit patcher, or copy binary to ~/Applications/SpliceKit/tools/");
+            SpliceKit_log(@"[Transcript] FIX: run 'make install' (or 'make transcribers') in the SpliceKit checkout.");
             return;
         }
         binaryPath = [self parakeetTranscriberPath];
         if (!binaryPath) {
-            [self setErrorState:@"Parakeet transcriber binary not found after build. Try switching to Apple Speech engine."];
+            [self setErrorState:@"Parakeet transcriber built but could not be located afterwards. "
+                                "Re-install it with 'make install', or switch engine in the dropdown above."];
             return;
         }
     }
@@ -2652,7 +2709,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     // Verify the binary is executable
     if (![[NSFileManager defaultManager] isExecutableFileAtPath:binaryPath]) {
         SpliceKit_log(@"[Transcript] ERROR: parakeet-transcriber exists but is not executable");
-        [self setErrorState:@"Parakeet binary is not executable. Try: chmod +x ~/Applications/SpliceKit/tools/parakeet-transcriber"];
+        [self setErrorState:[NSString stringWithFormat:
+            @"Parakeet binary is not executable:\n%@\n\nRe-install it with: make install", binaryPath]];
         return;
     }
 
@@ -3792,6 +3850,171 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         });
 }
 
+// Transcribe one file with the Parakeet CLI.
+//
+// Deliberately separate from performParakeetTranscription, which is built
+// around the timeline: it collects clips, deduplicates their source media,
+// runs the CLI in --batch mode and maps words back onto clip handles. None of
+// that applies to a single file handed over by transcript.open(fileURL:), and
+// reusing it would mean threading a synthetic clip through several hundred
+// lines of timeline-specific code. Single-file mode is one CLI invocation.
+- (void)transcribeFileWithParakeet:(NSURL *)audioURL timelineStart:(double)timelineStart {
+    NSString *binaryPath = [self parakeetTranscriberPath];
+    if (!binaryPath) {
+        [self setErrorState:@"Parakeet transcriber not installed.\n\n"
+                            "Build and install it from your SpliceKit checkout:\n"
+                            "    make install"];
+        SpliceKit_log(@"[Transcript] ERROR: parakeet-transcriber not found for single-file transcription");
+        return;
+    }
+
+    SpliceKit_log(@"[Transcript] Parakeet single file: %@", audioURL.path);
+    SpliceKitTranscriptDiag_logBinaryInfo(binaryPath);
+
+    NSMutableArray *args = [NSMutableArray arrayWithObjects:audioURL.path, @"--progress", nil];
+    if (self.speakerDetectionEnabled) [args addObject:@"--speakers"];
+    [args addObject:@"--model"];
+    [args addObject:self.parakeetModelVersion ?: @"v3"];
+
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = binaryPath;
+    task.arguments = args;
+    NSPipe *outPipe = [NSPipe pipe];
+    NSPipe *errPipe = [NSPipe pipe];
+    task.standardOutput = outPipe;
+    task.standardError = errPipe;
+
+    // Drain both pipes on background handlers. A model download writes a lot of
+    // progress to stderr, and a full pipe buffer would deadlock waitUntilExit.
+    __block NSMutableData *outData = [NSMutableData data];
+    __block NSMutableData *errData = [NSMutableData data];
+    outPipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *h) {
+        NSData *d = h.availableData;
+        if (d.length) { @synchronized (outData) { [outData appendData:d]; } }
+    };
+    errPipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *h) {
+        NSData *d = h.availableData;
+        if (!d.length) return;
+        @synchronized (errData) { [errData appendData:d]; }
+        NSString *chunk = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
+        for (NSString *line in [chunk componentsSeparatedByString:@"\n"]) {
+            if (![line hasPrefix:@"PROGRESS:"]) continue;
+            NSArray *parts = [line componentsSeparatedByString:@":"];
+            if (parts.count < 3) continue;
+            double fraction = [parts[1] doubleValue];
+            NSString *message = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)]
+                                    componentsJoinedByString:@":"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.progressBar.indeterminate = NO;
+                self.progressBar.doubleValue = fraction * 100.0;
+                [self updateStatusUI:message];
+            });
+        }
+    };
+
+    @try {
+        [task launch];
+        [task waitUntilExit];
+    } @catch (NSException *e) {
+        [self setErrorState:[NSString stringWithFormat:@"Could not run parakeet-transcriber: %@", e.reason]];
+        return;
+    }
+    outPipe.fileHandleForReading.readabilityHandler = nil;
+    errPipe.fileHandleForReading.readabilityHandler = nil;
+
+    NSData *stdoutData; NSData *stderrData;
+    @synchronized (outData) { stdoutData = [outData copy]; }
+    @synchronized (errData) { stderrData = [errData copy]; }
+    NSString *stderrText = [[NSString alloc] initWithData:stderrData encoding:NSUTF8StringEncoding] ?: @"";
+
+    if (task.terminationStatus != 0) {
+        // Surface the tool's own last words rather than a bare exit code.
+        NSString *detail = @"";
+        for (NSString *line in [[stderrText componentsSeparatedByString:@"\n"] reverseObjectEnumerator]) {
+            if (line.length && ![line hasPrefix:@"PROGRESS:"]) {
+                detail = [line hasPrefix:@"ERROR:"] ? [line substringFromIndex:6] : line;
+                break;
+            }
+        }
+        [self setErrorState:[NSString stringWithFormat:
+            @"Parakeet failed (exit %d)%@%@", task.terminationStatus,
+            detail.length ? @": " : @"", detail]];
+        SpliceKit_log(@"[Transcript] Parakeet single-file failed (%d): %@", task.terminationStatus, stderrText);
+        return;
+    }
+
+    NSError *jsonError = nil;
+    id parsed = [NSJSONSerialization JSONObjectWithData:stdoutData options:0 error:&jsonError];
+    if (![parsed isKindOfClass:[NSArray class]]) {
+        [self setErrorState:[NSString stringWithFormat:
+            @"Parakeet returned output that could not be parsed: %@",
+            jsonError.localizedDescription ?: @"not a JSON array"]];
+        return;
+    }
+
+    // The CLI emits {word, startTime, endTime, confidence} with file-relative
+    // times. Shift by timelineStart so the panel's playhead sync lines up when
+    // the caller placed the file somewhere other than the start of the timeline.
+    NSMutableArray *words = [NSMutableArray array];
+    for (NSDictionary *entry in (NSArray *)parsed) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        NSString *text = entry[@"word"] ?: entry[@"text"];
+        if (![text isKindOfClass:[NSString class]] || text.length == 0) continue;
+
+        double start = [entry[@"startTime"] doubleValue];
+        double end = [entry[@"endTime"] doubleValue];
+        if (end <= start) end = start + (1.0 / 30.0);
+
+        SpliceKitTranscriptWord *word = [[SpliceKitTranscriptWord alloc] init];
+        word.text = text;
+        word.startTime = timelineStart + start;
+        word.endTime = timelineStart + end;
+        word.duration = end - start;
+        word.confidence = entry[@"confidence"] ? [entry[@"confidence"] doubleValue] : 1.0;
+        word.wordIndex = words.count;
+        word.sourceMediaTime = start;
+        word.sourceMediaOffset = 0;
+        word.sourceMediaPath = audioURL.path;
+        word.clipTimelineStart = timelineStart;
+        NSString *speaker = entry[@"speaker"];
+        if (speaker.length && speaker.length <= 3 && [speaker hasPrefix:@"S"]) {
+            speaker = [NSString stringWithFormat:@"Speaker %@", [speaker substringFromIndex:1]];
+        }
+        word.speaker = speaker.length ? speaker : @"Unknown";
+        [words addObject:word];
+    }
+
+    SpliceKit_log(@"[Transcript] Parakeet single file: %lu words", (unsigned long)words.count);
+
+    if (words.count == 0) {
+        [self setErrorState:@"Parakeet found no speech in that file."];
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @synchronized (self.mutableWords) {
+            [self.mutableWords removeAllObjects];
+            [self.mutableWords addObjectsFromArray:words];
+        }
+        [self.mutableSilences removeAllObjects];
+        [self detectSilences];
+        [self assignSpeakers];
+
+        self.status = SpliceKitTranscriptStatusReady;
+        self.errorMessage = nil;
+        [self rebuildTextView];
+        [self startPlayheadTimer];
+        self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
+        self.refreshButton.enabled = YES;
+        self.spinner.hidden = YES;
+        [self.spinner stopAnimation:nil];
+        self.progressBar.hidden = YES;
+        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses",
+            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count]];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
+    });
+}
+
 - (void)transcribeFromURL:(NSURL *)audioURL {
     [self transcribeFromURL:audioURL timelineStart:0 trimStart:0 trimDuration:HUGE_VAL];
 }
@@ -3816,10 +4039,26 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         self.deleteSilencesButton.enabled = NO;
     });
 
+    // Honour the selected engine. This path used to go straight to Apple Speech
+    // whatever the dropdown said, so transcribing a file with Parakeet selected
+    // silently ran a different engine — and failed outright on a Mac where
+    // speech recognition was never authorised, which is every freshly installed
+    // one. Parakeet needs no permission, so route it there when it is selected.
+    if (self.engine == SpliceKitTranscriptEngineParakeet) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [self transcribeFileWithParakeet:audioURL timelineStart:timelineStart];
+        });
+        return;
+    }
+
     [self requestSpeechAuthorizationWithCompletion:^(BOOL authorized) {
         if (!authorized) {
+            // Keep the specific reason the helper recorded; opening System Settings
+            // is still the right next step, but it must not replace the message.
             [self openSpeechRecognitionSettings];
-            [self setErrorState:@"Speech recognition not authorized. Opening System Settings..."];
+            if (!self.errorMessage) {
+                [self setErrorState:@"Speech recognition not authorized. Opening System Settings..."];
+            }
             return;
         }
 

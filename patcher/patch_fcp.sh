@@ -426,6 +426,26 @@ PLIST
 log "Framework installed"
 
 # ============================================================
+# Step 3b: Transcription helper binaries
+#
+# The transcript panel's Parakeet engine shells out to a Swift CLI rather than
+# linking the ASR stack into the injected dylib. Step 3 wipes and recreates the
+# framework, so it has to be re-installed on every run — including --rebuild.
+# Without it the panel reports a missing binary and transcribes nothing.
+#
+# Builds are cached in build/, so this is a no-op once warm. The caption panel's
+# Whisper engines are opt-in (--all) and not built here.
+#
+# Never fatal: a failed ASR build costs one engine, not the whole patch.
+# ============================================================
+step "Step 3b: Installing transcription helpers"
+
+if ! "$REPO_DIR/Scripts/build-transcribers.sh" --framework "$FW_DIR"; then
+    warn "Some transcription helpers are unavailable — see the messages above."
+    warn "Everything else in Final Cut Pro still works; re-run 'make install' to retry."
+fi
+
+# ============================================================
 # Step 4: Inject LC_LOAD_DYLIB
 # ============================================================
 step "Step 4: Injecting dylib into FCP binary"
