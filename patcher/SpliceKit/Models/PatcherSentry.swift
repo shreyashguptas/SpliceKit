@@ -1,239 +1,46 @@
 import Foundation
-import Sentry
+
+// Crash and error reporting for the patcher app — REMOVED.
+//
+// This fork is private and does not report crashes, errors, or breadcrumbs to
+// any remote service. The upstream implementation linked the Sentry Cocoa SDK
+// and uploaded to a hardcoded third-party DSN; it has been deleted.
+//
+// The call sites in SpliceKitApp.swift and PatcherModel.swift are kept working
+// by the no-op API below, so the patcher app still builds unchanged. Nothing
+// here touches the network.
+
+/// Local stand-in for the Sentry SDK's level type, kept so existing call sites
+/// that pass `level: .error` still compile without the SDK present.
+enum SentryLevel {
+    case none
+    case debug
+    case info
+    case warning
+    case error
+    case fatal
+}
 
 enum PatcherSentry {
-    private static let dsn = "https://56fa8ecde3c66d354606805ac2064c54@o4511243520966656.ingest.us.sentry.io/4511243525423104"
-    nonisolated(unsafe) private static var started = false
-    nonisolated(unsafe) private static var enabled = false
-    nonisolated(unsafe) private static var logsEnabled = false
-    nonisolated(unsafe) private static var previousRunSummary: [String: Any]?
-
-    private static func scrub(_ value: String) -> String {
-        value.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-    }
-
-    private static func scrub(_ value: Any) -> Any {
-        switch value {
-        case let string as String:
-            return scrub(string)
-        case let array as [Any]:
-            return array.map(scrub)
-        case let dict as [String: Any]:
-            return dict.mapValues(scrub)
-        default:
-            return value
-        }
-    }
-
-    private static func config() -> [String: Any]? {
-        guard let url = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist"),
-              var raw = NSDictionary(contentsOf: url) as? [String: Any] else {
-            return nil
-        }
-        let env = ProcessInfo.processInfo.environment
-        if let enableLogs = env["SPLICEKIT_SENTRY_ENABLE_LOGS"] ?? env["SPLICEKIT_SENTRY_LOGS_ENABLED"] {
-            raw["EnableLogs"] = enableLogs
-        }
-        return raw
-    }
-
-    private static func bool(_ value: Any?, default defaultValue: Bool) -> Bool {
-        switch value {
-        case let bool as Bool:
-            return bool
-        case let number as NSNumber:
-            return number.boolValue
-        case let string as String:
-            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "1", "true", "yes", "on":
-                return true
-            case "0", "false", "no", "off":
-                return false
-            default:
-                return defaultValue
-            }
-        default:
-            return defaultValue
-        }
-    }
-
-    private static func runtimeLogTail(named name: String, maxCharacters: Int = 3000) -> String? {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/SpliceKit")
-            .appendingPathComponent(name)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            return nil
-        }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if trimmed.count <= maxCharacters {
-            return scrub(trimmed)
-        }
-        let start = trimmed.index(trimmed.endIndex, offsetBy: -maxCharacters)
-        return scrub(String(trimmed[start...]))
-    }
-
-    private static func sanitize(_ event: Event) -> Event? {
-        event.user = nil
-        if let message = event.message?.message {
-            event.message?.message = scrub(message)
-        }
-        if let logger = event.logger {
-            event.logger = scrub(logger)
-        }
-        if let extra = event.extra {
-            event.extra = scrub(extra) as? [String: Any]
-        }
-        if let breadcrumbs = event.breadcrumbs {
-            event.breadcrumbs = breadcrumbs.map { crumb in
-                crumb.message = crumb.message.map(scrub)
-                if let data = crumb.data {
-                    crumb.data = scrub(data) as? [String: Any]
-                }
-                return crumb
-            }
-        }
-        return event
-    }
 
     static func start() {
-        guard !started else { return }
-        started = true
-
-        let config = config() ?? [:]
-
-        let environment = (config["Environment"] as? String) ?? "production"
-        let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
-        let releaseName = (config["ReleaseName"] as? String) ?? "splicekit@\(version)"
-        let enableLogs = bool(config["EnableLogs"], default: true)
-
-        SentrySDK.start { options in
-            options.dsn = Self.dsn
-            options.debug = true
-            options.environment = environment
-            options.releaseName = releaseName
-            options.dist = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)
-                ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
-            options.sendDefaultPii = true
-            options.enableAutoSessionTracking = false
-            options.enableNetworkBreadcrumbs = false
-            options.enableNetworkTracking = false
-            options.enableCaptureFailedRequests = false
-            options.enableAppHangTracking = false
-            options.enableMetricKit = false
-            options.tracesSampleRate = 0
-            options.maxBreadcrumbs = 150
-            options.enableLogs = enableLogs
-            options.beforeSend = sanitize
-            options.beforeSendLog = { log in
-                log.body = scrub(log.body)
-                return log
-            }
-            options.onLastRunStatusDetermined = { status, crashEvent in
-                guard status == .didCrash else { return }
-                var summary: [String: Any] = [:]
-                if let message = crashEvent?.message?.message, !message.isEmpty {
-                    summary["message"] = scrub(message)
-                }
-                if let reason = crashEvent?.exceptions?.first?.value(forKey: "value") as? String, !reason.isEmpty {
-                    summary["reason"] = scrub(reason)
-                }
-                previousRunSummary = summary
-            }
-        }
-
-        enabled = SentrySDK.isEnabled
-        logsEnabled = enabled && enableLogs
-        guard enabled else { return }
-
-        SentrySDK.configureScope { scope in
-            scope.setTag(value: "patcher", key: "component")
-            scope.setTag(value: "true", key: "splicekit_patcher")
-            scope.setTag(value: Bundle.main.bundleIdentifier ?? "com.splicekit.app", key: "bundle_id")
-            if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-                scope.setTag(value: version, key: "splicekit_version")
-            }
-            scope.setTag(value: environment, key: "environment")
-        }
-
-        if let summary = previousRunSummary {
-            captureMessage(
-                "SpliceKit patcher detected a crash on the previous run",
-                level: .error,
-                context: "patcher.last_run_crash",
-                extras: [
-                    "previous_log_tail": runtimeLogTail(named: "patcher.previous.log") ?? "",
-                    "summary": summary
-                ]
-            )
-        }
     }
 
     static func addBreadcrumb(_ message: String,
                               category: String = "patcher.log",
                               level: SentryLevel = .info,
                               data: [String: Any] = [:]) {
-        guard enabled, !message.isEmpty else { return }
-        let crumb = Breadcrumb(level: level, category: category)
-        crumb.type = "default"
-        crumb.origin = "splicekit.patcher"
-        crumb.message = scrub(message)
-        if !data.isEmpty {
-            crumb.data = scrub(data) as? [String: Any]
-        }
-        SentrySDK.addBreadcrumb(crumb)
-        log(message, category: category, level: level, data: data)
-    }
-
-    private static func log(_ message: String,
-                            category: String,
-                            level: SentryLevel,
-                            data: [String: Any]) {
-        guard enabled, logsEnabled, !message.isEmpty else { return }
-        var attributes = scrub(data) as? [String: Any] ?? [:]
-        attributes["component"] = "patcher"
-        attributes["category"] = scrub(category)
-        attributes["splicekit_surface"] = "patcher"
-
-        let body = scrub(message)
-        switch level {
-        case .fatal:
-            SentrySDK.logger.fatal(body, attributes: attributes)
-        case .error:
-            SentrySDK.logger.error(body, attributes: attributes)
-        case .warning:
-            SentrySDK.logger.warn(body, attributes: attributes)
-        case .debug:
-            SentrySDK.logger.debug(body, attributes: attributes)
-        default:
-            SentrySDK.logger.info(body, attributes: attributes)
-        }
+        _ = (message, category, level, data)
     }
 
     static func capture(error: Error, context: String, extras: [String: Any] = [:]) {
-        guard enabled else { return }
-        SentrySDK.capture(error: error) { scope in
-            scope.setTag(value: "patcher", key: "component")
-            scope.setTag(value: scrub(context), key: "patcher_context")
-            if !extras.isEmpty {
-                scope.setContext(value: scrub(extras) as? [String: Any] ?? [:], key: "patcher")
-            }
-            scope.setLevel(.error)
-        }
+        _ = (error, context, extras)
     }
 
     static func captureMessage(_ message: String,
                                level: SentryLevel = .warning,
                                context: String,
                                extras: [String: Any] = [:]) {
-        guard enabled, !message.isEmpty else { return }
-        SentrySDK.capture(message: scrub(message)) { scope in
-            scope.setTag(value: "patcher", key: "component")
-            scope.setTag(value: scrub(context), key: "patcher_context")
-            if !extras.isEmpty {
-                scope.setContext(value: scrub(extras) as? [String: Any] ?? [:], key: "patcher")
-            }
-            scope.setLevel(level)
-        }
+        _ = (message, level, context, extras)
     }
 }

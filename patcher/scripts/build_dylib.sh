@@ -20,9 +20,6 @@ CANONICAL_DYLIB_OUT="$REPO_DIR/build/SpliceKit"
 
 mkdir -p "$BUILD_OUT"
 
-# Ensure the vendored Sentry framework exists before Swift sources compile.
-bash "$REPO_DIR/Scripts/ensure_sentry_framework.sh"
-
 # Build everything via the Makefile (handles incremental builds)
 # Includes braw-prototype so the VT decoder + FormatReader bundles end up
 # at build/braw-prototype/{Codecs,FormatReaders}/*.bundle ready to ship.
