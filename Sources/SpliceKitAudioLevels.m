@@ -356,6 +356,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
         else if (!haveRange) reason = @"no timeline range reported for this item";
         if (reason) {
             [skipped addObject:@{@"handle": c[@"handle"], @"name": c[@"name"], @"reason": reason}];
+            SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], reason);
             continue;
         }
         double start = [c[@"startSeconds"] doubleValue], end = [c[@"endSeconds"] doubleValue];
@@ -415,6 +416,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             // otherwise hand back the first clip inside it under the container's name.
             if ([kind isEqualToString:@"compound clip"]) {
                 entry[@"skipped"] = @"compound clip: no single source media file (open it to analyse the clips inside)";
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
@@ -425,6 +427,21 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             }
             if ([kind isEqualToString:@"connected storyline"]) {
                 entry[@"skipped"] = @"connected storyline container: its clips are analysed individually";
+                [clips addObject:entry];
+                continue;
+            }
+            // The media resolver digs into nested containers for the first media component
+            // it finds. For an ordinary clip that is a direct child; two or more levels down
+            // means a compound, multicam or synchronized clip whose first file is not this
+            // clip's content -- skipped rather than analysed against the wrong file (QA
+            // run 2: a compound clip reported the second clip's file for its whole length).
+            NSInteger mediaDepth = [src[@"mediaComponentDepth"] respondsToSelector:@selector(integerValue)]
+                ? [src[@"mediaComponentDepth"] integerValue] : -1;
+            if (mediaDepth >= 2) {
+                entry[@"skipped"] = [NSString stringWithFormat:
+                    @"its source media file sits inside a nested container (%ld levels down), the way compound, "
+                    @"multicam and synchronized clips are built; the first file inside would give levels for the "
+                    @"wrong content, so it is skipped", (long)mediaDepth];
                 [clips addObject:entry];
                 continue;
             }
@@ -444,7 +461,16 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             sourceOut[@"sourceStartSelector"] = src[@"sourceStartSelector"] ?: @"none";
             sourceOut[@"mediaOrigin"] = src[@"mediaOrigin"] ?: @0;
             sourceOut[@"mediaOriginSelector"] = src[@"mediaOriginSelector"] ?: @"none";
+            BOOL sourceStartKnown = SKAL_bool(src[@"sourceStartKnown"], YES);
+            sourceOut[@"sourceStartKnown"] = @(sourceStartKnown);
+            if (mediaDepth >= 0) sourceOut[@"mediaComponentDepth"] = @(mediaDepth);
             entry[@"source"] = sourceOut;
+            NSMutableArray<NSString *> *notes = [NSMutableArray array];
+            if (!sourceStartKnown) {
+                [notes addObject:@"the clip's start point in its source media could not be read from FCP's clip object "
+                                 @"(clippedRange, trimStartTime and trimmedOffset did not answer); the levels are taken "
+                                 @"from the start of the media file, which is right only for a clip whose start is not trimmed"];
+            }
             entry[@"retimed"] = src[@"retimed"] ?: @"unknown";
             if (src[@"retimeSelector"]) entry[@"retimeSelector"] = src[@"retimeSelector"];
             if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {     // off the main thread
@@ -462,18 +488,26 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             }
             double fileStart = SKAL_number(src[@"fileStart"], 0.0) + (aStart - clipStart);
             if (fileStart < 0) {
-                // The clip starts before its media file does: the file's first sample sits at
-                // timeline time aStart - fileStart, so the analysed range starts there.
+                // FCP's readings place the clip's start before its media file's origin. The
+                // file's first sample then sits at timeline time aStart - fileStart, so the
+                // analysed range starts there; the readings are named so this can be checked.
                 double missing = -fileStart;
                 aStart += missing;
                 fileStart = 0;
                 if (aEnd - aStart < 0.001) {
-                    entry[@"skipped"] = @"the clip lies entirely before the start of its media file";
+                    entry[@"skipped"] = [NSString stringWithFormat:
+                        @"FCP's readings place the whole clip before the start of its media file (source start %.3f s via %@, "
+                        @"media origin %.3f s via %@): the clip-to-file mapping does not fit this clip, so it is not analysed",
+                        SKAL_number(src[@"sourceStart"], 0.0), sourceOut[@"sourceStartSelector"],
+                        SKAL_number(src[@"mediaOrigin"], 0.0), sourceOut[@"mediaOriginSelector"]];
+                    SpliceKit_log(@"[AudioLevels] %@ skipped: %@", c[@"handle"], entry[@"skipped"]);
                     [clips addObject:entry];
                     continue;
                 }
-                entry[@"note"] = [NSString stringWithFormat:@"the clip's first %.3f s lie before the start of its media "
-                                  @"file; the levels start at %.3f s on the timeline", missing, aStart];
+                [notes addObject:[NSString stringWithFormat:
+                    @"FCP's readings place the clip's first %.3f s before the start of its media file (source start via %@, "
+                    @"media origin via %@); the levels start at %.3f s on the timeline, where the file does",
+                    missing, sourceOut[@"sourceStartSelector"], sourceOut[@"mediaOriginSelector"], aStart]];
             }
             double fileEnd = fileStart + (aEnd - aStart);
             sourceOut[@"fileStart"] = SKAL_round3(fileStart);
@@ -485,9 +519,21 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 @"--slice", SKAL_arg(sliceSeconds), @"--max-slices", [@(maxSlices) stringValue]]];
             if (perChannel) [args addObject:@"--per-channel"];
             NSString *helperError = nil;
+            NSDate *helperStarted = [NSDate date];
             NSDictionary *r = SKAL_runHelper(helper, args, helperTimeout, &helperError);
+            SpliceKit_log(@"[AudioLevels] %@ \"%@\" file %.3f-%.3f s of %@: %@ in %.2f s", c[@"handle"], c[@"name"],
+                          fileStart, fileEnd, [path lastPathComponent], r ? @"decoded" : (helperError ?: @"failed"),
+                          -[helperStarted timeIntervalSinceNow]);
             if (!r) {
-                entry[@"error"] = helperError ?: @"audio-levels failed";
+                NSString *err = helperError ?: @"audio-levels failed";
+                if ([err rangeOfString:@"empty range"].location != NSNotFound) {
+                    err = [NSString stringWithFormat:
+                        @"the file range %.3f-%.3f s lies outside the media file (%@): the clip-to-file mapping from FCP's "
+                        @"readings (source start via %@, media origin via %@) does not fit this clip",
+                        fileStart, fileEnd, err, sourceOut[@"sourceStartSelector"], sourceOut[@"mediaOriginSelector"]];
+                }
+                entry[@"error"] = err;
+                if (notes.count > 0) entry[@"note"] = [notes componentsJoinedByString:@" | "];
                 [clips addObject:entry];
                 continue;
             }
@@ -554,10 +600,15 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 @"edgeSeconds": SKAL_round3((double)edgeSlices * helperSlice),
             };
             if ([entry[@"retimed"] isKindOfClass:[NSNumber class]] && [entry[@"retimed"] boolValue]) {
-                entry[@"note"] = @"retimed clip: the levels are mapped assuming normal speed (100%), so the file "
-                                 @"range analysed is as long as the clip; for a retimed clip the levels and their "
-                                 @"times do not match what Final Cut Pro plays";
+                // The flag is FCP's; what it covers beyond a speed change (a frame-rate
+                // conform, for one) SpliceKit cannot tell, so the note says what was read.
+                [notes addObject:[NSString stringWithFormat:
+                    @"FCP's clip object answers %@ = true (a speed change, or possibly a frame-rate conform; SpliceKit "
+                    @"cannot tell which); the levels are mapped assuming normal speed (100%%), so for a clip that really "
+                    @"is retimed the levels and their times do not match what Final Cut Pro plays",
+                    entry[@"retimeSelector"] ?: @"its retime flag"]];
             }
+            if (notes.count > 0) entry[@"note"] = [notes componentsJoinedByString:@" | "];
             analyzed++;
             [clips addObject:entry];
         }
@@ -636,5 +687,8 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
     result[@"cuts"] = cuts;
     result[@"skipped"] = skipped;
     result[@"elapsedSeconds"] = SKAL_round3(-[startedAt timeIntervalSinceNow]);
+    SpliceKit_log(@"[AudioLevels] %lu clip(s) considered, %ld analysed, %lu skipped, %lu cut(s), %.2f s",
+                  (unsigned long)candidates.count, (long)analyzed, (unsigned long)skipped.count,
+                  (unsigned long)cuts.count, -[startedAt timeIntervalSinceNow]);
     return result;
 }

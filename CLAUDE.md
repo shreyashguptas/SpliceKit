@@ -223,7 +223,8 @@ trim_clip("obj_12", edge="end", to_seconds=8.0)                   # ripple trim 
 This is FCP's default trim, a ripple edit (dragging a clip's start or end point with the Select tool):
 subsequent clips move so no gap is left, and connected clips move with the clips they are attached to.
 A start-point trim on the primary storyline keeps the clip in place and changes its duration.
-`delta_seconds=-0.5` works too (negative = edit point earlier). Undo with `timeline_action("undo")`.
+`delta_seconds=-0.5` works too (negative = edit point earlier). Each trim is one undo step (FCP:
+Edit > Undo Trim; inside a `begin_edit` group, that group's step). Undo with `timeline_action("undo")`.
 
 ### Look inside a clip
 ```
@@ -259,7 +260,11 @@ follow the clip's volume and effects): the levels are those of the source media 
 SpliceKit's `audio-levels` helper (`tools/audio-levels.swift`, built by `make install`), so FCP's
 volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied, the same way
 `get_clip_info`'s frame is the raw footage. The mapping assumes normal speed (100%); `retimed` is
-true/false when a retime flag is found on FCP's clip object and "unknown" otherwise. Transitions,
+FCP's own flag (`isRetimed`, which a frame-rate conform may also set) when the clip object answers
+one, and "unknown" otherwise. The clip's start point in its source media is read from FCP's
+`clippedRange` (else `trimStartTime` / `trimmedOffset`) against the media's timecode origin
+(`unclippedRange`), the same reading the transcript panel uses; when none answers, the levels start
+at the file's start and the answer says so. Transitions,
 gap clips, titles and generators have no audio of their own; a compound or multicam clip has no
 single source file; both are listed as skipped. A harsh audio cut: read the outgoing clip's end and the jump
 (a single handle brings its neighbours along), then `trim_clip`, a fade

@@ -5146,7 +5146,8 @@ def _render_audio_levels(r: dict, detail: str) -> str:
                      f"{_s3(st.get('tailSilenceSeconds'))} below threshold, last window RMS "
                      f"{_db(st.get('tailRmsDb'))} (peak {_db(st.get('tailPeakDb'))}); window {_ms(st.get('edgeSeconds'))}")
         if clip.get("retimed") is True and not clip.get("note"):
-            lines.append("  retimed: yes (levels mapped at normal speed; they do not match playback)")
+            lines.append(f"  retimed: FCP's {clip.get('retimeSelector') or 'retime flag'} is true (a speed change, or "
+                         "possibly a frame-rate conform); levels mapped at normal speed, so they may not match playback")
         elif clip.get("retimed") == "unknown":
             lines.append("  retimed: unknown (no retime flag found on this clip's object; if it is retimed, the "
                          "levels do not match playback)")

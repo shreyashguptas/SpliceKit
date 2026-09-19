@@ -96,6 +96,7 @@ static BOOL SpliceKit_mixerIsSkippableItem(id item);
 static BOOL SpliceKit_boolForSelector(id item, NSString *selectorName);
 static NSInteger SpliceKit_laneForItem(id item);
 static NSString *SpliceKit_displayNameForItem(id item);
+static NSDictionary *SpliceKit_describeWindow(NSWindow *window);   // dialog tools, later in the file
 static NSString *SpliceKit_readClipRole(id clip);
 static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey);
 static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey);
@@ -1228,13 +1229,18 @@ static BOOL SpliceKit_tryReadBoolSelector(id obj, NSString *name, BOOL *out) {
 // compound clip). When no flag answers, the item is not called compound.
 static BOOL SpliceKit_itemIsCompoundClip(id item) {
     if (!item) return NO;
-    BOOL flag = NO;
-    if (SpliceKit_tryReadBoolSelector(item, @"isCompoundClip", &flag)) return flag;
+    BOOL flag = NO, answered = NO;
+    // Verified on FCP 12.3: an ordinary clip (FFAnchoredCollection) answers
+    // isCompoundClip = NO and isReferenceClip = NO; a compound clip on the timeline is an
+    // FFAnchoredClip that has no isCompoundClip but answers isReferenceClip = YES (it
+    // refers to the compound clip's own sequence in the event).
+    if (SpliceKit_tryReadBoolSelector(item, @"isCompoundClip", &flag)) { if (flag) return YES; answered = YES; }
+    if (SpliceKit_tryReadBoolSelector(item, @"isReferenceClip", &flag)) { if (flag) return YES; answered = YES; }
+    if (answered) return NO;
     // No flag to ask on this item's class: fall back to the class name, but never on
-    // "Collection" (that is the FFAnchoredCollection every ordinary audio+video clip
-    // is). Whether a timeline compound clip lands here at all is unverified live.
+    // "Collection" (that is what every ordinary audio+video clip is).
     NSString *cls = NSStringFromClass([item class]) ?: @"";
-    return [cls containsString:@"Sequence"] || [cls containsString:@"Compound"];
+    return [cls containsString:@"Sequence"] || [cls containsString:@"Compound"] || [cls containsString:@"AnchoredClip"];
 }
 
 // Same for a multicam clip (FCP: Multicam Clip). Selector names unverified on a
@@ -1291,16 +1297,34 @@ static NSString *SpliceKit_tryReadStringSelector(id obj, NSString *name) {
     return nil;
 }
 
-// end = start + duration, normalised to start's timescale (same math the spine loop uses).
+// end = start + duration. When the two timescales differ the sum is formed in the finer
+// one when it is a multiple of the other (exact), else in the duration's timescale with
+// rounding. The earlier integer division in the start's timescale truncated: a clip at
+// time zero (timescale 1) and 18.018 s long reported an end of 18.000 s (QA run 2).
 static SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
-    SpliceKit_CMTime endTime = range.start;
-    if (range.duration.timescale == range.start.timescale) {
-        endTime.value = range.start.value + range.duration.value;
-    } else if (range.duration.timescale > 0 && range.start.timescale > 0) {
-        endTime.value = range.start.value +
-            (range.duration.value * range.start.timescale / range.duration.timescale);
+    SpliceKit_CMTime start = range.start, duration = range.duration;
+    if (duration.timescale <= 0) return start;
+    if (start.timescale <= 0) return duration;
+    if (duration.timescale == start.timescale) {
+        start.value += duration.value;
+        return start;
     }
-    return endTime;
+    if (duration.timescale % start.timescale == 0) {
+        int64_t factor = duration.timescale / start.timescale;
+        SpliceKit_CMTime end = duration;
+        end.value = start.value * factor + duration.value;
+        end.flags = start.flags; end.epoch = start.epoch;
+        return end;
+    }
+    if (start.timescale % duration.timescale == 0) {
+        int64_t factor = start.timescale / duration.timescale;
+        start.value += duration.value * factor;
+        return start;
+    }
+    SpliceKit_CMTime end = duration;
+    end.value = (int64_t)llround((double)start.value * (double)duration.timescale / (double)start.timescale) + duration.value;
+    end.flags = start.flags; end.epoch = start.epoch;
+    return end;
 }
 
 static SpliceKit_CMTime SpliceKit_timeFromSeconds(double seconds, int32_t timescale) {
@@ -1878,15 +1902,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                                 SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                                     primaryObj, erSel, item);
                                 info[@"startTime"] = SpliceKit_serializeCMTime(range.start);
-                                // Compute end time = start + duration
-                                SpliceKit_CMTime endTime = range.start;
-                                if (range.duration.timescale == range.start.timescale) {
-                                    endTime.value = range.start.value + range.duration.value;
-                                } else if (range.duration.timescale > 0) {
-                                    endTime.value = range.start.value +
-                                        (range.duration.value * range.start.timescale / range.duration.timescale);
-                                }
-                                info[@"endTime"] = SpliceKit_serializeCMTime(endTime);
+                                info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
                             } @catch (NSException *e) {
                                 // Silently skip if effectiveRangeOfObject: fails for this item
                             }
@@ -3453,6 +3469,51 @@ static NSUInteger SpliceKit_transitionCount(id timeline);
 // FCP's editing engine. These were found by disassembling Flexo.framework
 // and looking at IB action connections, responder chain handlers, and
 // menu item targets.
+// After a timeline action: did it open a sheet or a modal dialog (Final Cut Pro asking
+// for a name, a confirmation...)? The action itself has returned, so the answer would
+// otherwise read "ok" while nothing has happened yet (QA run 2: createCompoundClip and
+// its Compound Clip Name sheet). Reported as dialogPending + dialog, never as an error;
+// a dialog that was already open before the action is reported the same way.
+static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSString *action) {
+    if (![result isKindOfClass:[NSDictionary class]] || result[@"error"]) return result;
+    __block NSDictionary *dialog = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            for (int pass = 0; pass < 2 && !dialog; pass++) {
+                // A sheet is attached on the next run-loop turn; give it one short one.
+                if (pass == 1) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+                NSWindow *modal = [NSApp modalWindow];
+                if (modal) {
+                    NSMutableDictionary *d = [SpliceKit_describeWindow(modal) mutableCopy];
+                    d[@"type"] = @"modal";
+                    dialog = d;
+                    break;
+                }
+                for (NSWindow *w in [NSApp windows]) {
+                    NSWindow *sheet = [w attachedSheet];
+                    if (!sheet) continue;
+                    NSMutableDictionary *d = [SpliceKit_describeWindow(sheet) mutableCopy];
+                    d[@"type"] = @"sheet";
+                    d[@"parentWindow"] = [w title] ?: @"";
+                    dialog = d;
+                    break;
+                }
+            }
+        } @catch (NSException *e) { dialog = nil; }
+    });
+    if (!dialog) return result;
+    NSMutableDictionary *out = [result mutableCopy];
+    out[@"dialogPending"] = @YES;
+    out[@"dialog"] = dialog;
+    NSString *title = [dialog[@"title"] isKindOfClass:[NSString class]] ? dialog[@"title"] : @"";
+    out[@"note"] = [NSString stringWithFormat:
+        @"Final Cut Pro has a %@ open%@ after this action; nothing changes on the timeline until it is answered. "
+        @"detect_dialog() shows its fields and buttons; fill_dialog_field / click_dialog_button / dismiss_dialog answer it.",
+        dialog[@"type"], title.length ? [NSString stringWithFormat:@" (\"%@\")", title] : @""];
+    SpliceKit_log(@"[Action] %@: a %@ is open afterwards (%@)", action, dialog[@"type"], title);
+    return out;
+}
+
 NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
     SpliceKit_installEffectDragSwizzlesNow();
 
@@ -4304,11 +4365,11 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
     if (result[@"error"]) {
         NSString *errMsg = result[@"error"];
         if ([errMsg containsString:@"does not respond"] || [errMsg containsString:@"No active"]) {
-            return SpliceKit_sendAppAction(selector);
+            result = SpliceKit_sendAppAction(selector);
         }
     }
 
-    return result;
+    return SpliceKit_annotatePendingDialog(result, action);
 }
 
 #pragma mark - Direct Flexo Action Methods (Parameterized)
@@ -7425,6 +7486,23 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 deltaTime.value = deltaFrames * frameDuration.value;   // exact frame multiple
             }
 
+            // The trim is one undo step (FCP: Edit > Undo Trim). operationTrimEdit alone
+            // changes the model without registering an undoable action -- undo answered
+            // "nothing to undo" and the trim was permanent (QA run 2) -- so it is wrapped
+            // in the same actionBegin: / actionEnd:save:error: pair begin_edit uses, unless
+            // a begin_edit group is open, whose step then covers it.
+            NSString *undoStepName = @"Trim";
+            BOOL openedUndoStep = NO;
+            SEL undoBeginSel = NSSelectorFromString(@"actionBegin:");
+            SEL undoEndSel = NSSelectorFromString(@"actionEnd:save:error:");
+            if (!sOpenEditGroupName && [sequence respondsToSelector:undoBeginSel] &&
+                [sequence respondsToSelector:undoEndSel]) {
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(sequence, undoBeginSel, undoStepName);
+                    openedUndoStep = YES;
+                } @catch (NSException *e) { openedUndoStep = NO; }
+            }
+
             if ([sequence respondsToSelector:@selector(beginEditing)]) {
                 ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(beginEditing));
             }
@@ -7454,6 +7532,27 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(endEditing));
             }
 
+            NSString *undoStepError = nil;
+            if (openedUndoStep) {
+                NSError *undoEndErr = nil;
+                @try {
+                    if (SpliceKit_selectorReturnsBOOL(sequence, undoEndSel)) {
+                        BOOL endOK = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+                            sequence, undoEndSel, undoStepName, YES, &undoEndErr);
+                        if (!endOK && !undoEndErr) undoStepError = @"actionEnd:save:error: returned NO";
+                    } else {
+                        ((void (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+                            sequence, undoEndSel, undoStepName, YES, &undoEndErr);
+                    }
+                } @catch (NSException *e) {
+                    undoStepError = e.reason ?: @"actionEnd:save:error: raised an exception";
+                }
+                if (undoEndErr) undoStepError = undoEndErr.localizedDescription ?: [undoEndErr description];
+                SpliceKit_log(@"[Trim] %@ %@ edge %+.4fs: operationTrimEdit %@; undo step \"%@\" closed%@",
+                              handle, edge, delta, ok ? @"OK" : @"failed", undoStepName,
+                              undoStepError ? [NSString stringWithFormat:@" with error: %@", undoStepError] : @"");
+            }
+
             // Re-read the clip's absolute range and judge the result by its duration.
             SpliceKit_CMTimeRange afterRange;
             BOOL afterReadable = SpliceKit_tryReadTimelineRange(primaryObj, item, &afterRange);
@@ -7471,6 +7570,15 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             double endShift = afterEnd - beforeEnd;
 
             NSMutableDictionary *out = [NSMutableDictionary dictionary];
+            if (openedUndoStep) {
+                out[@"undoStep"] = undoStepName;
+                if (undoStepError) out[@"undoStepError"] = undoStepError;
+            } else if (sOpenEditGroupName) {
+                out[@"undoStep"] = sOpenEditGroupName;
+                out[@"undoStepNote"] = @"inside the open begin_edit group; end_edit closes the step";
+            } else {
+                out[@"undoStepNote"] = @"the sequence does not answer actionBegin: / actionEnd:save:error:, so no undo step could be registered for this trim";
+            }
             out[@"handle"] = handle;
             out[@"name"] = name;
             out[@"edge"] = edge;
@@ -7575,10 +7683,13 @@ static BOOL SpliceKit_clipInfoBoolParam(NSDictionary *params, NSString *key, BOO
 // The media component that carries a clip's source media. A compound clip,
 // connected storyline or multicam item is a collection: dig into containedItems
 // for the first FF*MediaComponent (bounded depth), as the stabilization code does.
-static id SpliceKit_clipInfoMediaComponentAtDepth(id item, int depth) {
+// outDepth: 0 when `item` is the media component itself, 1 for a direct child (an
+// ordinary clip with video and audio: the FFAnchoredCollection holding its components),
+// 2 or more when it sits inside a nested container (compound, multicam, synchronized).
+static id SpliceKit_clipInfoMediaComponentAtDepth(id item, int depth, int *outDepth) {
     if (!item || depth > 4) return nil;
     NSString *cls = NSStringFromClass([item class]) ?: @"";
-    if ([cls containsString:@"MediaComponent"]) return item;
+    if ([cls containsString:@"MediaComponent"]) { if (outDepth) *outDepth = depth; return item; }
     if (![item respondsToSelector:@selector(containedItems)]) return nil;
     NSArray *contained = nil;
     @try {
@@ -7587,17 +7698,22 @@ static id SpliceKit_clipInfoMediaComponentAtDepth(id item, int depth) {
     } @catch (NSException *e) { contained = nil; }
     for (id child in contained) {
         NSString *childClass = NSStringFromClass([child class]) ?: @"";
-        if ([childClass containsString:@"MediaComponent"]) return child;
+        if ([childClass containsString:@"MediaComponent"]) { if (outDepth) *outDepth = depth + 1; return child; }
     }
     for (id child in contained) {
-        id found = SpliceKit_clipInfoMediaComponentAtDepth(child, depth + 1);
+        id found = SpliceKit_clipInfoMediaComponentAtDepth(child, depth + 1, outDepth);
         if (found) return found;
     }
     return nil;
 }
 
 static id SpliceKit_clipInfoMediaComponent(id item) {
-    return SpliceKit_clipInfoMediaComponentAtDepth(item, 0);
+    return SpliceKit_clipInfoMediaComponentAtDepth(item, 0, NULL);
+}
+
+static id SpliceKit_clipInfoMediaComponentWithDepth(id item, int *outDepth) {
+    if (outDepth) *outDepth = -1;
+    return SpliceKit_clipInfoMediaComponentAtDepth(item, 0, outDepth);
 }
 
 // FCP's names for a media representation (Info inspector > Available Media
@@ -7950,8 +8066,8 @@ static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasA
         return @"generator";
     }
     if (SpliceKit_boolForSelector(item, @"isConnectedStoryline")) return @"connected storyline";
-    if (SpliceKit_itemIsCompoundClip(item)) return @"compound clip";
     if (SpliceKit_itemIsMulticamClip(item)) return @"multicam clip";
+    if (SpliceKit_itemIsCompoundClip(item)) return @"compound clip";
     // An FFAnchoredCollection that is none of those is an ordinary clip: FCP wraps a
     // clip that carries both video and audio in a collection of media components.
     if (hasVideo) return @"video clip";
@@ -7969,6 +8085,38 @@ static double SpliceKit_clipInfoFrameTime(double clipStart, double clipEnd, BOOL
     if (requested < clipStart) { if (outClamped) *outClamped = YES; return clipStart; }
     if (requested > lastInside) { if (outClamped) *outClamped = YES; return lastInside; }
     return requested;
+}
+
+// The clip's start point in its source media, in the media's own time (which starts at
+// the media's timecode origin, see unclippedRange): read from the first of `targets`
+// (the timeline item, then its media component) that answers clippedRange (its start;
+// the reading the transcript panel's clip-to-file conversion is built on and that FCP
+// 12.3's clips answer), then trimStartTime, then trimmedOffset. Returns NO when none
+// answers; *outSelector names the reading, or "none". Without a source start there is
+// nothing to subtract the origin from, so callers take the file start as 0 and say so
+// -- subtracting the origin from a 0 that was never read is what placed every clip
+// with a start timecode tens of thousands of seconds before its file (QA run 2).
+static BOOL SpliceKit_readSourceStart(NSArray *targets, SpliceKit_CMTime *outTime, NSString **outSelector) {
+    if (outSelector) *outSelector = @"none";
+    for (id target in targets) {
+        SpliceKit_CMTimeRange clipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        if (SpliceKit_tryReadCMTimeRangeSelector(target, @"clippedRange", &clipped)) {
+            if (outTime) *outTime = clipped.start;
+            if (outSelector) *outSelector = @"clippedRange";
+            return YES;
+        }
+    }
+    for (NSString *name in @[@"trimStartTime", @"trimmedOffset"]) {
+        for (id target in targets) {
+            SpliceKit_CMTime t = {0, 0, 0, 0};
+            if (SpliceKit_tryReadCMTimeSelector(target, name, &t)) {
+                if (outTime) *outTime = t;
+                if (outSelector) *outSelector = name;
+                return YES;
+            }
+        }
+    }
+    return NO;
 }
 
 // Source media of one timeline item for timeline.getAudioLevels (SpliceKitAudioLevels.m):
@@ -7989,7 +8137,9 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
         out[@"kind"] = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio) ?: @"";
         out[@"isCollection"] = @([cls containsString:@"Collection"]);
 
-        id mediaComp = SpliceKit_clipInfoMediaComponent(item);
+        int mediaDepth = -1;
+        id mediaComp = SpliceKit_clipInfoMediaComponentWithDepth(item, &mediaDepth);
+        out[@"mediaComponentDepth"] = @(mediaDepth);
         NSMutableArray *targets = [NSMutableArray arrayWithObject:item];
         if (mediaComp && mediaComp != item) [targets addObject:mediaComp];
 
@@ -8001,15 +8151,8 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
 
         SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
         NSString *sourceStartSelector = @"none";
-        for (id target in targets) {
-            if (SpliceKit_tryReadCMTimeSelector(target, @"trimStartTime", &sourceStart)) {
-                sourceStartSelector = @"trimStartTime"; break;
-            }
-            if (SpliceKit_tryReadCMTimeSelector(target, @"trimmedOffset", &sourceStart)) {
-                sourceStartSelector = @"trimmedOffset"; break;
-            }
-        }
-        double sourceStartSeconds = (sourceStart.timescale > 0) ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+        BOOL haveSourceStart = SpliceKit_readSourceStart(targets, &sourceStart, &sourceStartSelector);
+        double sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
         SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         NSString *mediaOriginSelector = @"none";
         double mediaOriginSeconds = 0.0;
@@ -8022,9 +8165,10 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
         }
         out[@"sourceStart"] = @(sourceStartSeconds);
         out[@"sourceStartSelector"] = sourceStartSelector;
+        out[@"sourceStartKnown"] = @(haveSourceStart);
         out[@"mediaOrigin"] = @(mediaOriginSeconds);
         out[@"mediaOriginSelector"] = mediaOriginSelector;
-        out[@"fileStart"] = @(sourceStartSeconds - mediaOriginSeconds);
+        out[@"fileStart"] = @(haveSourceStart ? (sourceStartSeconds - mediaOriginSeconds) : 0.0);
 
         if (mediaURL) {
             // No file-system access here: this runs on the main thread, and a stat on an
@@ -8088,6 +8232,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
     __block double clipEndSeconds = 0.0;
     __block double sourceStartSeconds = 0.0;
     __block double mediaOriginSeconds = 0.0;
+    __block BOOL sourceStartKnown = NO;
     __block BOOL haveRange = NO;
     __block BOOL sourceExists = NO;
 
@@ -8202,19 +8347,14 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
             }
 
-            // Source start point (trimStartTime, else trimmedOffset) and where the
-            // source media starts (unclippedRange.start, media component first).
+            // Source start point (clippedRange.start, else trimStartTime, else trimmedOffset;
+            // see SpliceKit_readSourceStart) and where the source media starts
+            // (unclippedRange.start, media component first).
             SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
             NSString *sourceStartSelector = @"none";
-            for (id target in probeTargets) {
-                if (SpliceKit_tryReadCMTimeSelector(target, @"trimStartTime", &sourceStart)) {
-                    sourceStartSelector = @"trimStartTime"; break;
-                }
-                if (SpliceKit_tryReadCMTimeSelector(target, @"trimmedOffset", &sourceStart)) {
-                    sourceStartSelector = @"trimmedOffset"; break;
-                }
-            }
-            sourceStartSeconds = (sourceStart.timescale > 0) ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+            BOOL haveSourceStart = SpliceKit_readSourceStart(probeTargets, &sourceStart, &sourceStartSelector);
+            sourceStartKnown = haveSourceStart;
+            sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
             SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *mediaOriginSelector = @"none";
             mediaOriginSeconds = 0.0;
@@ -8231,7 +8371,9 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 NSString *path = mediaURL.path ?: (mediaURL.absoluteString ?: @"");
                 BOOL exists = path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:path];
                 sourceExists = exists;
-                double fileStart = sourceStartSeconds - mediaOriginSeconds;
+                // Without a source start there is nothing to subtract the origin from: the
+                // file start is taken as 0 (right for a clip whose start is not trimmed).
+                double fileStart = sourceStartKnown ? (sourceStartSeconds - mediaOriginSeconds) : 0.0;
                 local[@"sourceMedia"] = @{
                     @"path": path,
                     @"fileName": mediaURL.lastPathComponent ?: @"",
@@ -8240,6 +8382,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                     @"urlSource": urlSource ?: @"",
                     @"sourceStart": @(sourceStartSeconds),
                     @"sourceStartSelector": sourceStartSelector,
+                    @"sourceStartKnown": @(sourceStartKnown),
                     @"mediaOrigin": @(mediaOriginSeconds),
                     @"mediaOriginSelector": mediaOriginSelector,
                     @"fileStart": @(fileStart),
@@ -8326,11 +8469,12 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
         double timelineTime = SpliceKit_clipInfoFrameTime(clipStartSeconds, clipEndSeconds,
                                                           haveFrameTime, frameTimeParam, &clamped);
         double sourceTime = sourceStartSeconds + (timelineTime - clipStartSeconds);
-        double fileTime = sourceTime - mediaOriginSeconds;
+        double fileTime = sourceStartKnown ? (sourceTime - mediaOriginSeconds) : (timelineTime - clipStartSeconds);
         NSMutableDictionary *request = [NSMutableDictionary dictionary];
         request[@"timelineTime"] = @(timelineTime);
         request[@"sourceTime"] = @(sourceTime);
         request[@"mediaOrigin"] = @(mediaOriginSeconds);
+        request[@"sourceStartKnown"] = @(sourceStartKnown);
         request[@"fileTime"] = @(fileTime);
         if (clamped) request[@"frameTimeClamped"] = @YES;
 
@@ -8750,13 +8894,7 @@ static NSArray *SpliceKit_collectExportableClips(id primaryObj, NSSet *selectedS
                 id n = ((id (*)(id, SEL))objc_msgSend)(item, @selector(displayName));
                 if (n) name = n;
             }
-            SpliceKit_CMTime endTime = range.start;
-            if (range.duration.timescale == range.start.timescale) {
-                endTime.value = range.start.value + range.duration.value;
-            } else if (range.duration.timescale > 0) {
-                endTime.value = range.start.value +
-                    (range.duration.value * range.start.timescale / range.duration.timescale);
-            }
+            SpliceKit_CMTime endTime = SpliceKit_endTimeForRange(range);
             [clips addObject:@{
                 @"name": name,
                 @"startTime": SpliceKit_serializeCMTime(range.start),
@@ -16101,6 +16239,10 @@ static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                     info[@"index"] = @(clipIndex++);
                     info[@"event"] = eventName;
                     info[@"class"] = NSStringFromClass([clip class]);
+                    // A project sits in the browser next to the clips (FCP's isProject flag);
+                    // it is not a source clip for add_clip_to_timeline.
+                    BOOL isProject = NO;
+                    if (SpliceKit_tryReadBoolSelector(clip, @"isProject", &isProject)) info[@"isProject"] = @(isProject);
 
                     if ([clip respondsToSelector:@selector(displayName)]) {
                         id name = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName));
@@ -16216,13 +16358,7 @@ static NSDictionary *SpliceKit_browserTimelineItemSummary(id item, id container)
                 summary[@"startTime"] = SpliceKit_serializeCMTime(range.start);
             }
             if (SpliceKit_browserCMTimeIsUsable(range.duration)) {
-                SpliceKit_CMTime endTime = range.start;
-                if (range.duration.timescale == range.start.timescale) {
-                    endTime.value = range.start.value + range.duration.value;
-                } else if (range.duration.timescale > 0 && range.start.timescale > 0) {
-                    endTime.value = range.start.value +
-                        (range.duration.value * range.start.timescale / range.duration.timescale);
-                }
+                SpliceKit_CMTime endTime = SpliceKit_endTimeForRange(range);
                 if (SpliceKit_browserCMTimeIsUsable(endTime)) {
                     summary[@"endTime"] = SpliceKit_serializeCMTime(endTime);
                 }
@@ -16840,6 +16976,25 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             // A handle from get_timeline_clips names an item already on the timeline; this
             // edit places source clips from the browser. Checked by object identity against
             // the same walk the result diff uses, so it cannot be fooled by a reused handle.
+            // A project is not a source clip: Final Cut Pro does not paste a project into
+            // a timeline (the edit runs and places nothing), and the open timeline's own
+            // project least of all.
+            {
+                BOOL clipIsProject = NO;
+                BOOL flagged = SpliceKit_tryReadBoolSelector(clip, @"isProject", &clipIsProject);
+                id currentSequence = [timelineModule respondsToSelector:@selector(sequence)]
+                    ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, @selector(sequence)) : nil;
+                if ((flagged && clipIsProject) || (currentSequence && clip == currentSequence)) {
+                    NSString *projectName = SpliceKit_browserClipName(clip);
+                    result = @{@"error": [NSString stringWithFormat:
+                        @"\"%@\" is %@, not a source clip: Final Cut Pro does not paste a project into a timeline. "
+                        @"Pick a clip from browser_list_clips() (projects are marked isProject: true there), or open "
+                        @"the project with open_project().",
+                        projectName, (currentSequence && clip == currentSequence) ? @"the open timeline's own project" : @"a project"]};
+                    return;
+                }
+            }
+
             if (clipFromHandle) {
                 NSDictionary *onTimeline = SpliceKit_browserTimelineEntries();
                 NSString *clipKey = SpliceKit_handlePointerKey(clip);
@@ -17150,11 +17305,20 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             mergedResult[@"skimmingActive"] = @(skimmingActive);
             if (rangeHonored) mergedResult[@"rangeHonored"] = rangeHonored;
             if (positionVerified) mergedResult[@"positionVerified"] = positionVerified;
+            if (!handleTableReset && !primary && newEntries.count == 0) {
+                // Nothing appeared: Final Cut Pro placed nothing (it refuses some sources,
+                // a project among them). Not an "ok" (QA run 2); the pasteboard was replaced
+                // and the playhead may have moved, which the error answer says.
+                SpliceKit_log(@"[Place] %@ of \"%@\": the edit ran but no new clip appeared on the timeline", edit, clipName);
+                result = failed([NSString stringWithFormat:
+                    @"the %@ edit ran but no new clip appeared on the timeline: Final Cut Pro placed nothing "
+                    @"(the source \"%@\" may not be something it pastes; get_timeline_clips shows the timeline as it is)",
+                    edit, clipName], mergedDebug);
+                return;
+            }
             NSMutableArray *notes = [NSMutableArray array];
             if (handleTableReset) {
                 [notes addObject:@"the handle table was reset during this call (it holds at most 2000 handles): handles from earlier reads are no longer valid and the placement could not be verified; call get_timeline_clips again"];
-            } else if (!primary && newEntries.count == 0) {
-                [notes addObject:@"the edit ran but no new clip was found on the timeline afterwards; check get_timeline_clips and undo if needed"];
             } else if (!primary) {
                 [notes addObject:@"the edit created objects on the timeline but none is the source clip where it was expected; see alsoNew, check get_timeline_clips and undo if needed"];
             } else if (!verified) {
@@ -22462,7 +22626,8 @@ static NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *para
                     if (![laneNum respondsToSelector:@selector(longLongValue)] ||
                         [laneNum longLongValue] != targetLane) continue;
                 }
-                candidateCount++;
+                candidateCount++;          // every clip in the lane, matched or not
+                if (bestEntry) continue;
                 double startSec = SpliceKit_browserEntrySeconds(entry, @"startTime");
                 double endSec = SpliceKit_browserEntrySeconds(entry, @"endTime");
                 if (isnan(startSec) || isnan(endSec)) continue;
@@ -22474,7 +22639,6 @@ static NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *para
                     continue;
                 }
                 bestEntry = entry;
-                break;
             }
             if (!bestEntry) bestEntry = containerEntry;
             id bestMatch = nil;

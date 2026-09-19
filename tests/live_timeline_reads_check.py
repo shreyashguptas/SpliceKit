@@ -494,6 +494,18 @@ def trim_check(st):
     else:
         fails += 1
         print(f"FAIL  after undo the clip end is {back} (original {end0:.4f})")
+        # Do not leave the timeline changed: put the edge back with a compensating trim.
+        fix = rpc("timeline.trimClip", {"handle": c["handle"], "edge": "end", "toSeconds": end0})
+        st3 = rpc("timeline.getDetailedState")
+        fixed = None
+        for i in _spine_clips(st3):
+            if i.get("handle") == c["handle"] or abs(secs(i, "startTime") - start0) <= half:
+                fixed = secs(i, "endTime")
+        if fixed is not None and abs(fixed - end0) <= half:
+            print(f"INFO  restored the clip end to {fixed:.4f} with a compensating trim (status={fix.get('status')})")
+        else:
+            print(f"WARN  could not restore the clip end (now {fixed}); restore it by hand: "
+                  f"trim_clip({c['handle']!r}, edge='end', to_seconds={end0:.4f})")
     return fails, 1
 
 
@@ -506,6 +518,8 @@ def _browser_clip_for_place(min_seconds=2.0):
         print(f"SKIP  browser.listClips: {r['error']}")
         return None
     for c in r.get("clips") or []:
+        if c.get("isProject"):
+            continue        # a project is not a source clip (FCP places nothing)
         dur = (c.get("duration") or {}).get("seconds")
         if isinstance(dur, (int, float)) and dur >= min_seconds:
             return c

@@ -68,6 +68,52 @@ that this fork has removed.
   an unfinished install, and no longer swallows Ctrl-C after a menu.
 
 ### Fixed
+- **`get_audio_levels` skipped every clip whose media file carries a start timecode** ("the
+  clip lies entirely before the start of its media file"; QA run 2: three of five clips, the
+  ones with audio). The clip's start point in its source media was read from
+  `trimStartTime` / `trimmedOffset`, which FCP 12.3's clips do not answer, and the media's
+  timecode origin (`unclippedRange.start`, tens of thousands of seconds for a camera file)
+  was then subtracted from a zero that had never been read. The start point now comes from
+  the clip's `clippedRange` (the reading the transcript panel's clip-to-file conversion has
+  always used), then the older selectors; when none answers, the levels start at the file's
+  start and the answer says so instead of subtracting anything; a helper "empty range" is
+  reported as a mapping that does not fit, naming the readings. `get_clip_info` reads the
+  start point the same way.
+- **`trim_clip` could not be undone** ("Cannot undo - nothing to undo"): `operationTrimEdit`
+  changed the model without an undoable action. The trim is now one undo step, "Trim",
+  opened and closed with the same `actionBegin:` / `actionEnd:save:error:` pair
+  `begin_edit` uses (inside an open `begin_edit` group, that group's step covers it); the
+  answer names the step. The live check restores the edge with a compensating trim when
+  an undo fails, instead of leaving the timeline changed.
+- **A compound clip was not detected and was analysed against the wrong file.** On the
+  timeline a compound clip is an `FFAnchoredClip` that answers `isReferenceClip` (verified
+  on 12.3), not `isCompoundClip`; both flags are asked now, and the class-name fallback
+  covers `FFAnchoredClip`. Independently, `get_audio_levels` skips any clip whose media
+  component sits two or more containers down (how compound, multicam and synchronized
+  clips are built) rather than reporting the first file inside it as the clip's levels.
+- **`timeline_action` said "ok" while Final Cut Pro was waiting on a sheet** (QA run 2:
+  `createCompoundClip` and its Compound Clip Name sheet). The answer now carries
+  `dialogPending`, the dialog's description and a note pointing at `detect_dialog` /
+  `click_dialog_button` / `dismiss_dialog` when a sheet or modal dialog is open after the
+  action.
+- **`add_clip_to_timeline` reported `status: ok` with nothing placed.** An edit after which
+  no new clip appears is an error now (the pasteboard replacement and playhead move are
+  reported with it). A project (FCP's `isProject`), including the open timeline's own, is
+  refused as a source, and `browser_list_clips` marks projects with `isProject: true`.
+- **`select_clip_in_lane`'s `candidatesInLane` counted only the clips before the match**;
+  it counts the whole lane.
+- **End times were truncated when a clip started at time zero**: `start + duration` was
+  formed by integer division in the start's timescale (timescale 1 at zero), so an
+  18.018 s clip ended at 18.000 s in `get_timeline_clips` and `get_audio_levels` while
+  `get_clip_info` said 18.018 s. The sum is exact across timescales now, in every reader.
+- **The "retimed clip" note overstated what is known.** FCP's `isRetimed` flag was true on
+  two clips whose file range mapped 1:1; the flag may also cover a frame-rate conform.
+  The note and the tool text now say which flag answered and that SpliceKit cannot tell a
+  speed change from a conform.
+- **The log said nothing useful about any of this.** `~/Library/Logs/SpliceKit/splicekit.log`
+  now records each `get_audio_levels` skip with its reason and each helper run (file,
+  range, time), each trim's undo step, a placement after which nothing appeared, and a
+  dialog left open by an action.
 - **Ordinary clips were classified as compound clips.** Final Cut Pro wraps every clip
   that carries both video and audio in an `FFAnchoredCollection`, and SpliceKit read that
   class name as "compound clip": `get_clip_info` said `kind: compound clip` for camera
