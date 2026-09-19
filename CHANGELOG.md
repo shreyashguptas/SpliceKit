@@ -26,8 +26,8 @@ that this fork has removed.
   the clip-to-source-file mapping is the one `get_clip_info` reports. These are
   SpliceKit's measurements of the source media as decoded, not FCP's meters or
   waveforms: FCP's volume, fades, effects, retiming and the mix are not applied, and the
-  answer says so. Not yet run against a live Final Cut Pro;
-  `tests/live_timeline_reads_check.py --audio-check` does that.
+  answer says so. First run against a live Final Cut Pro: QA run 2 on FCP 12.3 (see Fixed below);
+  `tests/live_timeline_reads_check.py --audio-check` re-runs it.
 - **`add_clip_to_timeline`: a range of a browser clip onto the timeline.** The
   range (`start_seconds`/`end_seconds` from the clip's first frame) is written
   to FCP's pasteboard and placed with FCP's Edit > Paste (insert, the effect of
@@ -86,9 +86,10 @@ that this fork has removed.
   answer names the step. The live check restores the edge with a compensating trim when
   an undo fails, instead of leaving the timeline changed.
 - **A compound clip was not detected and was analysed against the wrong file.** On the
-  timeline a compound clip is an `FFAnchoredClip` that answers `isReferenceClip` (verified
-  on 12.3), not `isCompoundClip`; both flags are asked now, and the class-name fallback
-  covers `FFAnchoredClip`. Independently, `get_audio_levels` skips any clip whose media
+  timeline a compound clip is an `FFAnchoredClip` that answers `isReferenceClip` = YES
+  (verified on 12.3; an ordinary clip's `FFAnchoredCollection` answers NO to both
+  `isCompoundClip` and `isReferenceClip`); both flags are asked now, and the class-name
+  fallback covers `FFAnchoredClip`. Independently, `get_audio_levels` skips any clip whose media
   component sits two or more containers down (how compound, multicam and synchronized
   clips are built) rather than reporting the first file inside it as the clip's levels.
 - **`timeline_action` said "ok" while Final Cut Pro was waiting on a sheet** (QA run 2:
@@ -105,15 +106,16 @@ that this fork has removed.
 - **End times were truncated when a clip started at time zero**: `start + duration` was
   formed by integer division in the start's timescale (timescale 1 at zero), so an
   18.018 s clip ended at 18.000 s in `get_timeline_clips` and `get_audio_levels` while
-  `get_clip_info` said 18.018 s. The sum is exact across timescales now, in every reader.
+  `get_clip_info` said 18.018 s. The sum is now exact when one timescale is a multiple of the
+  other and rounded otherwise, in every reader.
 - **The "retimed clip" note overstated what is known.** FCP's `isRetimed` flag was true on
   two clips whose file range mapped 1:1; the flag may also cover a frame-rate conform.
   The note and the tool text now say which flag answered and that SpliceKit cannot tell a
   speed change from a conform.
 - **The log said nothing useful about any of this.** `~/Library/Logs/SpliceKit/splicekit.log`
-  now records each `get_audio_levels` skip with its reason and each helper run (file,
-  range, time), each trim's undo step, a placement after which nothing appeared, and a
-  dialog left open by an action.
+  now records each clip `get_audio_levels` skips, with its reason, and each helper run
+  (file, range, time), the undo step a trim opened, a placement after which nothing
+  appeared, and a dialog left open by an action.
 - **Ordinary clips were classified as compound clips.** Final Cut Pro wraps every clip
   that carries both video and audio in an `FFAnchoredCollection`, and SpliceKit read that
   class name as "compound clip": `get_clip_info` said `kind: compound clip` for camera

@@ -502,9 +502,10 @@ def trim_check(st):
             if i.get("handle") == c["handle"] or abs(secs(i, "startTime") - start0) <= half:
                 fixed = secs(i, "endTime")
         if fixed is not None and abs(fixed - end0) <= half:
-            print(f"INFO  restored the clip end to {fixed:.4f} with a compensating trim (status={fix.get('status')})")
+            print(f"INFO  restored the clip end to {fixed:.4f} with a compensating trim (status={fix.get('status')}); "
+                  "the undo history now holds two Trim steps")
         else:
-            print(f"WARN  could not restore the clip end (now {fixed}); restore it by hand: "
+            print(f"WARN  could not restore the clip end (now {fixed}; trim answer: {fix.get('error') or fix.get('status')}); restore it by hand: "
                   f"trim_clip({c['handle']!r}, edge='end', to_seconds={end0:.4f})")
     return fails, 1
 
@@ -657,6 +658,15 @@ def audio_check(st):
     print(f"clip {c0.get('name')!r} handle={c0['handle']} [{start:.3f} .. {end:.3f}] -> "
           f"{json.dumps({k: v for k, v in entry.items() if k not in ('slices',)})[:700]}")
     print(f"took {took:.2f}s; helper {one.get('helper')}")
+    src = entry.get("source") or {}
+    if src:
+        print(f"source: start known={src.get('sourceStartKnown')} via {src.get('sourceStartSelector')}; "
+              f"media origin {src.get('mediaOrigin')} via {src.get('mediaOriginSelector')}; "
+              f"file [{src.get('fileStart')} .. {src.get('fileEnd')}]")
+    if src.get("sourceStartKnown") is False:
+        print("WARN  the clip's start point in its source media was not read; the levels start at the file's start")
+    if entry.get("note"):
+        print(f"note  {entry['note']}")
     if entry.get("error") or entry.get("skipped"):
         fails += 1
         print(f"FAIL  clip not analysed: {entry.get('error') or entry.get('skipped')}")

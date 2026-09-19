@@ -422,11 +422,13 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             }
             if ([kind isEqualToString:@"multicam clip"]) {
                 entry[@"skipped"] = @"multicam clip: no single source media file (its angles are clips inside it)";
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
             if ([kind isEqualToString:@"connected storyline"]) {
                 entry[@"skipped"] = @"connected storyline container: its clips are analysed individually";
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
@@ -442,6 +444,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                     @"its source media file sits inside a nested container (%ld levels down), the way compound, "
                     @"multicam and synchronized clips are built; the first file inside would give levels for the "
                     @"wrong content, so it is skipped", (long)mediaDepth];
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
@@ -450,6 +453,8 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 if (src[@"error"]) entry[@"error"] = src[@"error"];
                 else entry[@"skipped"] = [NSString stringWithFormat:
                     @"no source media file could be resolved for this clip (kind: %@)", kind.length ? kind : @"unknown"];
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" %@: %@", c[@"handle"], c[@"name"],
+                              entry[@"error"] ? @"error" : @"skipped", entry[@"error"] ?: entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
@@ -475,6 +480,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             if (src[@"retimeSelector"]) entry[@"retimeSelector"] = src[@"retimeSelector"];
             if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {     // off the main thread
                 entry[@"skipped"] = @"source media file is missing on disk (Final Cut Pro: Missing File)";
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }
@@ -483,6 +489,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             double aEnd = haveEnd ? fmin(clipEnd, rangeEnd) : clipEnd;
             if (aEnd - aStart < 0.001) {
                 entry[@"skipped"] = @"the requested range covers none of this clip";
+                SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
             }

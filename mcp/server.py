@@ -986,6 +986,10 @@ def _call_or_error(method: str, **params) -> str:
     r = bridge.call(method, **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
+    if isinstance(r, dict) and r.get("dialogPending") and r.get("note"):
+        # A sheet or modal dialog is open after the action: nothing has happened on the
+        # timeline yet, so say that before the JSON (whose key order is not fixed).
+        return f"DIALOG PENDING: {r['note']}\n\n{_fmt(r)}"
     return _fmt(r)
 
 
@@ -4710,6 +4714,13 @@ def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
         lines.append(f"  note: {r['note']}")
     if r.get("rippleScope"):
         lines.append(f"  ripple: {r['rippleScope']}")
+    if r.get("undoStepError"):
+        lines.append(f"  undo step '{r.get('undoStep', 'Trim')}' could not be closed cleanly: {r['undoStepError']} "
+                     "-- check Edit > Undo before relying on it")
+    elif r.get("undoStep"):
+        lines.append(f"  undo step: {r['undoStep']}" + (f" ({r['undoStepNote']})" if r.get("undoStepNote") else ""))
+    elif r.get("undoStepNote"):
+        lines.append(f"  undo step: none -- {r['undoStepNote']}")
     if status == "ok":
         lines.append('  Ripple edit applied: subsequent clips moved so no gap is left. Undo with timeline_action("undo").')
     return "\n".join(lines)
@@ -4763,9 +4774,16 @@ def _render_clip_info(r: dict) -> str:
                      f"({'exists' if sm.get('exists') else 'missing on disk (FCP: Missing File)'}; "
                      f"media representation: {sm.get('representation', '?')})")
         lines.append(f"    path: {sm.get('path', '')}")
-        lines.append(f"    start point in the source media: {_secs3(sm.get('sourceStart'))}; "
-                     f"media starts at {_secs3(sm.get('mediaOrigin'))}; "
-                     f"{_secs3(sm.get('fileStart'))}–{_secs3(sm.get('fileEnd'))} into the media file")
+        if sm.get("sourceStartKnown") is False:
+            lines.append(f"    start point in the source media: not read (FCP's clip object answered none of "
+                         f"clippedRange / trimStartTime / trimmedOffset); media starts at "
+                         f"{_secs3(sm.get('mediaOrigin'))}; taken as {_secs3(sm.get('fileStart'))}–"
+                         f"{_secs3(sm.get('fileEnd'))} into the media file, counted from the file's start "
+                         f"(right only if the clip's start is not trimmed)")
+        else:
+            lines.append(f"    start point in the source media: {_secs3(sm.get('sourceStart'))}; "
+                         f"media starts at {_secs3(sm.get('mediaOrigin'))}; "
+                         f"{_secs3(sm.get('fileStart'))}–{_secs3(sm.get('fileEnd'))} into the media file")
     elif r.get("sourceMediaError"):
         lines.append(f"  source media file: {r['sourceMediaError']}")
 
@@ -5117,6 +5135,8 @@ def _render_audio_levels(r: dict, detail: str) -> str:
         lines.append(head)
         if clip.get("error"):
             lines.append(f"  error: {clip['error']}")
+            if clip.get("note"):
+                lines.append(f"  note: {clip['note']}")
             continue
         if clip.get("skipped"):
             lines.append(f"  skipped: {clip['skipped']}")
@@ -5399,9 +5419,9 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     all concurrent clips are not applied (the same way get_clip_info's frame is the raw
     footage). The file-to-timeline mapping always assumes normal speed (100%): for a
     retimed clip the levels and their times do not correspond to what FCP plays. `retimed`
-    is true/false when SpliceKit finds a retime flag on FCP's clip object and "unknown"
-    when it finds none (the selector names are unverified); when unknown, check the clip's
-    Retime state yourself before trusting a retimed clip's levels. By default every audio
+    is FCP's own flag (`isRetimed` on 12.3; a frame-rate conform may set it too, which
+    SpliceKit cannot tell from a speed change) and "unknown" when the clip object answers
+    none; check the clip's Retime state yourself before trusting a retimed clip's levels. By default every audio
     track is mixed down to one mono channel before measuring, so a peak can read lower
     than a single channel's own peak (channels are summed and scaled, and opposite-phase
     content cancels) and a channel at full scale can go unreported. `channels="separate"`

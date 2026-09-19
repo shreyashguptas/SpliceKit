@@ -3474,12 +3474,25 @@ static NSUInteger SpliceKit_transitionCount(id timeline);
 // otherwise read "ok" while nothing has happened yet (QA run 2: createCompoundClip and
 // its Compound Clip Name sheet). Reported as dialogPending + dialog, never as an error;
 // a dialog that was already open before the action is reported the same way.
+// Actions that can put up a sheet (a name, a confirmation, a settings panel). Only these
+// get the short run-loop turn below; a blade or an undo in a batch must not pay for it.
+static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
+    NSString *a = [action lowercaseString] ?: @"";
+    for (NSString *word in @[@"create", @"compound", @"multicam", @"synchronize", @"audition", @"project",
+                             @"library", @"properties", @"rename", @"share", @"export", @"import", @"roles",
+                             @"consolidate", @"merge", @"deletegenerated", @"record", @"new", @"find"]) {
+        if ([a rangeOfString:word].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSString *action) {
     if (![result isKindOfClass:[NSDictionary class]] || result[@"error"]) return result;
     __block NSDictionary *dialog = nil;
+    int passes = SpliceKit_actionMayOpenDialog(action) ? 2 : 1;
     SpliceKit_executeOnMainThread(^{
         @try {
-            for (int pass = 0; pass < 2 && !dialog; pass++) {
+            for (int pass = 0; pass < passes && !dialog; pass++) {
                 // A sheet is attached on the next run-loop turn; give it one short one.
                 if (pass == 1) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
                 NSWindow *modal = [NSApp modalWindow];
