@@ -27,11 +27,22 @@ and prints, without changing the timeline:
      --trim-check    ripple-trims the last spine clip's end by one frame via
                      timeline.trimClip (dry run first), verifies, then undoes and
                      verifies the clip's end is back where it was.
+  6. Optional --clip-info-check (READ-ONLY): timeline.getClipInfo on the first spine
+     clip that is a video or audio clip; prints kind, source media file (path, exists,
+     representation), source start / media origin / file time, effects, title text,
+     transcript status + word count and the frame (written to
+     /tmp/splicekit_clip_info_frame.jpg so a human can look at it). FAIL when the
+     response errors or reports neither sourceMedia nor sourceMediaError; a frameError
+     is a WARN, not a FAIL.
+  7. Optional --viewer-frame-check (CHANGES STATE: moves the playhead, restored):
+     timeline.captureClipFrame on that clip, verifies playheadRestored and that the
+     playhead really is back, writes /tmp/splicekit_clip_viewer_frame.jpg.
 
 Usage:
     python3 tests/live_timeline_reads_check.py                # read-only report
     python3 tests/live_timeline_reads_check.py --cross-check  # also verify lanes/times
     python3 tests/live_timeline_reads_check.py --select-check --edit-check --trim-check
+    python3 tests/live_timeline_reads_check.py --clip-info-check --viewer-frame-check
     python3 tests/live_timeline_reads_check.py --json out.json # dump raw responses
 
 Open a project first that has at least one title, one connected audio clip,
@@ -476,6 +487,176 @@ def trim_check(st):
     return fails, 1
 
 
+# ── 6/7. clip info (read-only) and viewer frame (moves playhead, restored) ────
+
+CLIP_INFO_FRAME_PATH = "/tmp/splicekit_clip_info_frame.jpg"
+VIEWER_FRAME_PATH = "/tmp/splicekit_clip_viewer_frame.jpg"
+
+
+def _first_media_clip(st):
+    """First spine clip that is a video or audio clip (not a gap, generator or title)."""
+    for c in _spine_clips(st):
+        cls = str(c.get("class", ""))
+        if "Gap" in cls or "Generator" in cls or "Title" in cls:
+            continue
+        if c.get("hasVideo") or c.get("hasAudio") or "MediaComponent" in cls:
+            return c
+    return None
+
+
+def _write_frame(frame, path):
+    import base64
+    try:
+        data = base64.b64decode(frame.get("base64") or "")
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN  frame base64 did not decode: {e}")
+        return False
+    if not data:
+        print("WARN  frame base64 is empty")
+        return False
+    with open(path, "wb") as f:
+        f.write(data)
+    print(f"      frame written to {path} ({len(data)} bytes) -- open it and check it is a frame of this clip")
+    return True
+
+
+def clip_info_check(st):
+    section("timeline.getClipInfo (read-only: never moves the playhead or selection)")
+    c = _first_media_clip(st)
+    if not c:
+        print("SKIP  no video/audio spine clip to inspect")
+        return 0, 0, 0
+    s0, e0 = secs(c, "startTime"), secs(c, "endTime")
+    print(f"target: {c.get('name')!r} handle={c.get('handle')} class={c.get('class')} range=[{s0:.3f} .. {e0:.3f}]")
+    pos_before = rpc("playback.getPosition").get("seconds")
+    r = rpc("timeline.getClipInfo", {"handle": c["handle"]}, timeout=60)
+    if "error" in r:
+        print(f"FAIL  getClipInfo: {r['error']}")
+        return 1, 1, 0
+    fails = warns = 0
+    tl = r.get("timeline") or {}
+    print(f"kind={r.get('kind')!r} (SpliceKit classification) name={r.get('name')!r} lane={r.get('lane')} "
+          f"primary={r.get('onPrimaryStoryline')} enabled={r.get('enabled')} selected={r.get('selected')} "
+          f"hasVideo={r.get('hasVideo')} hasAudio={r.get('hasAudio')} "
+          f"timeline=[{tl.get('start')} .. {tl.get('end')}] roles={json.dumps(r.get('roles'))}")
+    if abs((tl.get("start") or 0) - s0) > 0.01 or abs((tl.get("end") or 0) - e0) > 0.01:
+        warns += 1
+        print("WARN  timeline range differs from the getDetailedState snapshot")
+    if r.get("notes"):
+        print(f"notes={r['notes']!r}")
+
+    sm = r.get("sourceMedia")
+    if isinstance(sm, dict):
+        print(f"source media: {sm.get('path')}\n      exists={sm.get('exists')} representation={sm.get('representation')} "
+              f"urlSource={sm.get('urlSource')}\n      sourceStart={sm.get('sourceStart')} via {sm.get('sourceStartSelector')}; "
+              f"mediaOrigin={sm.get('mediaOrigin')} via {sm.get('mediaOriginSelector')}; "
+              f"file=[{sm.get('fileStart')} .. {sm.get('fileEnd')}]")
+        if not sm.get("exists"):
+            warns += 1
+            print("WARN  the source media file does not exist on disk (offline media?)")
+    elif r.get("sourceMediaError"):
+        print(f"source media: {r['sourceMediaError']}")
+    else:
+        fails += 1
+        print("FAIL  response has neither sourceMedia nor sourceMediaError")
+
+    effects = r.get("effects") or []
+    print(f"effects: {r.get('effectCount', len(effects))} " +
+          json.dumps([e.get("name") or e.get("class") for e in effects])[:200] +
+          (f"  effectsError={r.get('effectsError')}" if r.get("effectsError") else ""))
+    if isinstance(r.get("title"), dict):
+        t = r["title"]
+        print(f"title text: {t.get('text')!r} font={t.get('fontFamily') or t.get('fontName')} size={t.get('fontSize')} "
+              f"channels={t.get('channelCount')}")
+    else:
+        print("title text: (none)")
+    print(f"markers on clip: {r.get('markerCount', len(r.get('markers') or []))}")
+    tr = r.get("transcript") or {}
+    print(f"transcript: available={tr.get('available')} status={tr.get('status')} wordsInClip={tr.get('wordCount')} "
+          f"matchedByHandle={tr.get('matchedByHandle')} truncated={tr.get('truncated')} "
+          f"text={str(tr.get('text', ''))[:120]!r}")
+
+    frame = r.get("frame")
+    if isinstance(frame, dict):
+        print(f"frame: {frame.get('width')}x{frame.get('height')} {frame.get('format')} {frame.get('bytes')} bytes "
+              f"timelineTime={frame.get('timelineTime')} sourceTime={frame.get('sourceTime')} "
+              f"mediaOrigin={frame.get('mediaOrigin')} fileTime={frame.get('fileTime')} "
+              f"actualFileTime={frame.get('actualFileTime')}")
+        mid = (s0 + e0) / 2.0
+        if abs((frame.get("timelineTime") or 0) - mid) > 0.01:
+            warns += 1
+            print(f"WARN  frame timelineTime is not the clip midpoint ({mid:.3f})")
+        if not _write_frame(frame, CLIP_INFO_FRAME_PATH):
+            warns += 1
+    elif r.get("frameError"):
+        warns += 1
+        print(f"WARN  frameError: {r['frameError']}  request={json.dumps(r.get('frameRequest'))}")
+    else:
+        print("frame: (not requested)")
+    print(f"timings={json.dumps(r.get('timings'))}")
+
+    pos_after = rpc("playback.getPosition").get("seconds")
+    if isinstance(pos_before, (int, float)) and isinstance(pos_after, (int, float)):
+        if abs(pos_after - pos_before) < 1e-6:
+            print(f"OK    playhead unchanged at {pos_after:.3f}s")
+        else:
+            fails += 1
+            print(f"FAIL  playhead moved {pos_before:.3f} -> {pos_after:.3f} during a read-only call")
+    if fails == 0:
+        print("OK    getClipInfo returned clip information" + (f" with {warns} warning(s)" if warns else ""))
+    return fails, 1, warns
+
+
+def viewer_frame_check(st):
+    section("timeline.captureClipFrame (CHANGES STATE: moves the playhead, restored)")
+    clips = _spine_clips(st)
+    c = _first_media_clip(st) or (clips[0] if clips else None)
+    if not c:
+        print("SKIP  no spine clip to capture")
+        return 0, 0
+    frame_s = _frame_seconds(st)
+    half = frame_s / 2.0
+    pos0 = rpc("playback.getPosition").get("seconds")
+    print(f"target: {c.get('name')!r} handle={c.get('handle')} playhead before={pos0}")
+    r = rpc("timeline.captureClipFrame", {"handle": c["handle"]}, timeout=60)
+    fails = 0
+    if "error" in r and r.get("status") != "failed":
+        print(f"FAIL  captureClipFrame: {r['error']}")
+        return 1, 1
+    print(f"status={r.get('status')} timelineTime={r.get('timelineTime')} playheadBefore={r.get('playheadBefore')} "
+          f"playheadAtCapture={r.get('playheadAtCapture')} playheadAfter={r.get('playheadAfter')} "
+          f"playheadRestored={r.get('playheadRestored')} path={r.get('path')} capture={json.dumps(r.get('capture'))}")
+    if r.get("status") != "ok":
+        fails += 1
+        print(f"FAIL  status={r.get('status')} failure={r.get('failure') or r.get('error')}")
+    if r.get("playheadRestored") is not True:
+        fails += 1
+        print("FAIL  playheadRestored is not true")
+    tt = r.get("timelineTime")
+    at = r.get("playheadAtCapture")
+    if isinstance(tt, (int, float)) and isinstance(at, (int, float)) and abs(tt - at) > half + 1e-6:
+        fails += 1
+        print(f"FAIL  the playhead at capture ({at:.3f}) was not at the requested frame time ({tt:.3f})")
+    pos1 = rpc("playback.getPosition").get("seconds")
+    if isinstance(pos0, (int, float)) and isinstance(pos1, (int, float)):
+        if abs(pos1 - pos0) <= half + 1e-6:
+            print(f"OK    playhead really is back at {pos1:.3f}s (was {pos0:.3f}s)")
+        else:
+            fails += 1
+            print(f"FAIL  playhead is at {pos1:.3f}s, was {pos0:.3f}s -- seeking back")
+            rpc("playback.seekToTime", {"seconds": pos0})
+    frame = r.get("frame")
+    if isinstance(frame, dict):
+        print(f"frame: {frame.get('width')}x{frame.get('height')} {frame.get('format')} {frame.get('bytes')} bytes source={frame.get('source')}")
+        _write_frame(frame, VIEWER_FRAME_PATH)
+    else:
+        fails += 1
+        print("FAIL  no frame in the response")
+    if fails == 0:
+        print("OK    Viewer frame captured and playhead restored")
+    return fails, 1
+
+
 def main():
     global HOST, PORT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -491,6 +672,13 @@ def main():
     ap.add_argument("--trim-check", action="store_true",
                     help="CHANGES STATE (reverted): ripple-trim last spine clip end by one frame via "
                          "timeline.trimClip, verify, undo, verify")
+    ap.add_argument("--clip-info-check", action="store_true",
+                    help="READ-ONLY: timeline.getClipInfo on the first video/audio spine clip; prints source "
+                         "media, source start / media origin / file time, effects, title text, transcript, "
+                         "and writes the frame to " + CLIP_INFO_FRAME_PATH)
+    ap.add_argument("--viewer-frame-check", action="store_true",
+                    help="CHANGES STATE (moves the playhead, restored): timeline.captureClipFrame on that "
+                         "clip, verifies playheadRestored, writes " + VIEWER_FRAME_PATH)
     ap.add_argument("--json", metavar="PATH", help="write every raw RPC response to this file")
     args = ap.parse_args()
     HOST, PORT = args.host, args.port
@@ -514,6 +702,13 @@ def main():
         if args.trim_check:
             fails, ran = trim_check(st)
             verdict.append(f"trim-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
+        if args.clip_info_check:
+            fails, ran, ci_warns = clip_info_check(st)
+            verdict.append(f"clip-info-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}"
+                           + (f" ({ci_warns} warning(s))" if ran and ci_warns else ""))
+        if args.viewer_frame_check:
+            fails, ran = viewer_frame_check(st)
+            verdict.append(f"viewer-frame-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
     section("Verdict")
     print("; ".join(verdict) if verdict else "no project open — vocabulary section is still valid evidence")
     failed = any(("failure" in v) or ("mismatches" in v and not v.endswith("0 mismatches")) for v in verdict)

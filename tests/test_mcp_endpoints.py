@@ -184,6 +184,11 @@ def test_timeline():
                  {"handle": "obj_0", "edge": "end", "deltaSeconds": -0.5, "toSeconds": 1.0}), "exactly one")
     expect_error("trimClip (bogus handle)", rpc("timeline.trimClip",
                  {"handle": "obj_does_not_exist", "edge": "end", "deltaSeconds": -0.5}))
+    # getClipInfo / captureClipFrame validate the handle before touching the timeline
+    expect_error("getClipInfo (no params)", rpc("timeline.getClipInfo", {}), "handle")
+    expect_error("getClipInfo (bogus handle)", rpc("timeline.getClipInfo",
+                 {"handle": "obj_does_not_exist", "includeFrame": False}))
+    expect_error("captureClipFrame (no params)", rpc("timeline.captureClipFrame", {}), "handle")
     # beginEdit / endEdit round trip: opens and closes one undoable action, no edits inside
     r = rpc("timeline.beginEdit", {"name": "SpliceKit endpoint check"})
     if "error" in str(r) and "No active" in str(r):

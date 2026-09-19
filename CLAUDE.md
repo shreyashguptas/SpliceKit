@@ -29,10 +29,11 @@ rather than simulating the keyboard shortcut.
 1. bridge_status()                    -- verify connection
 2. open_project("My Project")         -- open a project by name
 3. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
-4. timeline_action("blade")           -- edit
-5. verify_action("after blade")       -- confirm state changed
-6. capture_timeline()                 -- visually verify the timeline
-7. capture_viewer()                   -- visually verify the viewer/canvas
+4. get_clip_info("obj_12")            -- what is IN the clip: source file, transcript words, effects, title text, a frame image
+5. timeline_action("blade")           -- edit
+6. verify_action("after blade")       -- confirm state changed
+7. capture_timeline()                 -- visually verify the timeline
+8. capture_viewer()                   -- visually verify the viewer/canvas
 ```
 
 ## CRITICAL: Must Know Before Editing
@@ -220,6 +221,16 @@ This is FCP's default trim, a ripple edit (dragging a clip's start or end point 
 subsequent clips move so no gap is left, and connected clips move with the clips they are attached to.
 A start-point trim on the primary storyline keeps the clip in place and changes its duration.
 `delta_seconds=-0.5` works too (negative = edit point earlier). Undo with `timeline_action("undo")`.
+
+### Look inside a clip
+```
+get_timeline_clips()                      # find the clip's handle
+get_clip_info("obj_12")                   # Info inspector fields + (SpliceKit) placement, effects, title text, markers, transcript words, a frame image
+capture_clip_frame("obj_12")              # the clip as rendered in the Viewer (effects included); moves the playhead and restores it
+```
+`get_clip_info` never moves the playhead: its frame is decoded from the source media file (no effects), and the
+tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so.
+`kind`, handles and `timings` are SpliceKit bookkeeping, not FCP terms.
 
 ### Cuts at regular intervals across entire timeline
 ```
@@ -432,6 +443,10 @@ capture_viewer(path="/tmp/check.png") # screenshot to custom path
 capture_timeline()                   # screenshot timeline to /tmp/splicekit_timeline.png
 capture_timeline(path="/tmp/tl.png") # screenshot to custom path
 ```
+`capture_viewer`, `capture_timeline` and `capture_inspector` also return the image inline as MCP image
+content (`return_image=False` to skip), so any MCP client can look at it without reading the PNG.
+For one clip, `get_clip_info()` returns a frame of its source media file and `capture_clip_frame()` the
+clip as rendered in the Viewer, both inline.
 
 ## Viewer Zoom
 ```

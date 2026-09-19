@@ -7447,6 +7447,1004 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
     return result ?: @{@"error": @"Failed to trim clip"};
 }
 
+#pragma mark - timeline.getClipInfo / timeline.captureClipFrame
+//
+// Per-clip picture and context for one clip, by handle.
+//
+// timeline.getClipInfo is READ-ONLY (never moves the playhead or the selection).
+// It reports the Info inspector's fields for the clip -- name, notes, Video Roles /
+// Audio Roles, the source media file and which media representation it is
+// (original / optimized / proxy, the names FCP lists under Available Media
+// Representations) -- plus what SpliceKit adds from the model: timeline
+// placement, effects, title text, the markers placed within the clip, the words
+// of SpliceKit's Text-Based Editor transcript inside it, and a frame decoded
+// from the source media file (JPEG, base64). The frame is decoded with
+// AVFoundation on the calling thread, never inside the main-thread block.
+//
+// timeline.captureClipFrame CHANGES STATE and restores it: it seeks the
+// playhead to the frame time, lets the Viewer render, captures the Viewer
+// (effects included) and seeks back.
+//
+// Source start point / media start (the same math the transcript panel and
+// the stabilization code use):
+//   sourceStart = clip.trimStartTime (else trimmedOffset)   -- the clip's start point in the source media
+//   mediaOrigin = mediaComponent.unclippedRange.start        -- where the source media starts in FCP's
+//                                                              model (normally its starting source timecode)
+//   sourceTime  = sourceStart + (timelineTime - clipStart)
+//   fileTime    = sourceTime - mediaOrigin                   -- seconds into the media file
+//
+
+// Defined later in the file (viewer capture section).
+static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params);
+
+static BOOL SpliceKit_clipInfoBoolParam(NSDictionary *params, NSString *key, BOOL defaultValue) {
+    id value = params[key];
+    if ([value isKindOfClass:[NSNumber class]] || [value isKindOfClass:[NSString class]]) {
+        return [value boolValue];
+    }
+    return defaultValue;
+}
+
+// The media component that carries a clip's source media. A compound clip,
+// connected storyline or multicam item is a collection: dig into containedItems
+// for the first FF*MediaComponent (bounded depth), as the stabilization code does.
+static id SpliceKit_clipInfoMediaComponentAtDepth(id item, int depth) {
+    if (!item || depth > 4) return nil;
+    NSString *cls = NSStringFromClass([item class]) ?: @"";
+    if ([cls containsString:@"MediaComponent"]) return item;
+    if (![item respondsToSelector:@selector(containedItems)]) return nil;
+    NSArray *contained = nil;
+    @try {
+        contained = SpliceKit_mixerArrayFromContainer(
+            ((id (*)(id, SEL))objc_msgSend)(item, @selector(containedItems)));
+    } @catch (NSException *e) { contained = nil; }
+    for (id child in contained) {
+        NSString *childClass = NSStringFromClass([child class]) ?: @"";
+        if ([childClass containsString:@"MediaComponent"]) return child;
+    }
+    for (id child in contained) {
+        id found = SpliceKit_clipInfoMediaComponentAtDepth(child, depth + 1);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static id SpliceKit_clipInfoMediaComponent(id item) {
+    return SpliceKit_clipInfoMediaComponentAtDepth(item, 0);
+}
+
+// FCP's names for a media representation (Info inspector > Available Media
+// Representations): original, optimized, proxy. Inside a library bundle FCP keeps
+// them in "<Event>/Original Media", "<Event>/Transcoded Media/High Quality Media"
+// (optimized) and "<Event>/Transcoded Media/Proxy Media"; media left in place or
+// in an external storage location is original media. Returns `fallback` when the
+// path does not say.
+static NSString *SpliceKit_clipInfoRepresentationForPath(NSString *path, NSString *fallback) {
+    if (path.length == 0) return fallback;
+    if ([path rangeOfString:@"/Transcoded Media/Proxy Media/"].location != NSNotFound) return @"proxy";
+    if ([path rangeOfString:@"/Transcoded Media/High Quality Media/"].location != NSNotFound) return @"optimized";
+    if ([path rangeOfString:@"/Original Media/"].location != NSNotFound) return @"original";
+    return fallback;
+}
+
+// First NSURL in an array-like value (a media rep's fileURLs is an NSArray of NSURL).
+static NSURL *SpliceKit_clipInfoFirstURL(id value) {
+    NSArray *urls = SpliceKit_mixerArrayFromContainer(value);
+    for (id url in urls) {
+        if ([url isKindOfClass:[NSURL class]]) return (NSURL *)url;
+    }
+    return nil;
+}
+
+// Source media file for a clip, mirroring -[SpliceKitTranscriptPanel getMediaURLForClip:]
+// (Sources/SpliceKitTranscriptPanel.m, not exported in its header).
+// *outRepresentation is the media representation in FCP's words:
+//   "original"  -- media.originalMediaURL / media.originalMediaRep / clipRef.assets.originalMediaURL
+//   "optimized" / "proxy" / "original" -- media.currentRep (whichever FCP is using), classified
+//                  from the file's place in the library (see SpliceKit_clipInfoRepresentationForPath)
+//   "unknown"   -- a fallback hit whose path does not say
+// *outSource names the exact chain that produced the URL so a live run can tell which fired.
+static NSURL *SpliceKit_clipInfoMediaURL(id item, NSString **outRepresentation, NSString **outSource) {
+    if (!item) return nil;
+    NSURL *found = nil;
+    NSString *representation = @"unknown";
+    NSString *source = @"";
+
+    // Chain 1: clip.media -> originalMediaURL | originalMediaRep.(fileURLs|URL) | currentRep.fileURLs
+    @try {
+        SEL mediaSel = NSSelectorFromString(@"media");
+        id media = [item respondsToSelector:mediaSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(item, mediaSel) : nil;
+        if (media) {
+            SEL omSel = NSSelectorFromString(@"originalMediaURL");
+            if ([media respondsToSelector:omSel]) {
+                id url = ((id (*)(id, SEL))objc_msgSend)(media, omSel);
+                if ([url isKindOfClass:[NSURL class]]) {
+                    found = url; representation = @"original"; source = @"media.originalMediaURL";
+                }
+            }
+            SEL omrSel = NSSelectorFromString(@"originalMediaRep");
+            if (!found && [media respondsToSelector:omrSel]) {
+                id rep = ((id (*)(id, SEL))objc_msgSend)(media, omrSel);
+                SEL fuSel = NSSelectorFromString(@"fileURLs");
+                if (rep && [rep respondsToSelector:fuSel]) {
+                    found = SpliceKit_clipInfoFirstURL(((id (*)(id, SEL))objc_msgSend)(rep, fuSel));
+                    if (found) { representation = @"original"; source = @"media.originalMediaRep.fileURLs"; }
+                }
+                SEL urlSel = NSSelectorFromString(@"URL");
+                if (!found && rep && [rep respondsToSelector:urlSel]) {
+                    id url = ((id (*)(id, SEL))objc_msgSend)(rep, urlSel);
+                    if ([url isKindOfClass:[NSURL class]]) {
+                        found = url; representation = @"original"; source = @"media.originalMediaRep.URL";
+                    }
+                }
+            }
+            SEL crSel = NSSelectorFromString(@"currentRep");
+            if (!found && [media respondsToSelector:crSel]) {
+                id rep = ((id (*)(id, SEL))objc_msgSend)(media, crSel);
+                SEL fuSel = NSSelectorFromString(@"fileURLs");
+                if (rep && [rep respondsToSelector:fuSel]) {
+                    found = SpliceKit_clipInfoFirstURL(((id (*)(id, SEL))objc_msgSend)(rep, fuSel));
+                    if (found) {
+                        representation = SpliceKit_clipInfoRepresentationForPath(found.path, @"unknown");
+                        source = @"media.currentRep.fileURLs";
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) { found = nil; }
+
+    // Chain 1b: FFAnchoredClip -> clipRef (FFClipRef) -> assets (NSSet/NSArray of FFAsset) -> originalMediaURL
+    if (!found) {
+        @try {
+            SEL clipRefSel = NSSelectorFromString(@"clipRef");
+            id clipRef = [item respondsToSelector:clipRefSel]
+                ? ((id (*)(id, SEL))objc_msgSend)(item, clipRefSel) : nil;
+            SEL assetsSel = NSSelectorFromString(@"assets");
+            if (clipRef && [clipRef respondsToSelector:assetsSel]) {
+                NSArray *assets = SpliceKit_mixerArrayFromContainer(
+                    ((id (*)(id, SEL))objc_msgSend)(clipRef, assetsSel));
+                SEL omSel = NSSelectorFromString(@"originalMediaURL");
+                for (id asset in assets) {
+                    if (![asset respondsToSelector:omSel]) continue;
+                    id url = ((id (*)(id, SEL))objc_msgSend)(asset, omSel);
+                    if ([url isKindOfClass:[NSURL class]]) {
+                        found = url; representation = @"original"; source = @"clipRef.assets.originalMediaURL";
+                        break;
+                    }
+                }
+            }
+        } @catch (NSException *e) { found = nil; }
+    }
+
+    // Chain 2: key paths, each in its own @try (KVC raises for unknown keys).
+    if (!found) {
+        NSArray<NSString *> *keyPaths = @[@"resolvedURL", @"originalMediaURL", @"URL",
+                                          @"assetMediaReference.resolvedURL",
+                                          @"media.originalMediaURL", @"originalMediaRep.URL"];
+        for (NSString *keyPath in keyPaths) {
+            @try {
+                id url = [item valueForKeyPath:keyPath];
+                if ([url isKindOfClass:[NSURL class]]) {
+                    found = url;
+                    representation = [keyPath containsString:@"originalMedia"]
+                        ? @"original" : SpliceKit_clipInfoRepresentationForPath(((NSURL *)url).path, @"unknown");
+                    source = [@"keyPath:" stringByAppendingString:keyPath];
+                    break;
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+
+    if (found) {
+        if (outRepresentation) *outRepresentation = representation;
+        if (outSource) *outSource = source;
+    }
+    return found;
+}
+
+// Role display name via <identifierSelector> + -[FFLibrary findRoleWithUID:], the
+// lookup SpliceKit_readClipRole does for audioRoleIdentifier; used here for
+// videoRoleIdentifier (unverified selector, guarded).
+static NSString *SpliceKit_clipInfoRoleName(id clip, NSString *identifierSelector) {
+    if (!clip || identifierSelector.length == 0) return nil;
+    @try {
+        SEL idSel = NSSelectorFromString(identifierSelector);
+        if (![clip respondsToSelector:idSel]) return nil;
+        if (!SpliceKit_selectorReturnsObject(clip, idSel)) return nil;
+        id roleUID = ((id (*)(id, SEL))objc_msgSend)(clip, idSel);
+        if (![roleUID isKindOfClass:[NSString class]] || [(NSString *)roleUID length] == 0) return nil;
+
+        // Same +0 treatment as every other copyActiveLibraries call site in
+        // SpliceKit (SpliceKit_readClipRole included). By Cocoa naming the
+        // method should return +1, which would make this a small leak per call,
+        // but that has not been verified live and an over-release would crash
+        // FCP, so the shipped pattern stays until a live run settles it.
+        id libs = ((id (*)(Class, SEL))objc_msgSend)(
+            objc_getClass("FFLibraryDocument"), NSSelectorFromString(@"copyActiveLibraries"));
+        if (![libs isKindOfClass:[NSArray class]]) return nil;
+        SEL findSel = NSSelectorFromString(@"findRoleWithUID:");
+        for (id library in (NSArray *)libs) {
+            if (![library respondsToSelector:findSel]) continue;
+            id role = ((id (*)(id, SEL, id))objc_msgSend)(library, findSel, roleUID);
+            if (!role || ![role respondsToSelector:@selector(displayName)]) continue;
+            id name = ((id (*)(id, SEL))objc_msgSend)(role, @selector(displayName));
+            if ([name isKindOfClass:[NSString class]] && [(NSString *)name length] > 0) {
+                return (NSString *)name;
+            }
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// Text channels of a title / generator, for an arbitrary clip object (the
+// selection-based inspector.getTitle walks the same chain): primary
+// clip.effect -> channelFolder; fallback clip.effectStack -> visibleEffects ->
+// each channelFolder. Returns the channel dicts SpliceKit_collectTitleText
+// produces (text, fontName, fontFamily, fontSize, textColor, channelName,
+// channelID, handle) or nil when the clip has no text channels.
+static NSArray *SpliceKit_clipInfoTitleText(id clip) {
+    if (!clip) return nil;
+    NSMutableArray *channels = [NSMutableArray array];
+    @try {
+        SEL effectSel = NSSelectorFromString(@"effect");
+        id genEffect = [clip respondsToSelector:effectSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(clip, effectSel) : nil;
+        if (genEffect) {
+            SEL cfSel = NSSelectorFromString(@"channelFolder");
+            id cf = [genEffect respondsToSelector:cfSel]
+                ? ((id (*)(id, SEL))objc_msgSend)(genEffect, cfSel) : nil;
+            if (cf) SpliceKit_collectTitleText(cf, channels, 0);
+        }
+    } @catch (NSException *e) {}
+
+    if (channels.count == 0) {
+        @try {
+            SEL esSel = @selector(effectStack);
+            id effectStack = [clip respondsToSelector:esSel]
+                ? ((id (*)(id, SEL))objc_msgSend)(clip, esSel) : nil;
+            SEL veSel = NSSelectorFromString(@"visibleEffects");
+            if (effectStack && [effectStack respondsToSelector:veSel]) {
+                NSArray *effects = SpliceKit_mixerArrayFromContainer(
+                    ((id (*)(id, SEL))objc_msgSend)(effectStack, veSel));
+                SEL cfSel = NSSelectorFromString(@"channelFolder");
+                for (id effect in effects) {
+                    if (![effect respondsToSelector:cfSel]) continue;
+                    id cf = ((id (*)(id, SEL))objc_msgSend)(effect, cfSel);
+                    if (cf) SpliceKit_collectTitleText(cf, channels, 0);
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+    return channels.count > 0 ? channels : nil;
+}
+
+// Transcript words (SpliceKit's Text-Based Editor) whose [startTime, endTime) overlaps the
+// clip's absolute timeline range [start, end). Word times are timeline seconds.
+// Capped at 400 words (`truncated`). `matchedByHandle` counts the words whose
+// clipHandle is this clip's handle (a consistency check, not a filter).
+static NSDictionary *SpliceKit_clipInfoTranscriptWords(double start, double end, NSString *handle) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    out[@"available"] = @NO;
+    out[@"status"] = @"idle";
+    out[@"wordCount"] = @0;
+    out[@"matchedByHandle"] = @0;
+    out[@"words"] = @[];
+    out[@"text"] = @"";
+    out[@"truncated"] = @NO;
+    @try {
+        SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
+        if (!panel) return out;
+        // Load the cached transcript for the current sequence if it is not in
+        // memory yet (and drop words that belong to another project). This is
+        // the same call transcript.getState makes; it reads the per-sequence
+        // state file but, unlike getState, allocates nothing per word.
+        [panel ensurePersistedStateLoaded];
+        switch (panel.status) {
+            case SpliceKitTranscriptStatusIdle:         out[@"status"] = @"idle"; break;
+            case SpliceKitTranscriptStatusTranscribing: out[@"status"] = @"transcribing"; break;
+            case SpliceKitTranscriptStatusReady:        out[@"status"] = @"ready"; break;
+            case SpliceKitTranscriptStatusError:        out[@"status"] = @"error"; break;
+        }
+        out[@"engine"] = (panel.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
+                         (panel.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
+
+        NSArray<SpliceKitTranscriptWord *> *words = panel.words;
+        out[@"timelineWordCount"] = @(words.count);
+        if (words.count == 0) return out;
+        out[@"available"] = @YES;
+
+        NSMutableArray *rows = [NSMutableArray array];
+        NSMutableArray<NSString *> *texts = [NSMutableArray array];
+        NSMutableArray<NSString *> *speakers = [NSMutableArray array];
+        NSInteger inClip = 0;
+        NSInteger matched = 0;
+        BOOL truncated = NO;
+        for (SpliceKitTranscriptWord *word in words) {
+            if (![word isKindOfClass:[SpliceKitTranscriptWord class]]) continue;
+            double wordStart = word.startTime;
+            double wordEnd = word.endTime;
+            if (wordEnd <= wordStart) wordEnd = wordStart + MAX(0.0, word.duration);
+            if (wordEnd <= start || wordStart >= end) continue;
+            inClip++;
+            if (handle.length > 0 && [word.clipHandle isEqualToString:handle]) matched++;
+            if (rows.count >= 400) { truncated = YES; continue; }
+
+            NSMutableDictionary *row = [NSMutableDictionary dictionary];
+            row[@"text"] = word.text ?: @"";
+            row[@"startTime"] = @(wordStart);
+            row[@"endTime"] = @(wordEnd);
+            row[@"confidence"] = @(word.confidence);
+            row[@"wordIndex"] = @(word.wordIndex);
+            if (word.speaker.length > 0) {
+                row[@"speaker"] = word.speaker;
+                if (![speakers containsObject:word.speaker]) [speakers addObject:word.speaker];
+            }
+            if (word.clipHandle.length > 0) row[@"clipHandle"] = word.clipHandle;
+            [rows addObject:row];
+            if (word.text.length > 0) [texts addObject:word.text];
+        }
+        out[@"wordCount"] = @(inClip);
+        out[@"matchedByHandle"] = @(matched);
+        out[@"words"] = rows;
+        out[@"text"] = [texts componentsJoinedByString:@" "];
+        out[@"speakers"] = speakers;
+        out[@"truncated"] = @(truncated);
+    } @catch (NSException *e) {
+        out[@"error"] = [NSString stringWithFormat:@"Exception: %@", e.reason];
+    }
+    return out;
+}
+
+// JPEG (quality 0.75) from a CGImage, downscaled through a CGBitmapContext so
+// that its longest side is at most maxSide (the same box AVAssetImageGenerator's
+// square maximumSize enforces). Never consumes `image`; the caller releases it.
+static NSData *SpliceKit_clipInfoJPEGFromCGImage(CGImageRef image, int maxSide, int *outWidth, int *outHeight) {
+    if (!image) return nil;
+    size_t srcWidth = CGImageGetWidth(image);
+    size_t srcHeight = CGImageGetHeight(image);
+    if (srcWidth == 0 || srcHeight == 0) return nil;
+
+    CGImageRef scaled = NULL;
+    CGImageRef source = image;
+    size_t longest = MAX(srcWidth, srcHeight);
+    if (maxSide > 0 && longest > (size_t)maxSide) {
+        double scale = (double)maxSide / (double)longest;
+        size_t dstWidth = (size_t)MAX(1LL, llround((double)srcWidth * scale));
+        size_t dstHeight = (size_t)MAX(1LL, llround((double)srcHeight * scale));
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = colorSpace
+            ? CGBitmapContextCreate(NULL, dstWidth, dstHeight, 8, 0, colorSpace,
+                                    kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big)
+            : NULL;
+        if (ctx) {
+            CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+            CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)dstWidth, (CGFloat)dstHeight), image);
+            scaled = CGBitmapContextCreateImage(ctx);
+            CGContextRelease(ctx);
+        }
+        if (colorSpace) CGColorSpaceRelease(colorSpace);
+        if (scaled) source = scaled;
+    }
+
+    NSData *jpeg = nil;
+    @try {
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:source];
+        jpeg = [rep representationUsingType:NSBitmapImageFileTypeJPEG
+                                 properties:@{NSImageCompressionFactor: @0.75}];
+    } @catch (NSException *e) { jpeg = nil; }
+    if (outWidth) *outWidth = (int)CGImageGetWidth(source);
+    if (outHeight) *outHeight = (int)CGImageGetHeight(source);
+    if (scaled) CGImageRelease(scaled);
+    return jpeg;
+}
+
+// SpliceKit's classification of a timeline item (SpliceKit bookkeeping, spelled
+// with FCP's words), from the class name: FFAnchoredGapGeneratorComponent -> gap
+// clip, FFAnchoredTransition -> transition, FFAnchoredCaption -> caption,
+// FFAnchoredGeneratorComponent -> generator (FCP's titles are generator components
+// with a title effect; the caller upgrades a generator with text channels to
+// "title"), FFAnchoredCollection -> connected storyline / compound clip, media
+// components by their video/audio flags.
+static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasAudio) {
+    NSString *cls = item ? (NSStringFromClass([item class]) ?: @"") : @"";
+    if ([cls containsString:@"Gap"]) return @"gap clip";
+    if ([cls containsString:@"Transition"]) return @"transition";
+    if ([cls containsString:@"Caption"]) return @"caption";
+    if ([cls containsString:@"Title"]) return @"title";
+    if ([cls containsString:@"Generator"]) {
+        NSArray<NSString *> *titleSelectors = @[@"isTitle", @"isTitleGenerator", @"isTitleClip"];
+        for (NSString *selName in titleSelectors) {
+            BOOL flag = NO;
+            if (SpliceKit_tryReadBoolSelector(item, selName, &flag) && flag) return @"title";
+        }
+        return @"generator";
+    }
+    if ([cls containsString:@"Collection"] || [cls containsString:@"Sequence"]) {
+        if (SpliceKit_boolForSelector(item, @"isConnectedStoryline")) return @"connected storyline";
+        return @"compound clip";
+    }
+    if (hasVideo) return @"video clip";
+    if (hasAudio) return @"audio clip";
+    return @"clip";
+}
+
+// Frame time for a clip: the midpoint unless the caller asked for an absolute
+// timeline time, which is clamped into [clipStart, clipEnd - 1 ms].
+static double SpliceKit_clipInfoFrameTime(double clipStart, double clipEnd, BOOL haveRequested,
+                                          double requested, BOOL *outClamped) {
+    if (outClamped) *outClamped = NO;
+    if (!haveRequested || !isfinite(requested)) return (clipStart + clipEnd) / 2.0;
+    double lastInside = MAX(clipStart, clipEnd - 0.001);
+    if (requested < clipStart) { if (outClamped) *outClamped = YES; return clipStart; }
+    if (requested > lastInside) { if (outClamped) *outClamped = YES; return lastInside; }
+    return requested;
+}
+
+// timeline.getClipInfo -- read-only clip information by handle.
+//   params: handle (required), includeFrame (YES), frameTime (absolute timeline
+//           seconds inside the clip; default midpoint), frameMaxWidth (640, 64..1920),
+//           includeTranscript (YES), includeEffects (YES), includeMarkers (YES)
+NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
+    NSString *handle = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
+    if (handle.length == 0) {
+        return @{@"error": @"handle parameter required (a clip handle from timeline.getDetailedState)"};
+    }
+    BOOL includeFrame = SpliceKit_clipInfoBoolParam(params, @"includeFrame", YES);
+    BOOL includeTranscript = SpliceKit_clipInfoBoolParam(params, @"includeTranscript", YES);
+    BOOL includeEffects = SpliceKit_clipInfoBoolParam(params, @"includeEffects", YES);
+    BOOL includeMarkers = SpliceKit_clipInfoBoolParam(params, @"includeMarkers", YES);
+    BOOL haveFrameTime = [params[@"frameTime"] isKindOfClass:[NSNumber class]];
+    double frameTimeParam = haveFrameTime ? [params[@"frameTime"] doubleValue] : 0.0;
+    int frameMaxWidth = [params[@"frameMaxWidth"] isKindOfClass:[NSNumber class]]
+        ? [params[@"frameMaxWidth"] intValue] : 640;
+    if (frameMaxWidth < 64) frameMaxWidth = 64;
+    if (frameMaxWidth > 1920) frameMaxWidth = 1920;
+
+    double startedAt = CFAbsoluteTimeGetCurrent();
+    __block NSDictionary *result = nil;
+    __block NSMutableDictionary *info = nil;
+    __block NSURL *frameURL = nil;
+    __block double clipStartSeconds = 0.0;
+    __block double clipEndSeconds = 0.0;
+    __block double sourceStartSeconds = 0.0;
+    __block double mediaOriginSeconds = 0.0;
+    __block BOOL haveRange = NO;
+    __block BOOL sourceExists = NO;
+
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
+
+            id sequence = [timeline respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+            if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
+
+            id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
+
+            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            NSString *resolveError = nil;
+            id item = SpliceKit_handleResolveTimelineClip(handle, primaryObj, &range, &resolveError);
+            if (!item) {
+                if ([resolveError hasPrefix:@"markers are not clips"]) {
+                    resolveError = @"a marker is not a clip (markers are placed within clips); use list_markers or the marker actions";
+                }
+                result = @{@"error": resolveError ?: @"clip is not in the active sequence", @"handle": handle};
+                return;
+            }
+            // A nested connected clip whose absolute range the connected walk could
+            // not compute still gets everything that does not need placement.
+            haveRange = (range.start.timescale > 0 && range.duration.timescale > 0);
+
+            // Built locally and published to `info` as the LAST statement, so a
+            // 20 s watchdog timeout in SpliceKit_executeOnMainThread can never
+            // hand the RPC thread a dictionary this thread is still filling.
+            NSMutableDictionary *local = [NSMutableDictionary dictionary];
+            local[@"handle"] = handle;
+            local[@"class"] = NSStringFromClass([item class]) ?: @"";
+            local[@"name"] = SpliceKit_displayNameForItem(item) ?: @"";
+            BOOL hasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+            BOOL hasAudio = SpliceKit_boolForSelector(item, @"hasAudio");
+            local[@"hasVideo"] = @(hasVideo);
+            local[@"hasAudio"] = @(hasAudio);
+            local[@"lane"] = @(SpliceKit_laneForItem(item));
+
+            // Placement on the timeline.
+            double clipDuration = 0.0;
+            if (haveRange) {
+                clipStartSeconds = SpliceKit_secondsFromTime(range.start);
+                clipDuration = SpliceKit_secondsFromTime(range.duration);
+                clipEndSeconds = clipStartSeconds + clipDuration;
+                local[@"startTime"] = SpliceKit_serializeCMTime(range.start);
+                local[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
+                local[@"duration"] = SpliceKit_serializeCMTime(range.duration);
+                local[@"timeline"] = @{@"start": @(clipStartSeconds), @"end": @(clipEndSeconds),
+                                      @"duration": @(clipDuration)};
+            } else {
+                local[@"timelineRangeError"] = @"the clip's absolute timeline range could not be determined (nested connected clip); "
+                                              @"start/end, transcript words and the frame need it; timeline.getDetailedState shows what is known";
+            }
+
+            // Primary storyline membership (pointer identity, as trimClip does).
+            BOOL isSpineItem = NO;
+            @try {
+                id spineItems = [primaryObj respondsToSelector:@selector(containedItems)]
+                    ? ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)) : nil;
+                for (id spineItem in SpliceKit_mixerArrayFromContainer(spineItems)) {
+                    if (spineItem == item) { isSpineItem = YES; break; }
+                }
+            } @catch (NSException *e) {}
+            local[@"onPrimaryStoryline"] = @(isSpineItem);
+
+            BOOL enabledFlag = NO;
+            if (SpliceKit_tryReadBoolSelector(item, @"isEnabled", &enabledFlag) ||
+                SpliceKit_tryReadBoolSelector(item, @"enabled", &enabledFlag)) {
+                local[@"enabled"] = @(enabledFlag);
+            }
+
+            // Selection membership (same query timeline.getDetailedState uses).
+            NSMutableSet<NSString *> *selectedKeys =
+                SpliceKit_handleSelectionPointerKeys(SpliceKit_handleSelectionCurrentItems(timeline));
+            NSString *itemKey = SpliceKit_handlePointerKey(item);
+            local[@"selected"] = (itemKey.length > 0 && [selectedKeys containsObject:itemKey]) ? @YES : @NO;
+
+            // Roles (Info inspector: Video Role / Audio Role).
+            NSMutableDictionary *roles = [NSMutableDictionary dictionary];
+            NSString *audioRole = SpliceKit_readClipRole(item);
+            if (audioRole.length > 0) roles[@"audio"] = audioRole;
+            NSString *videoRole = SpliceKit_clipInfoRoleName(item, @"videoRoleIdentifier");
+            if (videoRole.length > 0) roles[@"video"] = videoRole;
+            local[@"roles"] = roles;
+
+            // The object that carries the source media (the item itself for a
+            // plain clip; the first media component inside a collection).
+            id mediaComp = SpliceKit_clipInfoMediaComponent(item);
+            NSMutableArray *probeTargets = [NSMutableArray arrayWithObject:item];
+            if (mediaComp && mediaComp != item) [probeTargets addObject:mediaComp];
+            if (mediaComp && mediaComp != item) {
+                local[@"mediaComponentClass"] = NSStringFromClass([mediaComp class]) ?: @"";
+            }
+
+            // Notes (Info inspector: Notes). Unverified selectors, guarded.
+            for (id target in probeTargets) {
+                NSString *note = SpliceKit_tryReadStringSelector(target, @"note");
+                if (note.length == 0) note = SpliceKit_tryReadStringSelector(target, @"notes");
+                if (note.length > 0) { local[@"notes"] = note; break; }
+            }
+
+            // Source media file.
+            NSString *representation = nil;
+            NSString *urlSource = nil;
+            NSURL *mediaURL = SpliceKit_clipInfoMediaURL(mediaComp ?: item, &representation, &urlSource);
+            if (!mediaURL && mediaComp && mediaComp != item) {
+                mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
+            }
+
+            // Source start point (trimStartTime, else trimmedOffset) and where the
+            // source media starts (unclippedRange.start, media component first).
+            SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
+            NSString *sourceStartSelector = @"none";
+            for (id target in probeTargets) {
+                if (SpliceKit_tryReadCMTimeSelector(target, @"trimStartTime", &sourceStart)) {
+                    sourceStartSelector = @"trimStartTime"; break;
+                }
+                if (SpliceKit_tryReadCMTimeSelector(target, @"trimmedOffset", &sourceStart)) {
+                    sourceStartSelector = @"trimmedOffset"; break;
+                }
+            }
+            sourceStartSeconds = (sourceStart.timescale > 0) ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+            SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            NSString *mediaOriginSelector = @"none";
+            mediaOriginSeconds = 0.0;
+            for (id target in [[probeTargets reverseObjectEnumerator] allObjects]) {
+                if (SpliceKit_tryReadCMTimeRangeSelector(target, @"unclippedRange", &unclipped)) {
+                    mediaOriginSelector = @"unclippedRange";
+                    mediaOriginSeconds = SpliceKit_secondsFromTime(unclipped.start);
+                    break;
+                }
+            }
+
+            if (mediaURL) {
+                frameURL = mediaURL;
+                NSString *path = mediaURL.path ?: (mediaURL.absoluteString ?: @"");
+                BOOL exists = path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:path];
+                sourceExists = exists;
+                double fileStart = sourceStartSeconds - mediaOriginSeconds;
+                local[@"sourceMedia"] = @{
+                    @"path": path,
+                    @"fileName": mediaURL.lastPathComponent ?: @"",
+                    @"exists": @(exists),
+                    @"representation": representation ?: @"unknown",
+                    @"urlSource": urlSource ?: @"",
+                    @"sourceStart": @(sourceStartSeconds),
+                    @"sourceStartSelector": sourceStartSelector,
+                    @"mediaOrigin": @(mediaOriginSeconds),
+                    @"mediaOriginSelector": mediaOriginSelector,
+                    @"fileStart": @(fileStart),
+                    @"fileEnd": @(fileStart + clipDuration),
+                };
+            } else {
+                local[@"sourceMediaError"] = @"no source media file: this is a title, generator or gap clip (a clip whose media file is missing still reports its path with exists=false)";
+            }
+
+            // Effects (same reader as effects.getClipEffects; runs inline on the main thread).
+            if (includeEffects) {
+                NSDictionary *fx = SpliceKit_handleGetClipEffects(@{@"handle": handle});
+                NSArray *effects = [fx[@"effects"] isKindOfClass:[NSArray class]] ? fx[@"effects"] : @[];
+                local[@"effects"] = effects;
+                local[@"effectCount"] = [fx[@"effectCount"] isKindOfClass:[NSNumber class]]
+                    ? fx[@"effectCount"] : @(effects.count);
+                if (fx[@"effectStackHandle"]) local[@"effectStackHandle"] = fx[@"effectStackHandle"];
+                if (fx[@"error"]) local[@"effectsError"] = fx[@"error"];
+            }
+
+            // Title text + kind.
+            NSString *kind = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio);
+            NSArray *channels = SpliceKit_clipInfoTitleText(item);
+            if (channels.count > 0) {
+                NSMutableDictionary *title = [NSMutableDictionary dictionary];
+                NSDictionary *first = channels.firstObject;
+                for (NSString *key in @[@"text", @"fontName", @"fontFamily", @"fontSize", @"textColor"]) {
+                    if (first[key]) title[key] = first[key];
+                }
+                title[@"channels"] = channels;
+                title[@"channelCount"] = @(channels.count);
+                local[@"title"] = title;
+                if ([kind isEqualToString:@"generator"]) kind = @"title";
+            }
+            local[@"kind"] = kind;
+
+            // Markers placed within this clip (anchored to it in the model).
+            if (includeMarkers) {
+                NSMutableArray *markers = [NSMutableArray array];
+                @try {
+                    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+                    if ([item respondsToSelector:anchoredSel]) {
+                        NSArray *anchored = SpliceKit_mixerArrayFromContainer(
+                            ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel));
+                        for (id child in anchored) {
+                            if (!SpliceKit_isMarkerLikeItem(child)) continue;
+                            [markers addObject:SpliceKit_describeMarker(child, primaryObj, handle,
+                                                                        haveRange, clipStartSeconds)];
+                        }
+                    }
+                } @catch (NSException *e) {}
+                local[@"markers"] = markers;
+                local[@"markerCount"] = @(markers.count);
+            }
+
+            // Transcript words inside the clip (SpliceKit's Text-Based Editor).
+            if (includeTranscript && haveRange) {
+                local[@"transcript"] = SpliceKit_clipInfoTranscriptWords(clipStartSeconds, clipEndSeconds, handle);
+            } else if (includeTranscript) {
+                local[@"transcript"] = @{@"available": @NO, @"status": @"unknown", @"wordCount": @0,
+                                        @"matchedByHandle": @0, @"words": @[], @"text": @"", @"truncated": @NO,
+                                        @"error": @"clip timeline range unknown; cannot select the words inside it"};
+            }
+            info = local;
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason], @"handle": handle};
+        }
+    });
+    if (result) return result;
+    if (!info) return @{@"error": @"Failed to read clip info (main thread did not finish in time)", @"handle": handle};
+
+    double mainThreadMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000.0;
+    double frameMs = 0.0;
+
+    // Frame from the source media file. AVFoundation work happens here, on the
+    // calling thread, so decoding never blocks FCP's main thread (the
+    // executeOnMainThread watchdog is 20 s). Any failure becomes `frameError`;
+    // the rest of the clip information is returned regardless.
+    if (includeFrame && !haveRange) {
+        info[@"frameError"] = @"clip timeline range unknown; cannot map a timeline time to the source media file";
+    } else if (includeFrame) {
+        double frameStartedAt = CFAbsoluteTimeGetCurrent();
+        BOOL clamped = NO;
+        double timelineTime = SpliceKit_clipInfoFrameTime(clipStartSeconds, clipEndSeconds,
+                                                          haveFrameTime, frameTimeParam, &clamped);
+        double sourceTime = sourceStartSeconds + (timelineTime - clipStartSeconds);
+        double fileTime = sourceTime - mediaOriginSeconds;
+        NSMutableDictionary *request = [NSMutableDictionary dictionary];
+        request[@"timelineTime"] = @(timelineTime);
+        request[@"sourceTime"] = @(sourceTime);
+        request[@"mediaOrigin"] = @(mediaOriginSeconds);
+        request[@"fileTime"] = @(fileTime);
+        if (clamped) request[@"frameTimeClamped"] = @YES;
+
+        if (!frameURL) {
+            info[@"frameError"] = @"no source media file to read a frame from (title, generator or gap clip); use timeline.captureClipFrame for the Viewer";
+            info[@"frameRequest"] = request;
+        } else {
+            NSString *frameError = nil;
+            NSMutableDictionary *frame = [NSMutableDictionary dictionary];
+            @try {
+                // AVAsset never returns nil for a missing file; it just has no
+                // tracks. Check the file first so a missing file is reported as
+                // what FCP shows (Missing File), not as an audio-only clip.
+                AVAsset *asset = sourceExists ? [AVAsset assetWithURL:frameURL] : nil;
+                double assetDuration = 0.0;
+                if (asset) {
+                    CMTime d = asset.duration;
+                    if ((d.flags & kCMTimeFlags_Valid) && d.timescale > 0) assetDuration = CMTimeGetSeconds(d);
+                }
+                if (assetDuration > 0.0) request[@"assetDuration"] = @(assetDuration);
+                if (!sourceExists) {
+                    frameError = [NSString stringWithFormat:@"the source media file is missing on disk (FCP: Missing File): %@",
+                                  frameURL.path ?: frameURL.absoluteString ?: @""];
+                } else if (!asset) {
+                    frameError = @"AVAsset could not open the source media file";
+                } else if ([asset tracksWithMediaType:AVMediaTypeVideo].count == 0) {
+                    frameError = @"no video track could be read from the source media file (an audio-only clip, or a file AVFoundation cannot open)";
+                } else {
+                    if (assetDuration > 0.0) {
+                        fileTime = MIN(MAX(fileTime, 0.0), MAX(0.0, assetDuration - 0.001));
+                    } else if (fileTime < 0.0) {
+                        fileTime = 0.0;
+                    }
+                    request[@"fileTime"] = @(fileTime);
+                    AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+                    gen.appliesPreferredTrackTransform = YES;
+                    gen.maximumSize = CGSizeMake(frameMaxWidth, frameMaxWidth);
+                    gen.requestedTimeToleranceBefore = CMTimeMakeWithSeconds(0.25, 600);
+                    gen.requestedTimeToleranceAfter = CMTimeMakeWithSeconds(0.25, 600);
+                    NSError *imgErr = nil;
+                    CMTime actual = kCMTimeInvalid;
+                    CGImageRef img = [gen copyCGImageAtTime:CMTimeMakeWithSeconds(fileTime, 600)
+                                                 actualTime:&actual error:&imgErr];
+                    if (!img) {
+                        frameError = [NSString stringWithFormat:@"copyCGImageAtTime failed at file time %.3fs: %@",
+                                      fileTime, imgErr.localizedDescription ?: @"unknown error"];
+                    } else {
+                        int width = 0, height = 0;
+                        NSData *jpeg = SpliceKit_clipInfoJPEGFromCGImage(img, frameMaxWidth, &width, &height);
+                        CGImageRelease(img);
+                        if (!jpeg) {
+                            frameError = @"JPEG encoding of the decoded frame failed";
+                        } else {
+                            frame[@"format"] = @"jpeg";
+                            frame[@"width"] = @(width);
+                            frame[@"height"] = @(height);
+                            frame[@"base64"] = [jpeg base64EncodedStringWithOptions:0];
+                            frame[@"bytes"] = @(jpeg.length);
+                            frame[@"timelineTime"] = @(timelineTime);
+                            frame[@"sourceTime"] = @(sourceTime);
+                            frame[@"mediaOrigin"] = @(mediaOriginSeconds);
+                            frame[@"fileTime"] = @(fileTime);
+                            if ((actual.flags & kCMTimeFlags_Valid) && actual.timescale > 0) {
+                                frame[@"actualFileTime"] = @(CMTimeGetSeconds(actual));
+                            }
+                            frame[@"source"] = @"media file";
+                            frame[@"maxWidth"] = @(frameMaxWidth);
+                            if (clamped) frame[@"frameTimeClamped"] = @YES;
+                        }
+                    }
+                }
+            } @catch (NSException *e) {
+                frameError = [NSString stringWithFormat:@"Exception: %@", e.reason];
+            }
+            if (frameError) {
+                info[@"frameError"] = frameError;
+                info[@"frameRequest"] = request;
+            } else {
+                info[@"frame"] = frame;
+            }
+        }
+        frameMs = (CFAbsoluteTimeGetCurrent() - frameStartedAt) * 1000.0;
+    }
+
+    info[@"timings"] = @{@"mainThreadMs": @(mainThreadMs), @"frameMs": @(frameMs)};
+    return info;
+}
+
+// timeline.captureClipFrame -- the clip as rendered in the Viewer (effects included).
+// CHANGES STATE and restores it: moves the playhead to the frame time, lets FCP
+// render (at most 0.35 s of run loop), captures the Viewer, then moves it back.
+// During that render wait the main run loop is spinning, so a request from
+// ANOTHER bridge client (Lua REPL, a second MCP process) can run while the
+// playhead sits at the clip; and if FCP is playing, playback continues, so
+// playheadAtCapture is reported for the caller to compare with timelineTime.
+//   params: handle (required), frameTime (default midpoint), frameMaxWidth (960, 64..1920),
+//           path (PNG; default /tmp/splicekit_clip_<handle>.png), restorePlayhead (YES)
+NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
+    NSString *handle = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
+    if (handle.length == 0) {
+        return @{@"error": @"handle parameter required (a clip handle from timeline.getDetailedState)"};
+    }
+    BOOL haveFrameTime = [params[@"frameTime"] isKindOfClass:[NSNumber class]];
+    double frameTimeParam = haveFrameTime ? [params[@"frameTime"] doubleValue] : 0.0;
+    int frameMaxWidth = [params[@"frameMaxWidth"] isKindOfClass:[NSNumber class]]
+        ? [params[@"frameMaxWidth"] intValue] : 960;
+    if (frameMaxWidth < 64) frameMaxWidth = 64;
+    if (frameMaxWidth > 1920) frameMaxWidth = 1920;
+    NSString *path = ([params[@"path"] isKindOfClass:[NSString class]] && [params[@"path"] length] > 0)
+        ? params[@"path"] : [NSString stringWithFormat:@"/tmp/splicekit_clip_%@.png", handle];
+    BOOL restorePlayhead = SpliceKit_clipInfoBoolParam(params, @"restorePlayhead", YES);
+
+    __block NSDictionary *result = nil;
+    __block NSMutableDictionary *out = nil;
+    SpliceKit_executeOnMainThread(^{
+        // Tracked outside the @try so an exception after the seek still puts the
+        // playhead back and the error reply says where it was.
+        BOOL movedPlayhead = NO;
+        BOOL havePlayhead = NO;
+        double playheadBefore = 0.0;
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
+
+            id sequence = [timeline respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+            if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
+
+            id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
+
+            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            NSString *resolveError = nil;
+            id item = SpliceKit_handleResolveTimelineClip(handle, primaryObj, &range, &resolveError);
+            if (!item) {
+                if ([resolveError hasPrefix:@"markers are not clips"]) {
+                    resolveError = @"a marker is not a clip (markers are placed within clips); use list_markers or the marker actions";
+                }
+                result = @{@"error": resolveError ?: @"clip is not in the active sequence", @"handle": handle};
+                return;
+            }
+            if (range.start.timescale <= 0 || range.duration.timescale <= 0) {
+                result = @{@"error": @"the clip's timeline range could not be determined (nested connected clip); seek there yourself and use viewer.capture",
+                           @"handle": handle};
+                return;
+            }
+
+            double clipStart = SpliceKit_secondsFromTime(range.start);
+            double clipEnd = clipStart + SpliceKit_secondsFromTime(range.duration);
+            BOOL clamped = NO;
+            double timelineTime = SpliceKit_clipInfoFrameTime(clipStart, clipEnd, haveFrameTime,
+                                                              frameTimeParam, &clamped);
+
+            // Half a frame is the restore tolerance (setPlayheadTime: truncates to a frame unit).
+            SpliceKit_CMTime frameDuration = {100, 3000, 1, 0};
+            SEL fdSel = NSSelectorFromString(@"frameDuration");
+            if ([sequence respondsToSelector:fdSel]) {
+                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
+                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
+            }
+            double halfFrame = MAX(0.001, SpliceKit_secondsFromTime(frameDuration)) / 2.0;
+
+            // Built locally and published to `out` only at an exit, so a 20 s
+            // watchdog timeout can never expose a dictionary still being filled.
+            // A failed capture is reported with status "failed" + `failure`
+            // (not `error`: the dispatcher collapses any `error` reply to
+            // {code, message} and would drop the playhead diagnostics).
+            NSMutableDictionary *local = [NSMutableDictionary dictionary];
+            local[@"handle"] = handle;
+            local[@"name"] = SpliceKit_displayNameForItem(item) ?: @"";
+            local[@"class"] = NSStringFromClass([item class]) ?: @"";
+            local[@"timelineTime"] = @(timelineTime);
+            if (clamped) local[@"frameTimeClamped"] = @YES;
+            local[@"path"] = path;
+            local[@"restorePlayhead"] = @(restorePlayhead);
+
+            NSDictionary *before = SpliceKit_handlePlaybackGetPosition(@{});
+            havePlayhead = [before[@"seconds"] isKindOfClass:[NSNumber class]];
+            playheadBefore = havePlayhead ? [before[@"seconds"] doubleValue] : 0.0;
+            if (havePlayhead) local[@"playheadBefore"] = @(playheadBefore);
+
+            NSDictionary *seek = SpliceKit_handlePlaybackSeek(@{@"seconds": @(timelineTime)});
+            if (!seek || seek[@"error"]) {
+                local[@"status"] = @"failed";
+                local[@"failure"] = [seek[@"error"] isKindOfClass:[NSString class]] ? seek[@"error"] : @"seek failed";
+                local[@"playheadRestored"] = @YES;   // nothing moved
+                out = local;
+                return;
+            }
+            movedPlayhead = YES;
+            // Let the Viewer render the new frame before the capture (shipped code
+            // spins the run loop the same way after a model change).
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.35]];
+
+            NSDictionary *capture = SpliceKit_handleCaptureViewer(@{@"path": path});
+            NSDictionary *atCapture = SpliceKit_handlePlaybackGetPosition(@{});
+            if ([atCapture[@"seconds"] isKindOfClass:[NSNumber class]]) {
+                local[@"playheadAtCapture"] = atCapture[@"seconds"];
+            }
+
+            if (restorePlayhead && havePlayhead) {
+                SpliceKit_handlePlaybackSeek(@{@"seconds": @(playheadBefore)});
+                NSDictionary *after = SpliceKit_handlePlaybackGetPosition(@{});
+                double playheadAfter = [after[@"seconds"] isKindOfClass:[NSNumber class]]
+                    ? [after[@"seconds"] doubleValue] : playheadBefore;
+                local[@"playheadAfter"] = @(playheadAfter);
+                local[@"playheadRestored"] = (fabs(playheadAfter - playheadBefore) < halfFrame) ? @YES : @NO;
+            } else {
+                local[@"playheadRestored"] = @NO;
+            }
+
+            if (!capture || capture[@"error"]) {
+                local[@"status"] = @"failed";
+                local[@"failure"] = [capture[@"error"] isKindOfClass:[NSString class]]
+                    ? capture[@"error"] : @"viewer capture failed";
+                out = local;
+                return;
+            }
+            NSMutableDictionary *captureInfo = [NSMutableDictionary dictionary];
+            for (NSString *key in @[@"width", @"height", @"bytes", @"cropped"]) {
+                if (capture[key]) captureInfo[key] = capture[key];
+            }
+            local[@"capture"] = captureInfo;
+            local[@"status"] = @"ok";
+            out = local;
+        } @catch (NSException *e) {
+            // Reported as status "failed" (see above) so the playhead diagnostics survive.
+            NSMutableDictionary *err = [NSMutableDictionary dictionary];
+            err[@"status"] = @"failed";
+            err[@"failure"] = [NSString stringWithFormat:@"Exception: %@", e.reason];
+            err[@"handle"] = handle;
+            err[@"path"] = path;
+            if (movedPlayhead) {
+                BOOL restored = NO;
+                if (havePlayhead) {
+                    err[@"playheadBefore"] = @(playheadBefore);
+                    if (restorePlayhead) {
+                        @try {
+                            SpliceKit_handlePlaybackSeek(@{@"seconds": @(playheadBefore)});
+                            NSDictionary *after = SpliceKit_handlePlaybackGetPosition(@{});
+                            if ([after[@"seconds"] isKindOfClass:[NSNumber class]]) {
+                                double playheadAfter = [after[@"seconds"] doubleValue];
+                                err[@"playheadAfter"] = @(playheadAfter);
+                                restored = fabs(playheadAfter - playheadBefore) < 0.05;
+                            }
+                        } @catch (NSException *e2) {}
+                    }
+                }
+                err[@"playheadRestored"] = restored ? @YES : @NO;
+            } else {
+                err[@"playheadRestored"] = @YES;   // nothing moved
+            }
+            out = err;
+        }
+    });
+    if (result) return result;
+    if (!out) return @{@"error": @"Failed to capture clip frame (main thread did not finish in time)", @"handle": handle};
+    if (![out[@"status"] isEqualToString:@"ok"]) return out;
+
+    // Off the main thread: load the PNG the Viewer capture wrote, downscale, JPEG, base64.
+    @try {
+        NSData *png = [NSData dataWithContentsOfFile:path];
+        NSBitmapImageRep *rep = (png.length > 0) ? [NSBitmapImageRep imageRepWithData:png] : nil;
+        CGImageRef cgImage = rep ? rep.CGImage : NULL;   // owned by the rep; not released here
+        if (!cgImage) {
+            out[@"status"] = @"failed";
+            out[@"failure"] = [NSString stringWithFormat:@"could not read the captured PNG at %@", path];
+            return out;
+        }
+        int width = 0, height = 0;
+        NSData *jpeg = SpliceKit_clipInfoJPEGFromCGImage(cgImage, frameMaxWidth, &width, &height);
+        if (!jpeg) {
+            out[@"status"] = @"failed";
+            out[@"failure"] = @"JPEG encoding of the captured frame failed";
+            return out;
+        }
+        out[@"frame"] = @{
+            @"format": @"jpeg",
+            @"width": @(width),
+            @"height": @(height),
+            @"base64": [jpeg base64EncodedStringWithOptions:0],
+            @"bytes": @(jpeg.length),
+            @"source": @"viewer",
+            @"maxWidth": @(frameMaxWidth),
+        };
+    } @catch (NSException *e) {
+        out[@"status"] = @"failed";
+        out[@"failure"] = [NSString stringWithFormat:@"Exception: %@", e.reason];
+    }
+    return out;
+}
+
 // Batch timeline/playback actions executed server-side (no per-action round-trip)
 static NSDictionary *SpliceKit_handleBatchActions(NSDictionary *params) {
     NSArray *actions = params[@"actions"];
@@ -29228,6 +30226,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleTimelineSelectItems(params);
     } else if ([method isEqualToString:@"timeline.trimClip"]) {
         result = SpliceKit_handleTimelineTrimClip(params);
+    } else if ([method isEqualToString:@"timeline.getClipInfo"]) {
+        result = SpliceKit_handleTimelineGetClipInfo(params);
+    } else if ([method isEqualToString:@"timeline.captureClipFrame"]) {
+        result = SpliceKit_handleTimelineCaptureClipFrame(params);
     } else if ([method isEqualToString:@"timeline.beginEdit"]) {
         result = SpliceKit_handleTimelineBeginEdit(params);
     } else if ([method isEqualToString:@"timeline.endEdit"]) {

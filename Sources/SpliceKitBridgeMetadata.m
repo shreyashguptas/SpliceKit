@@ -71,6 +71,8 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"timeline.batchExport": meta(@"destructive", @"Export each clip via Share."),
             @"timeline.selectItems": meta(@"state_dependent", @"Select timeline items by handle (replace/add/remove); never moves the playhead."),
             @"timeline.trimClip": meta(@"destructive", @"Ripple-trim one edit point of a clip by handle, by delta or to an absolute time."),
+            @"timeline.getClipInfo": meta(@"safe", @"Clip information by handle: Info inspector fields (name, notes, roles, source media file and its media representation) plus SpliceKit extras (timeline placement, effects, title text, markers, transcript words, a frame from the source media file)."),
+            @"timeline.captureClipFrame": meta(@"state_dependent", @"Captures the clip as rendered in the Viewer; moves the playhead and restores it."),
             @"timeline.beginEdit": meta(@"state_dependent", @"Open one undoable action on the sequence; edits until endEdit become one undo step."),
             @"timeline.endEdit": meta(@"state_dependent", @"Close the open undoable action (actionEnd:save:error:) so the group is one undo step."),
 

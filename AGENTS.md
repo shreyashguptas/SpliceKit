@@ -28,8 +28,9 @@ rather than simulating the keyboard shortcut.
 ```
 1. bridge_status()                    -- verify connection
 2. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
-3. timeline_action("blade")           -- edit
-4. verify_action("after blade")       -- confirm
+3. get_clip_info("obj_12")            -- what is IN the clip: source file, transcript words, effects, title text, a frame image
+4. timeline_action("blade")           -- edit
+5. verify_action("after blade")       -- confirm
 ```
 
 ## CRITICAL: Must Know Before Editing
@@ -200,6 +201,19 @@ This is FCP's default trim, a ripple edit (dragging a clip's start or end point 
 subsequent clips move so no gap is left, and connected clips move with the clips they are attached to.
 A start-point trim on the primary storyline keeps the clip in place and changes its duration.
 `delta_seconds=-0.5` works too (negative = edit point earlier). Undo with `timeline_action("undo")`.
+
+### Look inside a clip
+```
+get_timeline_clips()                      # find the clip's handle
+get_clip_info("obj_12")                   # Info inspector fields + (SpliceKit) placement, effects, title text, markers, transcript words, a frame image
+capture_clip_frame("obj_12")              # the clip as rendered in the Viewer (effects included); moves the playhead and restores it
+```
+`get_clip_info` never moves the playhead: its frame is decoded from the source media file (no effects), and the
+tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so.
+`kind`, handles and `timings` are SpliceKit bookkeeping, not FCP terms.
+
+`capture_viewer`, `capture_timeline` and `capture_inspector` return their PNG inline as MCP image content too
+(`return_image=False` to skip).
 
 ### Multiple cuts
 ```

@@ -16,6 +16,8 @@ import json
 import sys
 import time
 import functools
+import base64
+import os
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -34,6 +36,49 @@ except ModuleNotFoundError as exc:
         )
         sys.exit(1)
     raise
+
+# FastMCP's Image helper turns bytes or a file into MCP image content, so a tool can
+# hand a frame or a screenshot to any MCP client inline. It only exists in the real
+# package (the offline tests load this module with a fake FastMCP); without it the
+# tools return text and point at the file / base64 instead.
+try:
+    from mcp.server.fastmcp.utilities.types import Image
+except Exception:  # pragma: no cover - exercised by the offline tests
+    Image = None
+
+
+def _image_content(path=None, data=None, fmt=None):
+    """MCP image content (FastMCP Image) for a local file or raw bytes, or None when an
+    image cannot be returned: no Image class, the file does not exist, or empty data.
+    Tools that return images carry NO return annotation on purpose: FastMCP emits mixed
+    text + image content only for unannotated tools (a `-> str` tool returning a list
+    fails output validation)."""
+    if Image is None:
+        return None
+    try:
+        if data:
+            return Image(data=data, format=(fmt or "jpeg"))
+        if path and os.path.isfile(path):
+            return Image(path=path)
+    except Exception:
+        return None
+    return None
+
+
+def _maybe_with_image(text, image):
+    """[text, image] when an image is available, otherwise just the text."""
+    return [text, image] if image is not None else text
+
+
+def _decode_base64_image(b64):
+    """Bytes for a base64 image string from the bridge; b'' when it is missing or invalid."""
+    if not b64 or not isinstance(b64, str):
+        return b""
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        return b""
+
 
 SPLICEKIT_HOST = "127.0.0.1"
 SPLICEKIT_PORT = 9876
@@ -60,6 +105,10 @@ These capture GPU/Metal content directly — FCP does not need to be in the fore
 - After effects, color, titles, captions → capture_viewer() to check the canvas
 - After blade cuts, markers, rearrangement → capture_timeline() to check layout
 Read the saved PNG to visually confirm the result.
+Captures also come back inline as image content (return_image=True), so any MCP client
+can look at them without reading the file. get_clip_info() returns a frame of a clip's
+source media file the same way; capture_clip_frame() returns the clip as rendered in
+the Viewer (effects included), moving the playhead there and back.
 
 ## IMPORTANT: Opening a Project
 Use open_project(name, event) to find and load a project by name:
@@ -122,6 +171,7 @@ get_timeline_clips() returns a handle (e.g. "obj_12") for every clip, connected 
   timeline_action("addColorBoard")    # then act on the selection as usual
   begin_edit("Rough cut") ... end_edit()   # everything in between becomes ONE undo step (Edit > Undo Rough cut)
   trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   # exact ripple trim; drop dry_run to apply
+  get_clip_info("obj_12")  # what is IN the clip: source file, transcript words, effects, a frame
 A handle is SpliceKit bookkeeping (a reference from an earlier read), not an FCP term, and unrelated to
 FCP's "media handles" (extra source media beyond a clip's edges). Re-run get_timeline_clips() if a handle
 comes back unresolved. select_clips selects clips only; markers are changed through the marker actions.
@@ -222,6 +272,7 @@ READ_ONLY_TOOLS = {
     "get_object_property",
     "generate_fcpxml",
     "get_clip_effects",
+    "get_clip_info",
     "analyze_timeline",
     "get_active_libraries",
     "is_library_updating",
@@ -380,6 +431,7 @@ IDEMPOTENT_LOCAL_WRITE_TOOLS = {
     "open_project",
     "select_clip_in_lane",
     "select_clips",
+    "capture_clip_frame",
     "mixer_volume_begin",
     "mixer_volume_end",
     "open_livecam",
@@ -419,6 +471,8 @@ CUSTOM_TOOL_TITLES = {
     "begin_edit": "Begin Undo Step",
     "end_edit": "End Undo Step",
     "trim_clip": "Trim Clip",
+    "get_clip_info": "Get Clip Info",
+    "capture_clip_frame": "Capture Clip Frame",
     "capture_viewer": "Capture Viewer",
     "capture_timeline": "Capture Timeline",
     "capture_inspector": "Capture Inspector",
@@ -4506,13 +4560,281 @@ def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
 
 
 # ============================================================
+# Clip Information (Info inspector fields + SpliceKit extras) and Viewer frame
+# ============================================================
+# Per-clip context for the AI: the Info inspector's fields for one clip
+# (name, notes, roles, source media file) plus what SpliceKit adds from
+# the model (timeline placement, effects, title text, markers, transcript
+# words, a frame image), all by handle and without moving the playhead.
+
+def _secs3(value):
+    return f"{value:.3f}s" if isinstance(value, (int, float)) else "?"
+
+
+def _render_clip_info(r: dict) -> str:
+    """Compact Info-inspector style summary of a timeline.getClipInfo response."""
+    tl = r.get("timeline") if isinstance(r.get("timeline"), dict) else {}
+    start = tl.get("start", _time_seconds(r, "startTime"))
+    end = tl.get("end", _time_seconds(r, "endTime"))
+    duration = tl.get("duration", _time_seconds(r, "duration"))
+    where = "primary storyline" if r.get("onPrimaryStoryline") else "connected clip"
+    lines = [f"{r.get('name', '?')} — {r.get('kind', 'clip')} on lane {r.get('lane', 0)} ({where}), "
+             f"{_secs3(start)}–{_secs3(end)} ({_secs3(duration)})",
+             f"  handle {r.get('handle', '?')} ({r.get('class', '?')})"]
+    if r.get("timelineRangeError"):
+        lines.append(f"  timeline range: unknown -- {r['timelineRangeError']}")
+
+    roles = r.get("roles") if isinstance(r.get("roles"), dict) else {}
+    role_bits = []
+    if roles.get("video"):
+        role_bits.append(f"video: {roles['video']}")
+    if roles.get("audio"):
+        role_bits.append(f"audio: {roles['audio']}")
+    lines.append("  roles: " + (", ".join(role_bits) if role_bits else "(none reported)"))
+
+    flags = []
+    if "enabled" in r:
+        flags.append("enabled" if r.get("enabled") else "DISABLED")
+    media = [name for name, key in (("video", "hasVideo"), ("audio", "hasAudio")) if r.get(key)]
+    flags.append("+".join(media) if media else "no media flags")
+    if r.get("selected"):
+        flags.append("selected")
+    lines.append("  " + ", ".join(flags))
+
+    sm = r.get("sourceMedia")
+    if isinstance(sm, dict):
+        lines.append(f"  source media file: {sm.get('fileName', '?')} "
+                     f"({'exists' if sm.get('exists') else 'missing on disk (FCP: Missing File)'}; "
+                     f"media representation: {sm.get('representation', '?')})")
+        lines.append(f"    path: {sm.get('path', '')}")
+        lines.append(f"    start point in the source media: {_secs3(sm.get('sourceStart'))}; "
+                     f"media starts at {_secs3(sm.get('mediaOrigin'))}; "
+                     f"{_secs3(sm.get('fileStart'))}–{_secs3(sm.get('fileEnd'))} into the media file")
+    elif r.get("sourceMediaError"):
+        lines.append(f"  source media file: {r['sourceMediaError']}")
+
+    if "effects" in r or "effectCount" in r:
+        effects = r.get("effects") or []
+        names = []
+        for e in effects:
+            if not isinstance(e, dict):
+                continue
+            label = e.get("name") or e.get("class", "?")
+            eid = e.get("effectID")
+            names.append(f"{label} ({eid})" if eid and eid != label else str(label))
+        lines.append(f"  effects: {r.get('effectCount', len(effects))}" + (": " + ", ".join(names) if names else ""))
+        if r.get("effectsError"):
+            lines.append(f"    effects error: {r['effectsError']}")
+
+    title = r.get("title")
+    if isinstance(title, dict):
+        font = ""
+        if title.get("fontFamily") or title.get("fontName"):
+            font = f", {title.get('fontFamily') or title.get('fontName')}"
+            if title.get("fontSize") is not None:
+                font += f" {title['fontSize']}pt"
+        channels = [c for c in (title.get("channels") or []) if isinstance(c, dict)]
+        count = title.get("channelCount", len(channels))
+        lines.append(f"  title text: {title.get('text', '')!r}{font} ({count} text layer(s))")
+        if len(channels) > 1:
+            for c in channels[:8]:
+                lines.append(f"    {c.get('channelName') or 'text'}: {str(c.get('text', ''))!r}")
+            if len(channels) > 8:
+                lines.append(f"    ... {len(channels) - 8} more text layer(s)")
+
+    if "markers" in r or "markerCount" in r:
+        markers = r.get("markers") or []
+        lines.append(f"  markers within the clip: {r.get('markerCount', len(markers))}")
+        for m in markers[:5]:
+            lines.append(f"    at {_secs3(_time_seconds(m, 'time'))} (timeline) {m.get('kind', '?')} {m.get('name', '')}".rstrip())
+        if len(markers) > 5:
+            lines.append(f"    ... {len(markers) - 5} more")
+
+    tr = r.get("transcript")
+    if isinstance(tr, dict):
+        if tr.get("error"):
+            lines.append(f"  transcript (SpliceKit Text-Based Editor): error {tr['error']}")
+        elif not tr.get("available"):
+            lines.append(f"  transcript: none (SpliceKit Text-Based Editor status: {tr.get('status', 'idle')}; "
+                         f"run open_transcript() first; this is not FCP's Transcribe to Captions)")
+        else:
+            words = [w for w in (tr.get("words") or []) if isinstance(w, dict)]
+            span = ""
+            if words and isinstance(words[0].get("startTime"), (int, float)) \
+                    and isinstance(words[-1].get("endTime"), (int, float)):
+                span = f", {_secs3(words[0]['startTime'])}–{_secs3(words[-1]['endTime'])} timeline"
+            lines.append(f"  transcript (SpliceKit Text-Based Editor): {tr.get('wordCount', len(words))} word(s) in clip"
+                         f"{span} (status {tr.get('status', '?')}, {tr.get('matchedByHandle', 0)} tagged with this handle"
+                         f"{', truncated' if tr.get('truncated') else ''})")
+            preview = " ".join(str(w.get("text", "")) for w in words[:60]).strip()
+            if preview:
+                lines.append(f'    "{preview}{" ..." if len(words) > 60 else ""}"')
+            if tr.get("speakers"):
+                lines.append(f"    speakers: {', '.join(str(x) for x in tr['speakers'])}")
+            lines.append("    (per-word times and confidence: get_transcript() / search_transcript())")
+
+    if r.get("notes"):
+        lines.append(f"  notes: {r['notes']}")
+
+    frame = r.get("frame")
+    if isinstance(frame, dict):
+        lines.append(f"  frame: {frame.get('width')}x{frame.get('height')} JPEG at {_secs3(frame.get('timelineTime'))} "
+                     f"(source {_secs3(frame.get('sourceTime'))}, file {_secs3(frame.get('fileTime'))}) "
+                     f"from the source media file, no effects")
+    elif r.get("frameError"):
+        lines.append(f"  frame: not available -- {r['frameError']}")
+
+    timings = r.get("timings")
+    if isinstance(timings, dict):
+        lines.append(f"  (timings: main thread {timings.get('mainThreadMs', 0):.0f} ms, "
+                     f"frame {timings.get('frameMs', 0):.0f} ms)")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_tool_annotations("get_clip_info"))
+def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | None = None,
+                  frame_max_width: int = 640):
+    """Clip information for one clip by handle: the fields Final Cut Pro's Info
+    inspector shows for it, plus timeline placement, effects, title text, markers,
+    transcript words and a frame from its source media file. Read-only: never moves
+    the playhead and never changes the selection.
+
+    Info inspector fields: name, notes, Video Roles / Audio Roles, and the source
+    media file: path, file name, whether the file exists on disk (FCP: Missing File
+    when it does not), and which media representation it is, in FCP's words:
+    original, optimized or proxy (the Info inspector lists these under Available
+    Media Representations). The Info inspector's Start / End / Duration are shown
+    there as timecode; this tool reports timeline seconds instead (below).
+
+    Timeline placement and source timing (SpliceKit, in seconds): start, end and
+    duration on the timeline; whether the clip is on the primary storyline or a
+    connected clip and its lane; enabled or disabled (Clip > Disable); selected; the
+    clip's start point in the source media; where the source media starts (normally
+    its starting source timecode); and how many seconds into the media file the
+    clip's range lies.
+
+    Added by SpliceKit from the model: the effects on the clip (names and effect IDs;
+    get_clip_effects() for handles and parameters), the title text of a title or
+    generator (text, font and size, and the text of every text layer), the markers
+    placed within the clip, the words of SpliceKit's Text-Based Editor transcript that
+    fall inside the clip (open_transcript() first; the summary shows the text, the
+    count and the time span; get_transcript() has per-word times, confidence and
+    speaker), and a JPEG frame decoded straight from the source media file at the
+    clip's midpoint (or frame_time). That frame is the raw footage WITHOUT effects,
+    color or transforms; use capture_clip_frame() for the rendered look. The frame is
+    returned inline as MCP image content, so any MCP client can look at it.
+
+    Args:
+        handle: the clip's handle from get_timeline_clips() (e.g. "obj_12").
+        include_frame: also decode a frame from the source media file (default True).
+        frame_time: absolute timeline time in seconds of the frame to read; default the
+                    clip's midpoint; a time outside the clip is clamped into it.
+        frame_max_width: longest side of the returned frame in pixels (64-1920, default 640).
+
+    `kind` (video clip, audio clip, title, generator, gap clip, transition, compound
+    clip, connected storyline, caption), handles and `timings` are SpliceKit's own
+    bookkeeping, spelled with FCP's words. Titles, generators and gap clips have no
+    source media file and report that instead of a frame. A marker is not a clip;
+    use list_markers().
+    """
+    if not handle:
+        return "Error: handle is required (get it from get_timeline_clips())"
+    params = {"handle": handle, "includeFrame": bool(include_frame),
+              "frameMaxWidth": int(frame_max_width)}
+    if frame_time is not None:
+        params["frameTime"] = float(frame_time)
+    r = bridge.call("timeline.getClipInfo", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+
+    text = _render_clip_info(r)
+    frame = r.get("frame") if isinstance(r.get("frame"), dict) else None
+    image = None
+    if frame and frame.get("base64"):
+        image = _image_content(data=_decode_base64_image(frame.get("base64")),
+                               fmt=frame.get("format") or "jpeg")
+        if image is None and Image is None:
+            text += "\n  (frame available as base64 in the raw RPC timeline.getClipInfo)"
+    return _maybe_with_image(text, image)
+
+
+@mcp.tool(annotations=_tool_annotations("capture_clip_frame"))
+def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960):
+    """The clip as rendered in the Viewer: effects, color correction and transforms
+    included. Moves the playhead to the frame time and restores it afterwards.
+
+    Moves the playhead to frame_time (default the clip's midpoint), lets Final Cut Pro
+    render the frame, captures the Viewer to a PNG (a screenshot of the Viewer, not
+    FCP's File > Share > Save Current Frame export) and puts the playhead back where
+    it was (the selection is not touched). The frame is returned inline as MCP image
+    content and the PNG path is reported. The Viewer shows the playhead frame only
+    while the pointer is not skimming over the timeline.
+
+    Prefer get_clip_info() when the raw footage is enough: it reads the frame from the
+    source media file without moving the playhead. Use this tool to see what the clip
+    actually looks like in the Viewer after effects, color or a title over it.
+
+    Args:
+        handle: the clip's handle from get_timeline_clips() (e.g. "obj_12").
+        frame_time: absolute timeline time in seconds; default the clip's midpoint;
+                    clamped into the clip.
+        frame_max_width: longest side of the returned JPEG in pixels (64-1920, default 960).
+
+    Reports playheadBefore / playheadAtCapture and whether the playhead was restored
+    (within half a frame). If it was not, seek_to_time(playheadBefore) puts it back.
+    A capture that fails still reports those playhead fields (status "failed").
+    """
+    if not handle:
+        return "Error: handle is required (get it from get_timeline_clips())"
+    params = {"handle": handle, "frameMaxWidth": int(frame_max_width)}
+    if frame_time is not None:
+        params["frameTime"] = float(frame_time)
+    r = bridge.call("timeline.captureClipFrame", **params)
+    if _err(r) and "status" not in r:
+        return f"Error: {r.get('error', r)}"
+
+    status = r.get("status", "?")
+    tt = r.get("timelineTime")
+    lines = [f"Viewer frame {'captured' if status == 'ok' else 'FAILED'} for '{r.get('name', '')}' "
+             f"({r.get('handle', handle)}) at {_secs3(tt)}"]
+    restored = r.get("playheadRestored")
+    if isinstance(r.get("playheadBefore"), (int, float)):
+        lines.append(f"  playhead: {_secs3(r.get('playheadBefore'))} -> {_secs3(r.get('playheadAtCapture'))} "
+                     f"at capture -> restored: {'yes' if restored else 'NO'}")
+        if not restored:
+            lines.append(f"  WARNING: the playhead was not restored; seek_to_time({r.get('playheadBefore')}) puts it back")
+    elif restored is False:
+        lines.append("  WARNING: the playhead was moved and its previous position could not be read, so it was "
+                     "not restored; check get_playhead_position()")
+    if r.get("path"):
+        lines.append(f"  PNG: {r['path']}")
+    capture = r.get("capture") if isinstance(r.get("capture"), dict) else {}
+    frame = r.get("frame") if isinstance(r.get("frame"), dict) else None
+    if frame:
+        where = ("as rendered in the Viewer (effects included)" if capture.get("cropped", True)
+                 else "of the whole FCP window (the Viewer could not be isolated; effects included)")
+        lines.append(f"  frame: {frame.get('width')}x{frame.get('height')} JPEG {where}")
+    failure = r.get("failure") or r.get("error")
+    if failure:
+        lines.append(f"  failure: {failure}")
+
+    image = None
+    if frame and frame.get("base64"):
+        image = _image_content(data=_decode_base64_image(frame.get("base64")),
+                               fmt=frame.get("format") or "jpeg")
+        if image is None and Image is None:
+            lines.append("  (frame available as base64 in the raw RPC timeline.captureClipFrame)")
+    return _maybe_with_image("\n".join(lines), image)
+
+
+# ============================================================
 # Capture Viewer Screenshot
 # ============================================================
 # Captures the viewer/canvas contents directly — no external
 # screencapture tool needed, no other windows in the way.
 
 @mcp.tool(annotations=_tool_annotations("capture_viewer"))
-def capture_viewer(path: str = "/tmp/splicekit_viewer.png") -> str:
+def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool = True):
     """Capture the FCP viewer/canvas as a PNG screenshot.
 
     Screenshots the viewer area only (cropped from the FCP window, not the
@@ -4526,17 +4848,20 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png") -> str:
     Args:
         path: Output file path for the PNG image.
               Default: /tmp/splicekit_viewer.png
+        return_image: also return the PNG inline as MCP image content (default True),
+              so any MCP client can look at it without reading the file.
 
-    Returns the file path, image dimensions, and file size.
-    The saved PNG can be read by Claude to visually verify viewer output.
+    Returns the file path, image dimensions, and file size, plus the image itself
+    when return_image is True. The saved PNG can also be read from disk.
     """
     r = bridge.call("viewer.capture", path=path)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
     if r.get("status") == "ok":
-        return (f"Viewer captured: {r.get('path')}\n"
+        text = (f"Viewer captured: {r.get('path')}\n"
                 f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+        return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 
 
@@ -4545,7 +4870,7 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png") -> str:
 # ============================================================
 
 @mcp.tool(annotations=_tool_annotations("capture_timeline"))
-def capture_timeline(path: str = "/tmp/splicekit_timeline.png") -> str:
+def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bool = True):
     """Capture the FCP timeline as a PNG screenshot.
 
     Screenshots the timeline area only (cropped from the FCP window, not the
@@ -4560,17 +4885,20 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png") -> str:
     Args:
         path: Output file path for the PNG image.
               Default: /tmp/splicekit_timeline.png
+        return_image: also return the PNG inline as MCP image content (default True),
+              so any MCP client can look at it without reading the file.
 
-    Returns the file path, image dimensions, and file size.
-    The saved PNG can be read by Claude to visually verify timeline state.
+    Returns the file path, image dimensions, and file size, plus the image itself
+    when return_image is True. The saved PNG can also be read from disk.
     """
     r = bridge.call("timeline.capture", path=path)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
     if r.get("status") == "ok":
-        return (f"Timeline captured: {r.get('path')}\n"
+        text = (f"Timeline captured: {r.get('path')}\n"
                 f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+        return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 
 
@@ -4579,7 +4907,8 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png") -> str:
 # ============================================================
 
 @mcp.tool(annotations=_tool_annotations("capture_inspector"))
-def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: str = "") -> str:
+def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: str = "",
+                      return_image: bool = True):
     """Capture the FCP Inspector pane as a PNG screenshot.
 
     Crops the Inspector area from the FCP window. Searches the view hierarchy
@@ -4596,9 +4925,11 @@ def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: st
               Default: /tmp/splicekit_inspector.png
         class_name: Optional override — search for a specific NSView subclass
               instead of the default candidate list.
+        return_image: also return the PNG inline as MCP image content (default True),
+              so any MCP client can look at it without reading the file.
 
-    Returns the file path, image dimensions, file size, and the matched class.
-    The saved PNG can be read by Claude to visually verify Inspector contents.
+    Returns the file path, image dimensions, file size, and the matched class, plus
+    the image itself when return_image is True. The saved PNG can also be read from disk.
     """
     kwargs = {"path": path}
     if class_name:
@@ -4609,9 +4940,10 @@ def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: st
 
     if r.get("status") == "ok":
         matched = r.get("matchedClass", "(full window fallback)")
-        return (f"Inspector captured: {r.get('path')}\n"
+        text = (f"Inspector captured: {r.get('path')}\n"
                 f"Matched class: {matched}\n"
                 f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+        return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 
 

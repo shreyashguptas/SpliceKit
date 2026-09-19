@@ -404,6 +404,25 @@ sk.select_clip()
 local effects = sk.rpc("effects.getClipEffects", {})
 ```
 
+### Clip Information (Info inspector fields + SpliceKit extras)
+
+```lua
+-- What is IN a clip, by handle: Info inspector fields (name, notes, roles, source media file and
+-- its media representation: original / optimized / proxy) plus SpliceKit extras (timeline start/end/
+-- duration, effects, title text, markers, transcript words and a frame decoded from the source
+-- media file). Read-only: never moves the playhead.
+local h = sk.clips().items[1].handle
+local info = sk.rpc("timeline.getClipInfo", {handle = h})
+print(info.name, info.kind, info.sourceMedia and info.sourceMedia.path)
+print(info.transcript.wordCount, info.transcript.text)
+-- info.frame.base64 is a JPEG (info.frame.width x info.frame.height); decode it to look at the frame.
+-- Options: includeFrame=false, frameTime=<timeline seconds>, frameMaxWidth=<64..1920>
+
+-- The clip as rendered in the Viewer (effects included). Moves the playhead there and restores it.
+local shot = sk.rpc("timeline.captureClipFrame", {handle = h})
+print(shot.path, shot.playheadRestored)   -- shot.frame.base64 is a JPEG too
+```
+
 ---
 
 ## 6. Color Correction
