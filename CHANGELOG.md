@@ -8,6 +8,26 @@ same page or via `appcast.xml`.
 
 ## [Unreleased]
 
+### Added
+- **`add_clip_to_timeline`: a range of a browser clip onto the timeline.** The
+  range (`start_seconds`/`end_seconds` from the clip's first frame) is written
+  to FCP's pasteboard and placed with FCP's Edit > Paste (insert, the effect of
+  W) or Paste as Connected Clip (connect, the effect of Q) at the playhead
+  (`at_seconds` moves it first; for these two this is FCP's three-point edit),
+  or appended at the end of the primary storyline (the effect of E); connect
+  can be backtimed (Shift-Q); `dry_run` resolves without editing. The bridge
+  (`browser.placeClip`) re-reads the timeline before and after (by object
+  identity, so the 2000-handle table limit cannot fool it) and reports the
+  placed clip, whether the range was honored and whether it landed where
+  asked, within two frames (at least 50 ms), plus anything else the edit
+  created. No overwrite: FCP has no paste that overwrites. Not yet run
+  against a live Final Cut Pro; `tests/live_timeline_reads_check.py
+  --place-check` does that. The legacy `browser.appendClip` / `insertClip` /
+  `connectClip` answers keep `clip` as the name and gain the same report
+  (`placementVerified` is now a real check). The server's instructions are now
+  a task-organized map of the editing tools (developer/debug families are left
+  out on purpose).
+
 ### Changed
 - **The MCP server now runs on the official MCP Python SDK 2.x** (`mcp>=2.2,<3`,
   `MCPServer`), which implements the current stable protocol revision

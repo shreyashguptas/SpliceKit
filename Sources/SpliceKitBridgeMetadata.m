@@ -76,6 +76,13 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"timeline.beginEdit": meta(@"state_dependent", @"Open one undoable action on the sequence; edits until endEdit become one undo step."),
             @"timeline.endEdit": meta(@"state_dependent", @"Close the open undoable action (actionEnd:save:error:) so the group is one undo step."),
 
+            // browser.*
+            @"browser.listClips": meta(@"safe", @"Clips in the browser (the active library's event clips): name, event, duration, handle."),
+            @"browser.placeClip": meta(@"destructive", @"Place a browser clip, or a range of it (inSeconds/outSeconds from the clip's first frame), through FCP's pasteboard: edit=insert pastes at the playhead (the effect of Insert W), connect pastes as a connected clip (the effect of Connect Q, backtimed optional), append pastes at the end of the primary storyline (the effect of Append E); atSeconds moves the playhead first. The timeline is re-read before and after: placed, alsoNew, rangeHonored, positionVerified (within two frames). dryRun resolves without editing; the pasteboard is replaced."),
+            @"browser.appendClip": meta(@"destructive", @"browser.placeClip with edit=append: paste a browser clip at the end of the primary storyline (the effect of Append E)."),
+            @"browser.insertClip": meta(@"destructive", @"browser.placeClip with edit=insert: paste a browser clip at the playhead (the effect of Insert W)."),
+            @"browser.connectClip": meta(@"destructive", @"browser.placeClip with edit=connect: paste a browser clip as a connected clip at the playhead (the effect of Connect Q)."),
+
             // spine.*
             @"spine.getItems": meta(@"safe", @"Read spine-level items from primary storyline."),
             @"spine.reorder": meta(@"destructive", @"Move items within the spine."),

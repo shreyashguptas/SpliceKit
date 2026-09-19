@@ -218,6 +218,38 @@ class FakeBridge(threading.Thread):
             return {"status": "ok", "menus": [], "items": [], "executed": True}
         if method.startswith("dialog."):
             return {"status": "ok", "dialogs": [], "buttons": [], "fields": [], "found": False}
+        if method == "browser.placeClip":
+            edit = p.get("edit", "append")
+            dry = bool(p.get("dryRun"))
+            whole = "inSeconds" not in p and "outSeconds" not in p
+            src_in = float(p.get("inSeconds", 0.0))
+            src_out = float(p.get("outSeconds", 42.0))
+            at = p.get("atSeconds")
+            edit_at = at if at is not None else (10.0 if edit != "append" else None)
+            res = {"status": "dry_run" if dry else "ok", "dryRun": dry, "edit": edit,
+                   "backtimed": bool(p.get("backtimed")),
+                   "clip": "Interview A",
+                   "sourceClip": {"handle": p.get("handle", "obj_5"), "name": "Interview A",
+                                  "class": "FFAnchoredMediaComponent", "durationSeconds": 42.0, "startSeconds": 0.0},
+                   "source": {"startSeconds": src_in, "endSeconds": src_out,
+                              "durationSeconds": src_out - src_in, "wholeClip": whole},
+                   "target": {"playheadBeforeSeconds": 10.0}}
+            if at is not None:
+                res["target"]["requestedSeconds"] = at
+            if edit_at is not None:
+                res["target"]["editSeconds"] = edit_at
+            if edit == "append":
+                res["target"]["storylineEndBeforeSeconds"] = 30.0
+            if not dry:
+                start = 30.0 if edit == "append" else float(edit_at)
+                res["target"]["playheadAfterSeconds"] = start
+                res["placed"] = [{"handle": "obj_88", "name": "Interview A", "class": "FFAnchoredMediaComponent",
+                                  "lane": 1 if edit == "connect" else 0, "connected": edit == "connect",
+                                  "startSeconds": start, "endSeconds": start + (src_out - src_in),
+                                  "durationSeconds": src_out - src_in}]
+                res.update({"alsoNew": [], "placedCount": 1, "verified": True, "rangeHonored": True,
+                            "positionVerified": True, "handleTableReset": False, "skimmingActive": False})
+            return res
         if method.startswith("browser."):
             return {"status": "ok", "clips": [], "count": 0, "handle": "obj_1"}
         if method.startswith("library."):
@@ -351,6 +383,8 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "visionpro_connect": {"host": "127.0.0.1"},
         "visionpro_disconnect": {"host": "127.0.0.1"},
         "visionpro_set_camera_calibration": {"camera_id": "cam1", "json": "{}"},
+        "add_clip_to_timeline": {"handle": "obj_5", "edit": "insert", "start_seconds": 12.0,
+                                 "end_seconds": 18.0, "at_seconds": 45.0},
         # These run a local analysis binary (~/Applications/SpliceKit/tools/...) on the
         # file when it is installed; a path that does not exist makes them fail fast
         # without analysing anything.

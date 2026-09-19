@@ -437,7 +437,7 @@ def trim_check(st):
     clips = _spine_clips(st)
     if not clips:
         print("SKIP  no spine clip to trim")
-        return 0, 1
+        return 0, 0
     c = clips[-1]
     frame = _frame_seconds(st)
     half = frame / 2.0
@@ -484,6 +484,94 @@ def trim_check(st):
     else:
         fails += 1
         print(f"FAIL  after undo the clip end is {back} (original {end0:.4f})")
+    return fails, 1
+
+
+# ── 5b. browser.placeClip: a range of a browser clip as a connect edit, then undo ──
+
+def _browser_clip_for_place(min_seconds=2.0):
+    """First browser clip at least `min_seconds` long, from browser.listClips."""
+    r = rpc("browser.listClips")
+    if "error" in r:
+        print(f"SKIP  browser.listClips: {r['error']}")
+        return None
+    for c in r.get("clips") or []:
+        dur = (c.get("duration") or {}).get("seconds")
+        if isinstance(dur, (int, float)) and dur >= min_seconds:
+            return c
+    print(f"SKIP  no browser clip at least {min_seconds:.0f}s long among {len(r.get('clips') or [])} clip(s)")
+    return None
+
+
+def place_check(st):
+    section("browser.placeClip (connect a 1 s range of a browser clip at the playhead, verify, undo)")
+    src = _browser_clip_for_place()
+    if not src:
+        return 0, 0
+    spine = _spine_clips(st)
+    if not spine:
+        print("SKIP  no spine clip to connect to (an empty primary storyline would make FCP add a gap)")
+        return 0, 0
+    frame = _frame_seconds(st)
+    half = frame / 2.0
+    dur = (src.get("duration") or {}).get("seconds")
+    print(f"source: {src.get('name')!r} handle={src.get('handle')} duration={dur:.3f}s frame={frame:.5f}s")
+    fails = 0
+
+    # Dry runs of every edit type: resolution only, nothing changes.
+    for edit in ("append", "insert", "connect"):
+        params = {"handle": src["handle"], "edit": edit, "inSeconds": 0.5, "outSeconds": 1.5, "dryRun": True}
+        if edit != "append":
+            params["atSeconds"] = 0.0
+        d = rpc("browser.placeClip", params)
+        print(f"dry run {edit} -> {json.dumps(d)[:260]}")
+        if d.get("status") != "dry_run" or abs((d.get("source") or {}).get("durationSeconds", -1) - 1.0) > half:
+            fails += 1
+            print(f"FAIL  dry run {edit}: status={d.get('status')} source={d.get('source')} error={d.get('error')}")
+    bad = rpc("browser.placeClip", {"handle": src["handle"], "edit": "insert", "inSeconds": 0.0,
+                                    "outSeconds": dur + 5.0, "dryRun": True})
+    if "error" in bad and "beyond the end of the clip" in bad["error"]:
+        print(f"OK    out-of-range end refused: {bad['error']}")
+    else:
+        fails += 1
+        print(f"FAIL  out-of-range end was not refused: {json.dumps(bad)[:200]}")
+
+    # The real edit: a 1 s range as a connected clip in the middle of the first spine clip
+    # (over an existing clip, so FCP adds no gap). A connect edit moves nothing else, so undo
+    # puts the timeline back exactly.
+    before = rpc("timeline.getDetailedState")
+    c0 = spine[0]
+    at = (secs(c0, "startTime") + secs(c0, "endTime")) / 2.0
+    print(f"connect target: middle of {c0.get('name')!r} at {at:.3f}s")
+    real = rpc("browser.placeClip", {"handle": src["handle"], "edit": "connect",
+                                     "inSeconds": 0.5, "outSeconds": 1.5, "atSeconds": at})
+    print(f"connect -> {json.dumps({k: v for k, v in real.items() if k != 'placementDebug'})[:600]}")
+    placed = real.get("placed") or []
+    if real.get("status") == "ok" and placed and real.get("verified"):
+        p0 = placed[0]
+        print(f"OK    placed {p0.get('name')!r} handle={p0.get('handle')} lane={p0.get('lane')} "
+              f"[{p0.get('startSeconds')} .. {p0.get('endSeconds')}] rangeHonored={real.get('rangeHonored')} "
+              f"positionVerified={real.get('positionVerified')}")
+    else:
+        fails += 1
+        print(f"FAIL  status={real.get('status')} verified={real.get('verified')} placed={len(placed)} "
+              f"rangeHonored={real.get('rangeHonored')} positionVerified={real.get('positionVerified')} "
+              f"error={real.get('error')} note={real.get('note')}")
+
+    if real.get("status") == "ok" or placed:
+        u = rpc("timeline.action", {"action": "undo"})
+        print(f"undo -> {json.dumps(u)[:200]}")
+        after = rpc("timeline.getDetailedState")
+        placed_handles = {p.get("handle") for p in placed}
+        still = [c for c in (after.get("connectedItems") or []) + (after.get("items") or [])
+                 if c.get("handle") in placed_handles]
+        n_before = len(before.get("connectedItems") or []) + len(before.get("items") or [])
+        n_after = len(after.get("connectedItems") or []) + len(after.get("items") or [])
+        if not still and n_after == n_before:
+            print(f"OK    after undo the placed clip is gone and the item count is back to {n_before}")
+        else:
+            fails += 1
+            print(f"FAIL  after undo: placed still present={len(still)} items before={n_before} after={n_after}")
     return fails, 1
 
 
@@ -672,6 +760,10 @@ def main():
     ap.add_argument("--trim-check", action="store_true",
                     help="CHANGES STATE (reverted): ripple-trim last spine clip end by one frame via "
                          "timeline.trimClip, verify, undo, verify")
+    ap.add_argument("--place-check", action="store_true",
+                    help="CHANGES STATE (reverted): browser.placeClip dry runs for append/insert/connect, an "
+                         "out-of-range refusal, then a real connect edit of a 1 s range of the first browser "
+                         "clip at the playhead, verified (placed, rangeHonored, positionVerified), then undo")
     ap.add_argument("--clip-info-check", action="store_true",
                     help="READ-ONLY: timeline.getClipInfo on the first video/audio spine clip; prints source "
                          "media, source start / media origin / file time, effects, title text, transcript, "
@@ -702,6 +794,9 @@ def main():
         if args.trim_check:
             fails, ran = trim_check(st)
             verdict.append(f"trim-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
+        if args.place_check:
+            fails, ran = place_check(st)
+            verdict.append(f"place-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
         if args.clip_info_check:
             fails, ran, ci_warns = clip_info_check(st)
             verdict.append(f"clip-info-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}"

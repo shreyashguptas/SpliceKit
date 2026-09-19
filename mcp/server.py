@@ -158,157 +158,140 @@ SPLICEKIT_VERSION = _splicekit_version()
 mcp = MCPServer(
     name="splicekit",
     version=SPLICEKIT_VERSION,
-    instructions="""Direct in-process control of Final Cut Pro via injected SpliceKit dylib.
-Connects to a JSON-RPC server running INSIDE the FCP process with access to 78,000+ ObjC classes.
-All operations are fully programmatic - no AppleScript, no UI automation.
+    instructions="""SpliceKit: direct in-process control of Final Cut Pro through a JSON-RPC bridge inside the
+running app (127.0.0.1:9876). No AppleScript, no UI automation. Tools use Final Cut Pro's own
+terms where FCP has one (edits, range selection, primary storyline, connected clips, playhead);
+SpliceKit bookkeeping (handle, kind, timings) is labelled as such. A "handle" (obj_12) is a
+reference to an object from an earlier read, unrelated to FCP's "media handles". Times are
+seconds on the timeline; one frame = 1 / frame rate.
 
-## Standard Workflow
-1. bridge_status() -- verify FCP is running and connected
-2. open_project("My Project") -- load a project by name
-3. get_timeline_clips() -- see what's in the timeline: spine items, connected clips (titles, B-roll, music on lanes != 0) and markers, with handles
-   list_markers() -- markers only (time, kind, name, completion, handle), optional kind filter
-4. Perform actions using timeline_action() and playback_action()
-5. verify_action() -- confirm the edit took effect by comparing state snapshots
-6. capture_timeline() -- screenshot the timeline to visually verify clip layout
-7. capture_viewer() -- screenshot the viewer to visually verify canvas output
+## Start of every session
+1. bridge_status()              -- is the patched Final Cut Pro running and the bridge answering
+2. open_project("Name")         -- load a project by name (event= to narrow)
+3. get_timeline_clips()         -- spine clips + connected clips + markers, each with a handle
+4. get_clip_info("obj_12")      -- what is IN a clip: source file, effects, title text, transcript words, a frame
+Then edit with the exact, handle-based tools below, and check the result: those tools re-read
+the timeline and report whether it matches within two frames (verified / placed / before /
+after); otherwise get_timeline_clips(), verify_action(), capture_timeline(). Captures and clip
+frames come back inline as image content.
 
-## Visual Verification
-Use capture_viewer() and capture_timeline() to take PNG screenshots of FCP.
-These capture GPU/Metal content directly — FCP does not need to be in the foreground.
-- After effects, color, titles, captions → capture_viewer() to check the canvas
-- After blade cuts, markers, rearrangement → capture_timeline() to check layout
-Read the saved PNG to visually confirm the result.
-Captures also come back inline as image content (return_image=True), so any MCP client
-can look at them without reading the file. get_clip_info() returns a frame of a clip's
-source media file the same way; capture_clip_frame() returns the clip as rendered in
-the Viewer (effects included), moving the playhead there and back.
+## Which tool for what (pick the specific tool before a generic one)
+READ the timeline: get_timeline_clips, get_clip_info(handle) (what is IN a clip: source file,
+  effects, title text, markers, transcript words, a frame image), list_markers, get_selected_clips,
+  get_playhead_position, get_clip_effects, get_inspector_properties, analyze_timeline.
+SEE it: capture_timeline, capture_viewer, capture_inspector, capture_clip_frame(handle) (the clip
+  as rendered in the Viewer, effects included; moves the playhead and restores it).
+SOURCE CLIPS (browser -> timeline): browser_list_clips() then
+  add_clip_to_timeline(handle, edit="insert"|"connect"|"append", start_seconds, end_seconds,
+  at_seconds, backtimed, dry_run): a range of a source clip (seconds from its first frame)
+  pasted at the playhead, the effect of Insert (W) / Connect (Q); at_seconds moves the playhead
+  first (insert and connect are FCP's three-point edit); append pastes at the end of the primary
+  storyline, the effect of Append (E), and ignores at_seconds. No overwrite there. FCP's own
+  E / W / Q / D on the browser's current selection: timeline_edit_action("appendEdit" |
+  "insertEdit" | "connectToPrimaryStoryline"), timeline_destructive_action("overwriteEdit" |
+  "connectEditBacktimed"). import_media() brings files into an event first.
+CUT: blade_at_times([...]) (many cuts, one call). One cut: seek_to_time(t) then
+  timeline_destructive_action("blade").
+TRIM: trim_clip(handle, edge="start"|"end", to_seconds= or delta_seconds=, dry_run) -- FCP's
+  ripple trim by handle, exact; the answer re-reads the clip. trimStart/trimEnd/trimToPlayhead
+  (destructive action) work on the selection at the playhead and are coarse.
+TIMELINE RANGE (FCP's range selection in the timeline): set_timeline_range(start, end),
+  timeline_edit_action("setRangeStart" | "setRangeEnd" | "clearRange").
+SELECT: select_clips([handles]) (no playhead move), select_clip_in_lane(lane),
+  timeline_navigation_action("selectClipAtPlayhead" | "selectAll" | "deselectAll").
+PLAYHEAD: seek_to_time(seconds) (exact); playback_action for transport (goToStart, nextFrame...).
+DELETE / REPLACE: timeline_destructive_action("delete" | "cut" | "replaceWithGap" ...) on the
+  selection. Spoken content: delete_transcript_words, delete_transcript_silences.
+MOVE / REORDER: no move-by-handle tool yet. Reorder spoken content with move_transcript_words;
+  otherwise select, timeline_destructive_action("cut"), seek_to_time, timeline_edit_action("paste").
+MARKERS: add_markers_at_times, list_markers, timeline_edit_action("addMarker" |
+  "addChapterMarker" | "addTodoMarker"), direct_timeline_action changeMarkerName / changeMarkerType.
+EFFECTS, TRANSITIONS, COLOR, TITLES (need a selection first): apply_effect, list_effects,
+  apply_transition (at the edit point), apply_transition_to_all_clips, list_transitions,
+  set_inspector_property, timeline_edit_action (addColorBoard, addColorWheels, addBasicTitle,
+  addKeyframe...), batch_apply_effect, batch_color_correct, insert_title, get_title_text,
+  stabilize_subject.
+SPEED: timeline_destructive_action("retimeSlow50" | "retimeFast2x" | "retimeNormal" |
+  "freezeFrame"...), direct_timeline_action retimeSetRate (any rate), set_playback_speed.
+AUDIO: mixer_get_state / mixer_set_volume / mixer_set_mute / mixer_set_solo (SpliceKit's Audio
+  Mixer), direct_timeline_action changeAudioVolume / applyAudioFadesDirect, assign_role (FCP
+  roles), timeline_edit_action("detachAudio" | "expandAudio").
+SPEECH / TEXT-BASED EDITING (SpliceKit's Text-Based Editor, not FCP's Transcribe to Captions):
+  open_transcript, get_transcript, search_transcript, delete_transcript_words,
+  move_transcript_words, delete_transcript_silences, set_transcript_speaker,
+  set_silence_threshold. Captions: open_captions, set_caption_style, set_caption_grouping,
+  generate_captions, verify_captions, generate_native_captions.
+UNDO / GROUPING: history_action("undo" | "redo"). begin_edit("Rough cut") ... end_edit() makes
+  everything in between ONE undo step (Flexo's internal term: one undoable action) -- always
+  call end_edit.
+SCENES, BEATS, WHOLE EDITS: detect_scene_changes() lists the cuts (read-only), then
+  blade_scene_changes() / mark_scene_changes(); detect_beats(file), beat_sync_blade,
+  trim_clips_to_beats; import_srt_as_markers; generate_fcpxml + import_fcpxml (a project from
+  XML); build_song_cut / assemble_random_clips_to_song_beats (beat-synced cuts).
+EXPORT / EXCHANGE: export_xml, export_otio / import_otio (.otio, .fcpxml, .edl, .aaf),
+  share_project, batch_export, export_captions_srt / export_captions_txt.
+PROJECTS / LIBRARY / BROWSER: open_project, create_project, create_event, create_library,
+  get_active_libraries, browser_list_clips, import_media, dual_timeline_* (a second timeline
+  window).
+FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_panel,
+  set_workspace, select_tool, get_viewer_zoom / set_viewer_zoom, detect_dialog then
+  click_dialog_button / fill_dialog_field / select_dialog_popup / toggle_dialog_checkbox /
+  dismiss_dialog (share and export dialogs), search_commands / execute_command (the Command
+  Palette's commands).
+ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_object_property,
+  raw_call, debug_eval; explore_class / search_methods find a selector; manage_handles releases
+  handles. lua_execute runs Lua inside FCP.
+Not routed here on purpose (developer tooling; their docstrings say what they do): debug_*,
+  visionpro_*, livecam, events_*, plugin_*, bridge_* internals, runtime introspection beyond
+  explore_class / search_methods, lua extras, braw_probe, deploy_and_restart.
 
-## IMPORTANT: Opening a Project
-Use open_project(name, event) to find and load a project by name:
-  open_project("My Project")                 -- find by name
-  open_project("Edit v2", event="4-5-26")    -- filter by event too
-
-Or manually if needed:
-  1. call_method_with_args("FFLibraryDocument", "copyActiveLibraries", return_handle=True)
-  2. Navigate: array -> library -> _deepLoadedSequences -> allObjects
-  3. Find a sequence with hasContainedItems == true
-  4. Get editor container via NSApp -> delegate -> activeEditorContainer
-  5. Call loadEditorForSequence: on the container with the sequence handle
-
-## Dual Timeline
-Use the dual_timeline_* tools to open a floating second editor window:
-  - dual_timeline_open() -- load the primary sequence into the secondary window
-  - dual_timeline_sync_root() -- match the primary editor's current root
-  - dual_timeline_open_selected_in_secondary() -- open the selected compound/multicam on the other side
-  - dual_timeline_focus("primary"/"secondary") -- route commands to a specific editor
-  - dual_timeline_close() -- close the floating secondary window
-
-## Positioning the Playhead
-Use playback_action() to navigate before performing edits:
-  - goToStart, goToEnd -- jump to boundaries
-  - nextFrame, prevFrame -- single frame steps (1/24s at 24fps)
-  - nextFrame10, prevFrame10 -- 10-frame jumps
-  - For precise positioning, use batch: nextFrame with repeat count
-    e.g., batch_timeline_actions('[{"type":"playback","action":"nextFrame","repeat":72}]')
-    (72 frames = 3 seconds at 24fps)
-
-## Timeline Actions (timeline_action)
-Blade: blade, bladeAll
-Markers: addMarker, addTodoMarker, addChapterMarker, deleteMarker, nextMarker, previousMarker
-Transitions: addTransition
-Navigation: nextEdit, previousEdit, selectClipAtPlayhead, selectToPlayhead
-Selection: selectAll, deselectAll
-Edit: delete, cut, copy, paste, undo, redo
-Insert: insertGap
-Trim: trimToPlayhead
-Color: addColorBoard, addColorWheels, addColorCurves, addColorAdjustment,
-       addHueSaturation, addEnhanceLightAndColor
-Volume: adjustVolumeUp, adjustVolumeDown
-Titles: addBasicTitle, addBasicLowerThird
-Speed: retimeNormal, retimeFast2x, retimeFast4x, retimeFast8x, retimeFast20x,
-       retimeSlow50, retimeSlow25, retimeSlow10, retimeReverse, retimeHold,
-       freezeFrame, retimeBladeSpeed
-Keyframes: addKeyframe, deleteKeyframes, removeAllKeyframesFromClip, nextKeyframe, previousKeyframe
-Other: solo, disable, createCompoundClip, autoReframe, exportXML, shareSelection
-
-## IMPORTANT: Selection Before Actions
-Many actions require a clip to be selected first:
-  1. Navigate to position: playback_action("goToStart") then step frames
-  2. Select: timeline_action("selectClipAtPlayhead")
-  3. Then apply: timeline_action("addColorBoard") or timeline_action("retimeSlow50")
-  Undo with: timeline_action("undo")
+## The action dispatchers (FCP's own commands on the current selection / playhead)
+timeline_navigation_action  nextEdit, previousEdit, selectClipAtPlayhead, zoomToFit, toggleSnapping...
+                            (changes no project content: navigation, selection, view and settings)
+timeline_edit_action        addMarker, addTransition, paste, pasteAsConnected, addColorBoard,
+                            addBasicTitle, setRangeStart, appendEdit, insertEdit... (FCP commands
+                            that delete no clip content; paste ripples later clips)
+timeline_destructive_action delete, cut, blade, trimToPlayhead, retime*, replaceWithGap,
+                            overwriteEdit...
+history_action              undo, redo
+playback_action             playPause, goToStart, goToEnd, nextFrame, prevFrame...
+timeline_action             the legacy dispatcher that accepts all of the above by name
+batch_timeline_actions      a JSON list of the above, run in one call
+direct_timeline_action      FCP's parameterized action methods with real arguments
+A success answer names the selector that ran ({"action": ..., "status": "ok"}); a failure is an
+error string. "No responder handled X" means the action is not available in this state (nothing
+selected, no edit point, wrong tool).
 
 ## Targeting by handle (no playhead moves)
-get_timeline_clips() returns a handle (e.g. "obj_12") for every clip, connected clip and marker.
-  select_clips(["obj_12"])            # select that clip (replace/add/remove); playhead stays put
-  timeline_action("addColorBoard")    # then act on the selection as usual
-  begin_edit("Rough cut") ... end_edit()   # everything in between becomes ONE undo step (Edit > Undo Rough cut)
-  trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   # exact ripple trim; drop dry_run to apply
-  get_clip_info("obj_12")  # what is IN the clip: source file, transcript words, effects, a frame
-A handle is SpliceKit bookkeeping (a reference from an earlier read), not an FCP term, and unrelated to
-FCP's "media handles" (extra source media beyond a clip's edges). Re-run get_timeline_clips() if a handle
-comes back unresolved. select_clips selects clips only; markers are changed through the marker actions.
+get_timeline_clips() gives every clip a handle; browser_list_clips() does the same for source clips.
+  select_clips(["obj_12"])                                   select without moving the playhead
+  trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   plan, then drop dry_run to apply
+  add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
+  get_clip_info("obj_12")                                    what is in the clip
+  begin_edit("Rough cut") ... end_edit()                     many calls, one undo step
+Re-run get_timeline_clips() if a handle comes back unresolved.
 
-## Playback (playback_action)
-playPause, goToStart, goToEnd, nextFrame, prevFrame, nextFrame10, prevFrame10
+## Rules that save round trips
+- Prefer the exact, handle-based tools (add_clip_to_timeline, trim_clip, blade_at_times,
+  select_clips, seek_to_time) over stepping the playhead frame by frame.
+- Color, retime, titles and effects need a selection: select_clips([handle]) first.
+- Check what a change will do with dry_run=True (add_clip_to_timeline, trim_clip) before doing it.
+- After an edit, read the state back (get_timeline_clips) or look (capture_timeline); after a
+  mistake, history_action("undo"). add_clip_to_timeline replaces the pasteboard.
+- "No active timeline module" / "No sequence in timeline" = no project open: open_project().
+  "Cannot connect" = the patched Final Cut Pro is not running.
+- Titles, generators and gap clips have no source media file; get_clip_info says so.
 
-## Batch Operations
-Use batch_timeline_actions() for multi-step sequences:
-  '[{"type":"playback","action":"goToStart"},
-    {"type":"playback","action":"nextFrame","repeat":72},
-    {"type":"timeline","action":"blade"},
-    {"type":"playback","action":"nextFrame","repeat":48},
-    {"type":"timeline","action":"blade"}]'
-
-## Timeline Data Model
-FCP uses a spine model: sequence -> primaryObject (collection) -> items
-Items are FFAnchoredMediaComponent (clips), FFAnchoredTransition, etc.
-get_timeline_clips() handles this automatically and returns handles for each item.
-
-## Useful Findings
-- Transition requests at a cut often target the right-hand clip with before=YES and after=NO.
-  That still means "apply the transition on the cut before this clip", not "apply it to the
-  clip's leading edge as a one-sided effect".
-- The UI trim actions trimToPlayhead, trimStart, and trimEnd are coarse and mode-dependent.
-  They are fine for interactive edits but poor for building exact repro cases.
-- For model-level selection work, create NSArray handles explicitly. Example:
-  arr = call_method_with_args("NSArray", "arrayWithObject:",
-      '[{"type":"handle","value":"obj_7"}]', class_method=True, return_handle=True)
-  call_method_with_args("obj_timeline", "setSelectedItems:",
-      f'[{{"type":"handle","value":"{arr_handle}"}}]', class_method=False)
-- Be careful with selectors that expose out-pointers such as error:, askedRetry:, or similar.
-  call_method_with_args() passes raw pointers through NSInvocation. Passing nil is only safe if
-  the target selector tolerates a null out pointer.
-- Known hazard: FFAnchoredSequence actionTrimDuration:forEdits:isDelta:error: can crash Final Cut
-  when the trim is rejected and error: is null. Do not use it as a probing tool through
-  call_method_with_args() unless you have a safe wrapper that owns the NSError** path.
-
-## FCPXML for Complex Edits
-For creating entire projects with gaps, titles, markers:
-  xml = generate_fcpxml(items='[{"type":"gap","duration":5},{"type":"title","text":"Hello","duration":3}]')
-  import_fcpxml(xml, internal=True)  # imports without restart
-
-## Object Handles for Deep Access
-  call_method_with_args("FFLibraryDocument", "copyActiveLibraries", return_handle=True)
-  # Returns {"handle": "obj_1", "class": "..."} -- pass handle to subsequent calls
-  call_method_with_args("obj_1", "objectAtIndex:", '[{"type":"int","value":0}]', false, true)
-  # Always release when done: manage_handles(action="release_all")
-
-## FlexMusic (Dynamic Soundtrack)
-flexmusic_list_songs() -- browse available songs
-flexmusic_get_song(song_uid) -- detailed song info
-flexmusic_get_timing(song_uid, duration_seconds) -- beat/bar/section timestamps
-flexmusic_render_to_file(song_uid, duration_seconds, output_path) -- render to audio
-flexmusic_add_to_timeline(song_uid) -- add music to timeline
-
-## Montage Maker
-montage_analyze_clips() -- score clips for montage
-montage_plan_edit(beats, clips, style) -- create edit plan from timing + clips
-montage_assemble(edit_plan, project_name, song_file) -- build timeline from plan
-montage_auto(song_uid, event_name, style) -- one-shot auto-montage
-sync_clips_to_song_beats() -- selected-song beat sync for current timeline clips
-assemble_random_clips_to_song_beats() -- build a random browser-clip cut to a selected song beat map
-build_song_cut() -- one-shot song-based random primary-storyline cut with pacing presets
+## Hazards (learned the hard way)
+- call_method_with_args passes raw pointers through NSInvocation: nil is only safe for an
+  out-pointer (error:, askedRetry:) the selector tolerates. FFAnchoredSequence
+  actionTrimDuration:forEdits:isDelta:error: can crash Final Cut when the trim is rejected and
+  error: is nil -- do not probe it through call_method_with_args; use trim_clip.
+- A transition request at a cut often targets the right-hand clip with before=YES: that means
+  "on the cut before this clip", not a one-sided effect on its leading edge.
+- For model-level selection, build an NSArray handle explicitly:
+  arr = call_method_with_args("NSArray", "arrayWithObject:", '[{"type":"handle","value":"obj_7"}]',
+  class_method=True, return_handle=True); then setSelectedItems: with that handle.
 """
 )
 
@@ -463,6 +446,7 @@ DESTRUCTIVE_TOOLS = {
     "debug_load_plugin",
     "direct_timeline_action",
     "browser_append_clip",
+    "add_clip_to_timeline",
     "import_media",
     "paste_fcpxml",
     "stabilize_subject",
@@ -645,6 +629,7 @@ CUSTOM_TOOL_TITLES = {
     "direct_timeline_action": "Direct Timeline Action",
     "browser_list_clips": "List Browser Clips",
     "browser_append_clip": "Append Browser Clip",
+    "add_clip_to_timeline": "Add Clip To Timeline",
     "import_media": "Import Media Files",
     "paste_fcpxml": "Paste FCPXML",
     "stabilize_subject": "Stabilize Subject",
@@ -7413,10 +7398,9 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
 @splicekit_tool("browser_list_clips")
 def browser_list_clips(event: str = "") -> str:
-    """List clips in the FCP browser (media library).
-
-    Returns clips from the active library's events with name, duration,
-    media type, and handle for further operations.
+    """List the clips in the browser (the active library's events): name, event,
+    duration and a handle. Use the handle with add_clip_to_timeline() to make an
+    append, insert or connect edit from a clip or a range of it.
 
     Args:
         event: Optional event name to filter by
@@ -7432,9 +7416,9 @@ def browser_list_clips(event: str = "") -> str:
 
 @splicekit_tool("browser_append_clip")
 def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> str:
-    """Append a clip from the browser to the timeline.
-
-    Resolve the clip by handle (from browser_list_clips), index, or name.
+    """Append a whole browser clip at the end of the primary storyline (FCP: Append, E).
+    Shortcut for add_clip_to_timeline(edit="append"); use that tool for a range of the
+    clip, an insert or connect edit, a target time, or a dry run.
 
     Args:
         handle: Object handle of the clip (e.g. "obj_5")
@@ -7452,6 +7436,162 @@ def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> st
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
+
+
+def _s3(value) -> str:
+    """Seconds with three decimals for the placement report, or '?' when absent."""
+    return f"{value:.3f}s" if isinstance(value, (int, float)) and not isinstance(value, bool) else "?"
+
+
+def _yes_no(value) -> str:
+    return "unknown" if value is None else ("yes" if value else "no")
+
+
+def _place_where(item: dict) -> str:
+    """Where a placed item sits, in FCP's words: the primary storyline, or a lane for a connected clip."""
+    if item.get("connected"):
+        lane = item.get("lane")
+        return f"lane {lane} (connected clip)" if lane is not None else "connected clip"
+    return "primary storyline"
+
+
+def _render_place_clip(r: dict) -> str:
+    """Human-readable report for browser.placeClip: what was asked, what landed, and
+    whether the two agree (the bridge re-reads the timeline and compares within two
+    frames, at least 50 ms)."""
+    edit = r.get("edit", "?")
+    key = {"append": "E", "insert": "W", "connect": "Q"}.get(edit, "")
+    label = f"{edit} edit" + (f" (the effect of {key})" if key else "") + (" backtimed (Shift-Q)" if r.get("backtimed") else "")
+    clip = r.get("sourceClip") or {}
+    src = r.get("source") or {}
+    tgt = r.get("target") or {}
+    dry = r.get("status") == "dry_run" or r.get("dryRun") is True
+    lines = []
+    if dry:
+        lines.append(f"Dry run (nothing changed): {label}")
+    else:
+        lines.append(f"{label[:1].upper()}{label[1:]}: " + ("verified" if r.get("verified") else "done, NOT verified"))
+    if src.get("wholeClip"):
+        span = "whole clip"
+    else:
+        span = f"{_s3(src.get('startSeconds'))} to {_s3(src.get('endSeconds'))} from the clip's first frame"
+        if src.get("snappedToClipFrames"):
+            span += " (snapped to the clip's frames)"
+    lines.append(f"Source: {clip.get('name') or '?'} ({clip.get('handle') or '?'}): {span}, "
+                 f"{_s3(src.get('durationSeconds'))} of {_s3(clip.get('durationSeconds'))}")
+    if edit == "append":
+        target = "end of the primary storyline"
+        if tgt.get("storylineEndBeforeSeconds") is not None:
+            target += f" (was at {_s3(tgt.get('storylineEndBeforeSeconds'))})"
+        if dry:
+            target += "; the playhead will be moved there"
+    elif tgt.get("requestedSeconds") is not None:
+        verb = "will move to" if dry else "moved to"
+        target = f"playhead {verb} {_s3(tgt.get('requestedSeconds'))} ({'now' if dry else 'was'} {_s3(tgt.get('playheadBeforeSeconds'))})"
+    else:
+        target = f"playhead at {_s3(tgt.get('editSeconds', tgt.get('playheadBeforeSeconds')))}"
+    if not dry and tgt.get("playheadAfterSeconds") is not None:
+        target += f"; playhead now {_s3(tgt.get('playheadAfterSeconds'))}"
+    lines.append(f"Target: {target}")
+    if not dry:
+        placed = r.get("placed") or []
+        if not placed:
+            lines.append("Placed: no new clip found on the timeline afterwards")
+        for item in placed:
+            lines.append(f"Placed: {item.get('name') or '?'} ({item.get('handle') or '?'}) {_place_where(item)}, "
+                         f"{_s3(item.get('startSeconds'))} to {_s3(item.get('endSeconds'))} ({_s3(item.get('durationSeconds'))})")
+        also = r.get("alsoNew") or []
+        if also:
+            shown = ", ".join(f"{i.get('name') or i.get('class') or '?'} ({i.get('handle') or '?'}) {_place_where(i)} "
+                              f"{_s3(i.get('startSeconds'))} to {_s3(i.get('endSeconds'))}" for i in also[:5])
+            more = f", and {len(also) - 5} more" if len(also) > 5 else ""
+            lines.append(f"Also new on the timeline (not the source clip): {len(also)}: {shown}{more}")
+        lines.append(f"Range honored: {_yes_no(r.get('rangeHonored'))}; position as requested: {_yes_no(r.get('positionVerified'))} "
+                     "(within two frames, at least 50 ms)")
+        if r.get("note"):
+            lines.append(f"Note: {r['note']}")
+        lines.append('Undo: history_action("undo")')
+    return "\n".join(lines)
+
+
+@splicekit_tool("add_clip_to_timeline")
+@bridge_tool
+def add_clip_to_timeline(handle: str = "", name: str = "", index: int = -1,
+                         edit: str = "append",
+                         start_seconds: float | None = None, end_seconds: float | None = None,
+                         at_seconds: float | None = None, backtimed: bool = False,
+                         dry_run: bool = False) -> str:
+    """Put a browser clip, or a range of it, on the timeline. SpliceKit writes the range to
+    Final Cut Pro's pasteboard and uses FCP's Edit > Paste (insert) or Edit > Paste as
+    Connected Clip (connect) at the playhead; append moves the playhead to the end of the
+    primary storyline and pastes there. For insert and connect this is FCP's three-point
+    edit: source start + end, with the playhead as the timeline point.
+
+      edit="insert"   the effect of Insert (W): into the primary storyline at the playhead;
+                      later clips move right
+      edit="connect"  the effect of Connect to Primary Storyline (Q): a connected clip at the
+                      playhead. FCP picks the lane (its Connect puts video above and audio-only
+                      clips below the primary storyline); the answer reports where it landed
+      edit="append"   the effect of Append to Storyline (E): at the end of the primary storyline
+                      regardless of the playhead. SpliceKit moves the playhead there first and
+                      leaves it there
+      No overwrite: FCP has no paste that overwrites. FCP's own E / W / Q / D on whatever the
+      browser currently has selected are timeline_edit_action("appendEdit" | "insertEdit" |
+      "connectToPrimaryStoryline") and timeline_destructive_action("overwriteEdit").
+
+    Source: prefer the handle from browser_list_clips(); name is the first case-insensitive
+    substring match; index is that listing's index. start_seconds / end_seconds are the
+    equivalent of a browser range selection (Set Range Start I / Set Range End O), in seconds
+    from the clip's first frame. Either alone works (start only = to the end, end only = from
+    the first frame); neither = the whole clip. The range is snapped to the clip's own frames
+    when FCP exposes its frame duration.
+    Target: at_seconds moves the playhead there first. backtimed=True (connect only, the
+    effect of Connect to Primary Storyline - Backtimed, Shift-Q) puts the END of the range at
+    the playhead. If the pointer is skimming over the timeline FCP may edit at the skimmer
+    instead; the answer says so.
+
+    The answer re-reads the timeline and reports the placed clip as get_timeline_clips() would
+    (handle, primary storyline or lane, timeline range), whether its duration matches the range
+    and its position the target (both within two frames, at least 50 ms), and anything else the
+    edit created (the far half of a split clip, a gap FCP added). The pasteboard is replaced:
+    whatever was copied before is gone. The edit is a single paste, so history_action("undo")
+    removes it in one step (Edit > Undo shows FCP's paste name). dry_run=True resolves the
+    clip, range and target and changes nothing.
+    """
+    edit = (edit or "append").lower()
+    if edit not in ("append", "insert", "connect", "overwrite"):
+        return "Error: edit must be append, insert or connect"
+    if edit == "overwrite":
+        return ("Error: no overwrite here: FCP has no paste that overwrites. FCP's own Overwrite (D) of the "
+                "browser's current selection is timeline_destructive_action(\"overwriteEdit\"); otherwise use "
+                "insert or connect")
+    if not handle and not name and index < 0:
+        return "Error: give the source clip as handle (from browser_list_clips), name, or index"
+    if start_seconds is not None and end_seconds is not None and end_seconds <= start_seconds:
+        return f"Error: end_seconds ({end_seconds}) must be after start_seconds ({start_seconds})"
+    if at_seconds is not None and edit == "append":
+        return "Error: an append edit always adds at the end of the primary storyline; use insert or connect with at_seconds"
+    if backtimed and edit != "connect":
+        return "Error: backtimed is only available for connect edits (Connect to Primary Storyline - Backtimed, Shift-Q)"
+    params = {"edit": edit}
+    if handle:
+        params["handle"] = handle
+    if name:
+        params["name"] = name
+    if index >= 0:
+        params["index"] = index
+    if start_seconds is not None:
+        params["inSeconds"] = float(start_seconds)
+    if end_seconds is not None:
+        params["outSeconds"] = float(end_seconds)
+    if at_seconds is not None:
+        params["atSeconds"] = float(at_seconds)
+    if backtimed:
+        params["backtimed"] = True
+    if dry_run:
+        params["dryRun"] = True
+    r = _call("browser.placeClip", **params)
+    return _render_place_clip(r)
 
 
 @splicekit_tool("import_media")

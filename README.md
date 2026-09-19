@@ -43,7 +43,7 @@ Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing a
 
 *Claude (or any other LLM) can drive your editor — and teach it new tricks.*
 
-SpliceKit ships with an MCP server (official MCP Python SDK 2.x) that exposes 228 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
+SpliceKit ships with an MCP server (official MCP Python SDK 2.x) that exposes 229 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
 
 - *"cut this 40-minute interview down to its best moments"*
 - *"remove the silences from this podcast, add captions, and export"*

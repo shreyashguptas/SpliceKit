@@ -141,6 +141,19 @@ static NSString *SpliceKit_handlePointerKey(id object) {
     return [NSString stringWithFormat:@"%p", (__bridge void *)object];
 }
 
+// Incremented every time the handle table is cleared (see SPLICEKIT_MAX_HANDLES below).
+// Callers that compare handles across two reads check it to know the comparison is valid.
+static uint64_t sHandleGeneration = 0;
+
+static uint64_t SpliceKit_handleGeneration(void) {
+    return sHandleGeneration;
+}
+
+// When set, getDetailedState adds a "pointerKey" (object identity, independent of the
+// handle table) to every item and connected item. Main-thread only; placement uses it
+// to diff the timeline before/after an edit without relying on handle strings.
+static BOOL sDetailedStateIncludePointerKeys = NO;
+
 NSString *SpliceKit_storeHandle(id object) {
     if (!object) return nil;
     if (!sHandleMap) sHandleMap = [NSMutableDictionary dictionary];
@@ -162,6 +175,7 @@ NSString *SpliceKit_storeHandle(id object) {
         SpliceKit_log(@"Handle limit reached (%d), clearing old handles", SPLICEKIT_MAX_HANDLES);
         [sHandleMap removeAllObjects];
         [sHandlePointerMap removeAllObjects];
+        sHandleGeneration++;
     }
     sHandleCounter++;
     NSString *handle = [NSString stringWithFormat:@"obj_%llu", sHandleCounter];
@@ -1517,6 +1531,9 @@ static void SpliceKit_collectConnectedItems(id item,
 
             NSString *childHandle = SpliceKit_storeHandle(child);
             info[@"handle"] = childHandle ?: @"";
+            if (sDetailedStateIncludePointerKeys) {
+                info[@"pointerKey"] = SpliceKit_handlePointerKey(child) ?: @"";
+            }
 
             SEL trimOffSel = NSSelectorFromString(@"trimmedOffset");
             if ([child respondsToSelector:trimOffSel]) {
@@ -1611,7 +1628,20 @@ static void SpliceKit_collectConnectedItems(id item,
     }
 }
 
+static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *params);
+
 NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
+    // Placement verification asks for object identities alongside handles.
+    BOOL includePointerKeys = [params[@"include_pointer_keys"] respondsToSelector:@selector(boolValue)]
+        && [params[@"include_pointer_keys"] boolValue];
+    BOOL previousPointerKeys = sDetailedStateIncludePointerKeys;
+    if (includePointerKeys) sDetailedStateIncludePointerKeys = YES;
+    NSDictionary *detailedStateResult = SpliceKit_handleTimelineGetDetailedStateBody(params);
+    sDetailedStateIncludePointerKeys = previousPointerKeys;
+    return detailedStateResult;
+}
+
+static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *params) {
     SpliceKit_installEffectDragSwizzlesNow();
     NSInteger limit = [params[@"limit"] integerValue] ?: 200;
     BOOL includeNested = [params[@"include_nested"] boolValue];
@@ -1748,6 +1778,9 @@ NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
                         id item = arr[i];
                         NSMutableDictionary *info = [NSMutableDictionary dictionary];
                         info[@"index"] = @(i);
+                        if (sDetailedStateIncludePointerKeys) {
+                            info[@"pointerKey"] = SpliceKit_handlePointerKey(item) ?: @"";
+                        }
                         info[@"class"] = NSStringFromClass([item class]);
 
                         if ([item respondsToSelector:@selector(displayName)]) {
@@ -16382,24 +16415,31 @@ static NSDictionary *SpliceKit_browserAppendExplicitClipToTimelineEnd(id timelin
 
 static NSDictionary *SpliceKit_browserConnectExplicitClipAtPlayhead(id timelineModule,
                                                                     id clip,
-                                                                    NSString *pasteboardName) {
+                                                                    NSString *pasteboardName,
+                                                                    BOOL backtimed) {
     NSMutableDictionary *debugInfo = [NSMutableDictionary dictionary];
-    debugInfo[@"primitive"] = @"explicit_paste_anchored";
+    debugInfo[@"primitive"] = backtimed ? @"explicit_anchor_backtimed" : @"explicit_paste_anchored";
     debugInfo[@"before"] = SpliceKit_browserPlacementSnapshot(timelineModule, clip);
     debugInfo[@"pasteboardName"] = pasteboardName ?: @"";
 
+    // pasteAnchored: is Edit > Paste as Connected Clip. A backtimed connect edit (FCP:
+    // Shift-Q, the end of the source range lands at the playhead) only exists on the
+    // anchorWithPasteboard:backtimed:trackType: path.
     SEL pasteAnchoredSel = NSSelectorFromString(@"pasteAnchored:");
     SEL anchorSel = NSSelectorFromString(@"anchorWithPasteboard:backtimed:trackType:");
 
-    if ([timelineModule respondsToSelector:pasteAnchoredSel]) {
+    if (!backtimed && [timelineModule respondsToSelector:pasteAnchoredSel]) {
         ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, pasteAnchoredSel, nil);
     } else if ([timelineModule respondsToSelector:anchorSel]) {
         NSString *resolvedPasteboardName = pasteboardName.length > 0 ? pasteboardName : NSPasteboardNameGeneral;
         ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(timelineModule,
                                                         anchorSel,
                                                         resolvedPasteboardName,
-                                                        NO,
+                                                        backtimed,
                                                         @"all");
+    } else if (backtimed) {
+        return @{@"error": @"a backtimed connect edit is not available: this Final Cut Pro build's timeline module has no anchorWithPasteboard:backtimed:trackType:",
+                 @"placementDebug": debugInfo};
     } else {
         return @{@"error": @"Timeline module does not respond to pasteAnchored: or anchorWithPasteboard:backtimed:trackType:",
                  @"placementDebug": debugInfo};
@@ -16410,21 +16450,174 @@ static NSDictionary *SpliceKit_browserConnectExplicitClipAtPlayhead(id timelineM
     debugInfo[@"after"] = after;
 
     return @{@"status": @"ok",
-             @"primitive": @"explicit_paste_anchored",
+             @"primitive": backtimed ? @"explicit_anchor_backtimed" : @"explicit_paste_anchored",
              @"placementVerified": @YES,
              @"placementDebug": debugInfo};
 }
 
+// Move the playhead to `seconds` and wait (up to 0.75 s) until the timeline module
+// reports it there on every clock it exposes. The same check the append path makes
+// before it pastes: an edit made at a playhead that has not settled lands elsewhere.
+// Also records whether the skimmer is active: while the pointer skims the timeline,
+// FCP makes edits at the skimmer, not the playhead.
+static BOOL SpliceKit_browserSeekAndVerify(id timelineModule, double seconds, double tolerance,
+                                           NSMutableDictionary *debugInfo) {
+    if (!SpliceKit_transitionSeekToSeconds(timelineModule, seconds)) return NO;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.75];
+    NSInteger polls = 0;
+    BOOL ok = NO;
+    do {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        polls++;
+        NSDictionary *snap = SpliceKit_browserPlacementSnapshot(timelineModule, nil);
+        double current = [snap[@"currentSequenceTime"][@"seconds"] doubleValue];
+        double playhead = [snap[@"playheadTime"][@"seconds"] doubleValue];
+        BOOL committedOK = (snap[@"committedPlayheadTime"] == nil) ||
+            fabs([snap[@"committedPlayheadTime"][@"seconds"] doubleValue] - seconds) <= tolerance;
+        ok = fabs(current - seconds) <= tolerance && fabs(playhead - seconds) <= tolerance && committedOK;
+    } while (!ok && [deadline timeIntervalSinceNow] > 0.0);
+    if (debugInfo) {
+        debugInfo[@"seekPolls"] = @(polls);
+        debugInfo[@"seekVerified"] = @(ok);
+    }
+    return ok;
+}
+
+static BOOL SpliceKit_browserSkimmingActive(id timelineModule) {
+    SEL sel = NSSelectorFromString(@"isToolSkimming");
+    if (![timelineModule respondsToSelector:sel]) return NO;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(timelineModule, sel);
+}
+
+// The timeline exactly as get_timeline_clips reports it (spine items + connected
+// items, no markers), keyed by object identity (pointerKey), with the handle as a
+// fallback key. A placement is verified by diffing this before and after the edit:
+// the new entries are the object(s) the edit added. Object identity is used rather
+// than handle strings because the handle table is cleared when it reaches
+// SPLICEKIT_MAX_HANDLES entries, which would make every item look new.
+static NSDictionary *SpliceKit_browserTimelineEntries(void) {
+    NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @100000,
+                                                                     @"connected_limit": @100000,
+                                                                     @"include_markers": @NO,
+                                                                     @"include_nested": @NO,
+                                                                     @"include_pointer_keys": @YES});
+    NSMutableDictionary *byKey = [NSMutableDictionary dictionary];
+    if (![state isKindOfClass:[NSDictionary class]] || state[@"error"]) return byKey;
+    for (NSString *listKey in @[@"items", @"connectedItems"]) {
+        id list = state[listKey];
+        if (![list isKindOfClass:[NSArray class]]) continue;
+        for (id entry in (NSArray *)list) {
+            if (![entry isKindOfClass:[NSDictionary class]]) continue;
+            NSString *key = entry[@"pointerKey"];
+            if (![key isKindOfClass:[NSString class]] || key.length == 0) key = entry[@"handle"];
+            if (![key isKindOfClass:[NSString class]] || key.length == 0) continue;
+            NSMutableDictionary *copy = [entry mutableCopy];
+            copy[@"connected"] = @([listKey isEqualToString:@"connectedItems"]);
+            byKey[key] = copy;
+        }
+    }
+    return byKey;
+}
+
+static double SpliceKit_browserEntrySeconds(NSDictionary *entry, NSString *key) {
+    id time = entry[key];
+    if ([time isKindOfClass:[NSDictionary class]] && [time[@"seconds"] respondsToSelector:@selector(doubleValue)]) {
+        return [time[@"seconds"] doubleValue];
+    }
+    return NAN;
+}
+
+// One placed clip, in the vocabulary get_timeline_clips already uses.
+static NSDictionary *SpliceKit_browserPlacedEntry(NSDictionary *entry) {
+    NSMutableDictionary *placed = [NSMutableDictionary dictionary];
+    placed[@"handle"] = entry[@"handle"] ?: @"";
+    if (entry[@"name"]) placed[@"name"] = entry[@"name"];
+    if (entry[@"class"]) placed[@"class"] = entry[@"class"];
+    id lane = entry[@"effectiveLane"] ?: entry[@"lane"];
+    if (lane) placed[@"lane"] = lane;
+    BOOL connected = [entry[@"connected"] boolValue];
+    placed[@"connected"] = @(connected);
+    if (!connected && entry[@"index"]) placed[@"spineIndex"] = entry[@"index"];
+    if (connected && entry[@"parentIndex"]) placed[@"anchoredToSpineIndex"] = entry[@"parentIndex"];
+    double startSeconds = SpliceKit_browserEntrySeconds(entry, @"startTime");
+    double endSeconds = SpliceKit_browserEntrySeconds(entry, @"endTime");
+    if (!isnan(startSeconds)) placed[@"startSeconds"] = @(startSeconds);
+    if (!isnan(endSeconds)) placed[@"endSeconds"] = @(endSeconds);
+    if (!isnan(startSeconds) && !isnan(endSeconds)) placed[@"durationSeconds"] = @(endSeconds - startSeconds);
+    return placed;
+}
+
+// Place a browser clip on the timeline with one of Final Cut Pro's edits: append (E),
+// insert (W) or connect (Q). Optional params:
+//   inSeconds / outSeconds  range selection inside the source clip, in seconds from
+//                           the clip's first frame (FCP: Set Range Start I / End O)
+//   atSeconds               move the playhead there first; insert and connect are made
+//                           at the playhead (append always goes to the storyline end)
+//   backtimed               connect only (FCP: Shift-Q): the END of the range lands at
+//                           the playhead
+//   dryRun                  resolve clip, range and target; change nothing
+// The edit goes through Final Cut Pro's own pasteboard route (FFPasteboard
+// writeRangesOfMedia: with the range, then paste: / pasteAnchored:), which is what a
+// range selection in the browser does; the general pasteboard is replaced. The result
+// reports the placed clip found by diffing the timeline before and after (object
+// identity), whether the placed duration matches the range (rangeHonored) and whether
+// it landed where asked (positionVerified), both within two frames (at least 50 ms).
+// Other objects the edit created (the far half of a split clip, a gap) are listed
+// under alsoNew. Error answers after state changed carry stateChanged.
 static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                                                       NSString *selectorName,
                                                       NSString *actionName) {
-    NSString *handle = params[@"handle"];
-    NSNumber *indexNum = params[@"index"];
-    NSString *name = params[@"name"];
+    NSString *handle = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
+    NSNumber *indexNum = [params[@"index"] isKindOfClass:[NSNumber class]] ? params[@"index"] : nil;
+    NSString *name = [params[@"name"] isKindOfClass:[NSString class]] ? params[@"name"] : nil;
+
+    NSString *edit = @"insert";
+    if ([selectorName isEqualToString:@"appendWithSelectedMedia:"]) edit = @"append";
+    else if ([selectorName isEqualToString:@"anchorWithPasteboard:backtimed:trackType:"]) edit = @"connect";
+
+    NSNumber *inNum = [params[@"inSeconds"] isKindOfClass:[NSNumber class]] ? params[@"inSeconds"] : nil;
+    NSNumber *outNum = [params[@"outSeconds"] isKindOfClass:[NSNumber class]] ? params[@"outSeconds"] : nil;
+    NSNumber *atNum = [params[@"atSeconds"] isKindOfClass:[NSNumber class]] ? params[@"atSeconds"] : nil;
+    BOOL backtimed = [params[@"backtimed"] respondsToSelector:@selector(boolValue)] && [params[@"backtimed"] boolValue];
+    BOOL dryRun = [params[@"dryRun"] respondsToSelector:@selector(boolValue)] && [params[@"dryRun"] boolValue];
+    const double kMaxSeconds = 86400.0 * 24.0;   // 24 days: longer than any timeline, short of overflow
+
+    if (!handle && !indexNum && !name) {
+        return @{@"error": @"Clip not found. Provide handle, index, or name."};
+    }
+    for (NSNumber *n in @[inNum ?: @0, outNum ?: @0, atNum ?: @0]) {
+        double v = [n doubleValue];
+        if (!isfinite(v) || v > kMaxSeconds) {
+            return @{@"error": @"inSeconds, outSeconds and atSeconds must be finite times in seconds"};
+        }
+    }
+    if (atNum && [edit isEqualToString:@"append"]) {
+        return @{@"error": @"an append edit (Final Cut Pro: Append, E) always adds at the end of the primary storyline; use insert or connect to place at a time"};
+    }
+    if (atNum && [atNum doubleValue] < 0.0) {
+        return @{@"error": @"atSeconds must be 0 or more"};
+    }
+    if (backtimed && ![edit isEqualToString:@"connect"]) {
+        return @{@"error": @"backtimed is only available for connect edits here (Final Cut Pro: Shift-Q)"};
+    }
+    if (backtimed) actionName = @"connectBacktimedAtPlayhead";
 
     __block NSDictionary *result = nil;
 
     SpliceKit_executeOnMainThread(^{
+        // What this call has already changed when an error answer is built.
+        __block BOOL playheadMoved = NO, pasteboardReplaced = NO, selectionCleared = NO;
+        NSDictionary *(^failed)(NSString *, NSDictionary *) = ^NSDictionary *(NSString *message, NSDictionary *debug) {
+            NSMutableDictionary *err = [NSMutableDictionary dictionary];
+            err[@"error"] = message;
+            if (debug.count > 0) err[@"placementDebug"] = debug;
+            if (playheadMoved || pasteboardReplaced || selectionCleared) {
+                err[@"stateChanged"] = @{@"playheadMoved": @(playheadMoved),
+                                         @"pasteboardReplaced": @(pasteboardReplaced),
+                                         @"selectionCleared": @(selectionCleared)};
+            }
+            return err;
+        };
         @try {
             id clip = nil;
 
@@ -16475,63 +16668,202 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             }
 
             id timelineModule = SpliceKit_getActiveTimelineModule();
-            if (timelineModule) {
-                SpliceKit_sendTimelineSimpleAction(timelineModule, @"deselectAll:");
-                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-            }
-
-            id app = ((id (*)(id, SEL))objc_msgSend)(
-                objc_getClass("NSApplication"), @selector(sharedApplication));
-            id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-
-            SEL browserSel = NSSelectorFromString(@"mediaBrowserContainerModule");
-            id browserContainer = nil;
-            if ([delegate respondsToSelector:browserSel]) {
-                browserContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, browserSel);
-            }
-
-            SpliceKit_CMTimeRange clipRange = {0};
-            id mediaRange = nil;
-            Class rangeObjClass = objc_getClass("FigTimeRangeAndObject");
-            if (rangeObjClass && clip) {
-                if ([clip respondsToSelector:@selector(clippedRange)]) {
-                    clipRange = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(clip, @selector(clippedRange));
-                } else if ([clip respondsToSelector:@selector(duration)]) {
-                    SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
-                    clipRange.start = (SpliceKit_CMTime){0, dur.timescale, 1, 0};
-                    clipRange.duration = dur;
-                }
-
-                SEL rangeAndObjSel = NSSelectorFromString(@"rangeAndObjectWithRange:andObject:");
-                if ([(id)rangeObjClass respondsToSelector:rangeAndObjSel]) {
-                    mediaRange = ((id (*)(id, SEL, SpliceKit_CMTimeRange, id))objc_msgSend)(
-                        (id)rangeObjClass, rangeAndObjSel, clipRange, clip);
-                }
-            }
-
             if (!timelineModule) {
                 result = @{@"error": @"No active timeline module. Is a project open?"};
+                return;
+            }
+
+            // The clip's own range. Its first frame is not necessarily time 0 (clippedRange
+            // starts at the source timecode), so inSeconds/outSeconds count from that frame.
+            // browser.listClips reports `duration`, which can differ from clippedRange; the
+            // range end is accepted up to the longer of the two.
+            SpliceKit_CMTimeRange clipRange = {0};
+            BOOL haveClipRange = NO;
+            if ([clip respondsToSelector:@selector(clippedRange)]) {
+                clipRange = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(clip, @selector(clippedRange));
+                haveClipRange = clipRange.duration.timescale > 0;
+            }
+            double listedDuration = NAN;
+            if ([clip respondsToSelector:@selector(duration)]) {
+                SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
+                if (dur.timescale > 0) listedDuration = (double)dur.value / (double)dur.timescale;
+                if (!haveClipRange && dur.timescale > 0) {
+                    clipRange.start = (SpliceKit_CMTime){0, dur.timescale, 1, 0};
+                    clipRange.duration = dur;
+                    haveClipRange = YES;
+                }
+            }
+            BOOL wholeClip = (inNum == nil && outNum == nil);
+            if (!haveClipRange && !wholeClip) {
+                result = @{@"error": @"a range needs the clip's duration, which could not be read (no clippedRange or duration); the whole clip can still be placed"};
+                return;
+            }
+
+            double frameSeconds = SpliceKit_transitionFrameDurationSeconds(timelineModule);
+            // The clip's own frame duration when it exposes one: FCP snaps a range to the
+            // clip's frames, so a 12 fps time-lapse can differ from the request by more
+            // than a sequence frame and still be right.
+            double clipFrameSeconds = 0.0;
+            SEL clipFrameSel = NSSelectorFromString(@"frameDuration");
+            if ([clip respondsToSelector:clipFrameSel]) {
+                @try {
+                    SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, clipFrameSel);
+                    if (fd.timescale > 0 && fd.value > 0) clipFrameSeconds = (double)fd.value / (double)fd.timescale;
+                } @catch (__unused NSException *e) {}
+            }
+            double tolerance = MAX(MAX(frameSeconds * 2.0, clipFrameSeconds), 0.05);
+            double clipDuration = haveClipRange
+                ? (double)clipRange.duration.value / (double)clipRange.duration.timescale : NAN;
+            double maxDuration = clipDuration;
+            if (!isnan(listedDuration) && (isnan(maxDuration) || listedDuration > maxDuration)) maxDuration = listedDuration;
+            double clipStartSeconds = (haveClipRange && clipRange.start.timescale > 0)
+                ? (double)clipRange.start.value / (double)clipRange.start.timescale : 0.0;
+            double inSeconds = inNum ? [inNum doubleValue] : 0.0;
+            double outSeconds = outNum ? [outNum doubleValue] : (isnan(clipDuration) ? 0.0 : clipDuration);
+            BOOL snapped = NO;
+
+            if (!wholeClip) {
+                if (inSeconds < 0.0) {
+                    result = @{@"error": @"the range start must be 0 or more (seconds from the clip's first frame)"};
+                    return;
+                }
+                if (outSeconds > maxDuration + frameSeconds * 0.5) {
+                    result = @{@"error": [NSString stringWithFormat:
+                        @"the range end (%.3fs) is beyond the end of the clip, which is %.3fs long%@",
+                        outSeconds, maxDuration,
+                        (!isnan(listedDuration) && fabs(listedDuration - clipDuration) > 0.0005)
+                            ? [NSString stringWithFormat:@" (clippedRange %.3fs, duration %.3fs)", clipDuration, listedDuration] : @""]};
+                    return;
+                }
+                outSeconds = MIN(outSeconds, maxDuration);
+                if (clipFrameSeconds > 0.0) {
+                    double snappedIn = round(inSeconds / clipFrameSeconds) * clipFrameSeconds;
+                    double snappedOut = round(outSeconds / clipFrameSeconds) * clipFrameSeconds;
+                    if (fabs(snappedIn - inSeconds) > 1e-6 || fabs(snappedOut - outSeconds) > 1e-6) snapped = YES;
+                    inSeconds = MAX(0.0, snappedIn);
+                    outSeconds = MIN(maxDuration, snappedOut);
+                }
+                double minLength = clipFrameSeconds > 0.0 ? clipFrameSeconds : frameSeconds;
+                if (outSeconds - inSeconds < minLength * 0.5) {
+                    result = @{@"error": [NSString stringWithFormat:
+                        @"the range must be at least one frame long (start %.3fs, end %.3fs; one frame is %.4fs)",
+                        inSeconds, outSeconds, minLength]};
+                    return;
+                }
+            }
+
+            SpliceKit_CMTimeRange sourceRange = clipRange;
+            if (!wholeClip) {
+                int32_t startScale = clipRange.start.timescale > 0 ? clipRange.start.timescale : clipRange.duration.timescale;
+                int32_t durationScale = clipRange.duration.timescale;
+                sourceRange.start.value = (clipRange.start.timescale > 0 ? clipRange.start.value : 0)
+                    + (int64_t)llround(inSeconds * (double)startScale);
+                sourceRange.start.timescale = startScale;
+                sourceRange.start.flags = 1;
+                sourceRange.start.epoch = clipRange.start.epoch;
+                sourceRange.duration.value = (int64_t)llround((outSeconds - inSeconds) * (double)durationScale);
+                sourceRange.duration.timescale = durationScale;
+                sourceRange.duration.flags = 1;
+                sourceRange.duration.epoch = 0;
+            }
+
+            NSString *clipName = @"";
+            if ([clip respondsToSelector:@selector(displayName)])
+                clipName = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName)) ?: @"";
+
+            NSMutableDictionary *plan = [NSMutableDictionary dictionary];
+            plan[@"edit"] = edit;
+            plan[@"backtimed"] = @(backtimed);
+            plan[@"clip"] = clipName;   // legacy: the clip's name, as browser.appendClip always returned
+            NSMutableDictionary *sourceClip = [NSMutableDictionary dictionary];
+            sourceClip[@"handle"] = SpliceKit_storeHandle(clip) ?: @"";
+            sourceClip[@"name"] = clipName;
+            sourceClip[@"class"] = NSStringFromClass([clip class]) ?: @"";
+            if (!isnan(clipDuration)) sourceClip[@"durationSeconds"] = @(clipDuration);
+            if (!isnan(listedDuration)) sourceClip[@"listedDurationSeconds"] = @(listedDuration);
+            sourceClip[@"startSeconds"] = @(clipStartSeconds);
+            if (clipFrameSeconds > 0.0) sourceClip[@"frameSeconds"] = @(clipFrameSeconds);
+            plan[@"sourceClip"] = sourceClip;
+            NSMutableDictionary *source = [NSMutableDictionary dictionary];
+            source[@"startSeconds"] = @(inSeconds);
+            source[@"endSeconds"] = @(outSeconds);
+            source[@"durationSeconds"] = @(outSeconds - inSeconds);
+            source[@"wholeClip"] = @(wholeClip);
+            if (snapped) source[@"snappedToClipFrames"] = @YES;
+            plan[@"source"] = source;
+            NSMutableDictionary *target = [NSMutableDictionary dictionary];
+            if (atNum) target[@"requestedSeconds"] = atNum;
+            target[@"playheadBeforeSeconds"] = @(SpliceKit_transitionCurrentTimeSeconds(timelineModule));
+            plan[@"target"] = target;
+
+            if (dryRun) {
+                plan[@"status"] = @"dry_run";
+                plan[@"dryRun"] = @YES;
+                result = plan;
+                return;
+            }
+
+            // Order: seek (and verify) first, then the pasteboard, then the selection, then
+            // paste, so the pasteboard is replaced as late as possible before it is used.
+            NSMutableDictionary *seekDebug = [NSMutableDictionary dictionary];
+            double targetSeconds = NAN;
+            if (atNum) {
+                targetSeconds = [atNum doubleValue];
+                playheadMoved = YES;
+                if (!SpliceKit_browserSeekAndVerify(timelineModule, targetSeconds, tolerance, seekDebug)) {
+                    result = failed([NSString stringWithFormat:
+                        @"could not move the playhead to %.3fs before the edit", targetSeconds], seekDebug);
+                    return;
+                }
+            } else if (![edit isEqualToString:@"append"]) {
+                targetSeconds = SpliceKit_transitionCurrentTimeSeconds(timelineModule);
+            }
+            BOOL skimmingActive = SpliceKit_browserSkimmingActive(timelineModule);
+            seekDebug[@"skimmingActive"] = @(skimmingActive);
+
+            id mediaRange = nil;
+            Class rangeObjClass = objc_getClass("FigTimeRangeAndObject");
+            SEL rangeAndObjSel = NSSelectorFromString(@"rangeAndObjectWithRange:andObject:");
+            if (haveClipRange && rangeObjClass && [(id)rangeObjClass respondsToSelector:rangeAndObjSel]) {
+                mediaRange = ((id (*)(id, SEL, SpliceKit_CMTimeRange, id))objc_msgSend)(
+                    (id)rangeObjClass, rangeAndObjSel, sourceRange, clip);
+            }
+            if (!wholeClip && !mediaRange) {
+                result = failed(@"a range selection needs FigTimeRangeAndObject, which this Final Cut Pro build does not provide; the whole clip can still be placed", seekDebug);
                 return;
             }
 
             NSString *pasteboardName = nil;
             NSMutableDictionary *pasteboardDebug = [NSMutableDictionary dictionary];
             NSString *pasteboardError = nil;
+            pasteboardReplaced = YES;
             BOOL wroteExplicitClip = SpliceKit_browserPrepareExplicitPasteboard(
                 clip, mediaRange, &pasteboardName, pasteboardDebug, &pasteboardError);
+            [pasteboardDebug addEntriesFromDictionary:seekDebug];
             if (!wroteExplicitClip) {
-                result = @{@"error": pasteboardError ?: @"Failed to prepare explicit pasteboard data.",
-                           @"placementDebug": pasteboardDebug};
+                result = failed(pasteboardError ?: @"Failed to prepare explicit pasteboard data.", pasteboardDebug);
+                return;
+            }
+            if (!wholeClip && ![pasteboardDebug[@"pasteboardWriteRanges"] boolValue]) {
+                // The fallback wrote the whole clip; placing that would silently ignore the range.
+                result = failed(@"Final Cut Pro did not accept a range for this clip (writeRangesOfMedia: failed), so the range cannot be honored; nothing was placed (the pasteboard now holds the whole clip)", pasteboardDebug);
                 return;
             }
 
+            selectionCleared = YES;
+            SpliceKit_sendTimelineSimpleAction(timelineModule, @"deselectAll:");
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+
+            uint64_t handleGenerationBefore = SpliceKit_handleGeneration();
+            NSDictionary *beforeEntries = SpliceKit_browserTimelineEntries();
+
             NSDictionary *placementResult = nil;
-            if ([selectorName isEqualToString:@"appendWithSelectedMedia:"]) {
+            if ([edit isEqualToString:@"append"]) {
                 placementResult = SpliceKit_browserAppendExplicitClipToTimelineEnd(
                     timelineModule, clip, pasteboardName);
-            } else if ([selectorName isEqualToString:@"anchorWithPasteboard:backtimed:trackType:"]) {
+            } else if ([edit isEqualToString:@"connect"]) {
                 placementResult = SpliceKit_browserConnectExplicitClipAtPlayhead(
-                    timelineModule, clip, pasteboardName);
+                    timelineModule, clip, pasteboardName, backtimed);
             } else {
                 placementResult = SpliceKit_browserInsertExplicitClipAtPlayhead(
                     timelineModule, clip, pasteboardName);
@@ -16548,25 +16880,117 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                 mergedResult[@"placementDebug"] = mergedDebug;
             }
             if (placementResult[@"error"]) {
-                result = mergedResult;
+                result = failed(placementResult[@"error"], mergedDebug);
                 return;
             }
 
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 
-            NSString *clipName = @"";
-            if ([clip respondsToSelector:@selector(displayName)])
-                clipName = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName)) ?: @"";
+            // What the edit added: objects that exist now and did not before.
+            NSDictionary *afterEntries = SpliceKit_browserTimelineEntries();
+            BOOL handleTableReset = SpliceKit_handleGeneration() != handleGenerationBefore;
+            NSMutableArray *newEntries = [NSMutableArray array];
+            for (NSString *entryKey in afterEntries) {
+                if (beforeEntries[entryKey]) continue;
+                [newEntries addObject:SpliceKit_browserPlacedEntry(afterEntries[entryKey])];
+            }
 
+            // The placed clip is the new object that is the source clip: same name, on the
+            // primary storyline for append/insert and connected for connect, not a gap, and
+            // nearest the target. Anything else new (the far half of a split clip, a gap FCP
+            // added) is reported separately.
+            BOOL wantConnected = [edit isEqualToString:@"connect"];
+            double storylineEndBefore = [mergedDebug[@"targetEndSeconds"] doubleValue];
+            double aimSeconds = [edit isEqualToString:@"append"] ? storylineEndBefore : targetSeconds;
+            NSDictionary *primary = nil;
+            double primaryDistance = INFINITY;
+            for (NSDictionary *entry in newEntries) {
+                if ([entry[@"connected"] boolValue] != wantConnected) continue;
+                NSString *cls = entry[@"class"] ?: @"";
+                if ([cls rangeOfString:@"Gap"].location != NSNotFound) continue;
+                BOOL sameName = clipName.length == 0 || [entry[@"name"] isEqualToString:clipName];
+                double anchor = backtimed ? [entry[@"endSeconds"] doubleValue] : [entry[@"startSeconds"] doubleValue];
+                double distance = isnan(aimSeconds) ? 0.0 : fabs(anchor - aimSeconds);
+                if (!sameName) distance += 1.0e6;   // a differently named object only if nothing else fits
+                if (distance < primaryDistance) {
+                    primaryDistance = distance;
+                    primary = entry;
+                }
+            }
+            NSMutableArray *alsoNew = [NSMutableArray array];
+            for (NSDictionary *entry in newEntries) {
+                if (entry != primary) [alsoNew addObject:entry];
+            }
+            [alsoNew sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                double sa = [a[@"startSeconds"] doubleValue], sb = [b[@"startSeconds"] doubleValue];
+                return sa < sb ? NSOrderedAscending : (sa > sb ? NSOrderedDescending : NSOrderedSame);
+            }];
+
+            double sourceDuration = outSeconds - inSeconds;
+            NSNumber *rangeHonored = nil;
+            NSNumber *positionVerified = nil;
+            if (primary && primary[@"durationSeconds"] && !wholeClip) {
+                double placedDuration = [primary[@"durationSeconds"] doubleValue];
+                rangeHonored = @(fabs(placedDuration - sourceDuration) <= tolerance);
+            } else if (primary && primary[@"durationSeconds"] && !isnan(clipDuration)) {
+                double placedDuration = [primary[@"durationSeconds"] doubleValue];
+                rangeHonored = @(fabs(placedDuration - clipDuration) <= tolerance);
+            }
+            if (primary && primary[@"startSeconds"] && primary[@"endSeconds"]) {
+                double placedStart = [primary[@"startSeconds"] doubleValue];
+                double placedEnd = [primary[@"endSeconds"] doubleValue];
+                if ([edit isEqualToString:@"append"]) {
+                    positionVerified = @(fabs(placedStart - storylineEndBefore) <= tolerance);
+                    target[@"storylineEndBeforeSeconds"] = @(storylineEndBefore);
+                } else if (!isnan(targetSeconds)) {
+                    positionVerified = @(backtimed ? fabs(placedEnd - targetSeconds) <= tolerance
+                                                   : fabs(placedStart - targetSeconds) <= tolerance);
+                }
+            }
+            target[@"playheadAfterSeconds"] = @(SpliceKit_transitionCurrentTimeSeconds(timelineModule));
+            if (!isnan(targetSeconds)) target[@"editSeconds"] = @(targetSeconds);
+
+            BOOL verified = primary != nil && !handleTableReset
+                && (rangeHonored == nil || [rangeHonored boolValue])
+                && (positionVerified == nil || [positionVerified boolValue]);
+
+            [mergedResult addEntriesFromDictionary:plan];
+            mergedResult[@"target"] = target;
             mergedResult[@"status"] = @"ok";
-            mergedResult[@"clip"] = clipName;
+            mergedResult[@"clipName"] = clipName;
             mergedResult[@"action"] = actionName ?: @"browserPlaceClip";
+            mergedResult[@"placed"] = primary ? @[primary] : @[];
+            mergedResult[@"placedCount"] = @(primary ? 1 : 0);
+            mergedResult[@"alsoNew"] = alsoNew;
+            mergedResult[@"verified"] = @(verified);
+            mergedResult[@"placementVerified"] = @(verified);
+            mergedResult[@"handleTableReset"] = @(handleTableReset);
+            mergedResult[@"skimmingActive"] = @(skimmingActive);
+            if (rangeHonored) mergedResult[@"rangeHonored"] = rangeHonored;
+            if (positionVerified) mergedResult[@"positionVerified"] = positionVerified;
+            NSMutableArray *notes = [NSMutableArray array];
+            if (handleTableReset) {
+                [notes addObject:@"the handle table was reset during this call (it holds at most 2000 handles): handles from earlier reads are no longer valid and the placement could not be verified; call get_timeline_clips again"];
+            } else if (!primary && newEntries.count == 0) {
+                [notes addObject:@"the edit ran but no new clip was found on the timeline afterwards; check get_timeline_clips and undo if needed"];
+            } else if (!primary) {
+                [notes addObject:@"the edit created objects on the timeline but none is the source clip where it was expected; see alsoNew, check get_timeline_clips and undo if needed"];
+            } else if (!verified) {
+                [notes addObject:@"a clip was placed but its duration or position does not match the request within two frames (at least 50 ms); compare placed with source/target and undo if needed"];
+            }
+            if (skimmingActive) {
+                [notes addObject:@"the skimmer was active over the timeline; Final Cut Pro makes edits at the skimmer, not the playhead, while skimming"];
+            }
+            if (alsoNew.count > 0) {
+                [notes addObject:[NSString stringWithFormat:@"%lu other new object(s) on the timeline (alsoNew): the far half of a split clip or a gap Final Cut Pro added", (unsigned long)alsoNew.count]];
+            }
+            if (notes.count > 0) mergedResult[@"note"] = [notes componentsJoinedByString:@" | "];
             result = mergedResult;
         } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+            result = failed([NSString stringWithFormat:@"Exception: %@", e.reason], nil);
         }
     });
-    return result ?: @{@"error": @"Failed to place browser clip"};
+    return result ?: @{@"error": @"Failed to place browser clip (main thread did not finish in time)"};
 }
 
 // Append a clip from the event browser to the timeline
@@ -16731,6 +17155,20 @@ static NSDictionary *SpliceKit_handleBrowserConnectClip(NSDictionary *params) {
     return SpliceKit_handleBrowserPlaceClip(params,
                                             @"anchorWithPasteboard:backtimed:trackType:",
                                             @"connectAbovePlayhead");
+}
+
+// browser.placeClip: append (E), insert (W) or connect (Q) in one call; see
+// SpliceKit_handleBrowserPlaceClip for the range / target / backtimed / dryRun params.
+static NSDictionary *SpliceKit_handleBrowserPlaceClipEdit(NSDictionary *params) {
+    NSString *edit = [params[@"edit"] isKindOfClass:[NSString class]]
+        ? [params[@"edit"] lowercaseString] : @"append";
+    if ([edit isEqualToString:@"append"]) return SpliceKit_handleBrowserAppendClip(params);
+    if ([edit isEqualToString:@"insert"]) return SpliceKit_handleBrowserInsertClip(params);
+    if ([edit isEqualToString:@"connect"]) return SpliceKit_handleBrowserConnectClip(params);
+    if ([edit isEqualToString:@"overwrite"]) {
+        return @{@"error": @"an overwrite edit (Final Cut Pro: Overwrite, D) is not available through this method: Final Cut Pro makes it from the browser's own range selection, which SpliceKit does not set; use insert or connect"};
+    }
+    return @{@"error": [NSString stringWithFormat:@"unknown edit '%@': use append, insert or connect", edit]};
 }
 
 #pragma mark - Menu Execute Handler
@@ -30429,6 +30867,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleBrowserInsertClip(params);
     } else if ([method isEqualToString:@"browser.connectClip"]) {
         result = SpliceKit_handleBrowserConnectClip(params);
+    } else if ([method isEqualToString:@"browser.placeClip"]) {
+        result = SpliceKit_handleBrowserPlaceClipEdit(params);
     } else if ([method isEqualToString:@"media.importFile"]) {
         result = SpliceKit_handleMediaImportFile(params);
     }

@@ -30,10 +30,13 @@ rather than simulating the keyboard shortcut.
 2. open_project("My Project")         -- open a project by name
 3. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
 4. get_clip_info("obj_12")            -- what is IN the clip: source file, transcript words, effects, title text, a frame image
-5. timeline_action("blade")           -- edit
-6. verify_action("after blade")       -- confirm state changed
-7. capture_timeline()                 -- visually verify the timeline
-8. capture_viewer()                   -- visually verify the viewer/canvas
+5. browser_list_clips()               -- source clips in the browser, with handles
+6. add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
+                                      -- a range of that source clip pasted at the playhead (the effect of Insert / Connect / Append)
+7. timeline_action("blade")           -- edit
+8. verify_action("after blade")       -- confirm state changed
+9. capture_timeline()                 -- visually verify the timeline
+10. capture_viewer()                  -- visually verify the viewer/canvas
 ```
 
 ## CRITICAL: Must Know Before Editing
@@ -231,6 +234,29 @@ capture_clip_frame("obj_12")              # the clip as rendered in the Viewer (
 `get_clip_info` never moves the playhead: its frame is decoded from the source media file (no effects), and the
 tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so.
 `kind`, handles and `timings` are SpliceKit bookkeeping, not FCP terms.
+
+### Add a source clip, or a range of it, to the timeline
+```
+browser_list_clips()                                                       # source clips with handles
+add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45, dry_run=True)
+add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
+add_clip_to_timeline("obj_5", edit="insert", at_seconds=0)                 # whole clip, the effect of Insert (W) at 0s
+add_clip_to_timeline("obj_5", edit="append")                               # whole clip, the effect of Append (E)
+```
+SpliceKit writes the range to FCP's pasteboard and uses FCP's Edit > Paste (`insert`: into the primary
+storyline at the playhead, later clips move right) or Edit > Paste as Connected Clip (`connect`: a
+connected clip at the playhead; FCP picks the lane); `append` moves the playhead to the end of the
+primary storyline, pastes there and leaves the playhead there. For insert and connect this is FCP's
+three-point edit: source start + end, playhead as the timeline point. `start_seconds`/`end_seconds` are
+the equivalent of a browser range selection (Set Range Start I / End O), counted from the clip's first
+frame; `at_seconds` moves the playhead first; `backtimed=True` (connect only, the effect of Connect to
+Primary Storyline - Backtimed, Shift-Q) puts the end of the range at the playhead. No overwrite: FCP has
+no paste that overwrites (FCP's own E/W/Q/D on the browser's current selection are
+`timeline_edit_action("appendEdit" | "insertEdit" | "connectToPrimaryStoryline")` and
+`timeline_destructive_action("overwriteEdit")`). The answer re-reads the timeline and reports the placed
+clip as `get_timeline_clips()` does, whether its duration matches the range and its position the target
+(within two frames, at least 50 ms), and anything else the edit created. The pasteboard is replaced.
+The edit is a single paste, so `history_action("undo")` removes it in one step.
 
 ### Cuts at regular intervals across entire timeline
 ```
@@ -1133,7 +1159,8 @@ is registered with `@splicekit_tool("name")`, which attaches the tool's annotati
 exceptions into a `ToolError` whose text reaches the client. Tools return `-> str`
 (published as structured output `{"result": ...}`); the image tools carry no return
 annotation so they can return text + image content. The 2.x SDK runs sync tools in
-worker threads, so `BridgeConnection.call` holds a lock for each round trip.
+worker threads, so `BridgeConnection.call` holds a lock for each round trip. The server's
+`instructions` are a task-organized map of which tool does what; keep it in step when adding tools.
 
 ```
 make mcp-check         # every tool/resource/prompt over MCP against a fake bridge (no FCP)
