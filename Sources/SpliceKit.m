@@ -13,7 +13,6 @@
 #import "SpliceKitPlugins.h"
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
-#import "SpliceKitSentry.h"
 #import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
 #import "SpliceKitImmersivePreviewPanel.h"
@@ -117,15 +116,12 @@ void SpliceKit_log(NSString *format, ...) {
             [sLogHandle synchronizeFile];
         });
     }
-
-    SpliceKit_sentryAddBreadcrumb(@"splicekit.log", message, nil);
-    SpliceKit_sentryLog(message, @"splicekit.log", nil);
 }
 
 #pragma mark - Startup Diagnostics
 //
-// Track swizzle results, capture crashes, and collect system info so that
-// user bug reports include everything we need to diagnose remotely.
+// Track swizzle results, capture crashes, and collect system info so that a
+// log the user chooses to share has everything needed to diagnose the problem.
 //
 
 // Swizzle result tracker — records every swizzle attempt and outcome so
@@ -310,7 +306,6 @@ static CFAbsoluteTime sServerReadyTime = 0;
 
 void SpliceKit_markServerReady(void) {
     sServerReadyTime = CFAbsoluteTimeGetCurrent();
-    SpliceKit_sentrySetLaunchPhase(@"server-ready");
     double total = sServerReadyTime - sConstructorStart;
     double toLaunch = sDidLaunchTime - sConstructorStart;
     double toServer = sServerReadyTime - sDidLaunchTime;
@@ -3083,7 +3078,6 @@ static void SpliceKit_safeInstallHandler(int sig, siginfo_t *info, void *ctx) {
 }
 
 BOOL SpliceKit_safeInstall(const char *featureName, void (^block)(void)) {
-    NSString *feature = featureName ? [NSString stringWithUTF8String:featureName] : @"unknown";
     struct sigaction sa, prevSEGV, prevBUS;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = SpliceKit_safeInstallHandler;
@@ -3107,9 +3101,6 @@ BOOL SpliceKit_safeInstall(const char *featureName, void (^block)(void)) {
             sigaction(SIGBUS,  &prevBUS,  NULL);
             SpliceKit_log(@"[SafeInstall] %s threw %@: %@ — feature disabled",
                           featureName, e.name, e.reason);
-            SpliceKit_sentryCaptureException(e,
-                                             @"runtime.safe_install.exception",
-                                             @{@"feature": feature});
             return NO;
         }
         sSafeInstallActive = 0;
@@ -3129,10 +3120,6 @@ BOOL SpliceKit_safeInstall(const char *featureName, void (^block)(void)) {
         sigaction(SIGBUS,  &prevBUS,  NULL);
         SpliceKit_log(@"[SafeInstall] %s crashed (signal %d) — feature auto-disabled",
                       featureName, sig);
-        SpliceKit_sentryCaptureMessage([NSString stringWithFormat:@"Safe install crashed for %s (signal %d)",
-                                        featureName, sig],
-                                       @"runtime.safe_install.signal",
-                                       @{@"feature": feature, @"signal": @(sig)});
         return NO;
     }
 }
@@ -3262,7 +3249,6 @@ static void SpliceKit_scheduleSoundIsolationUnhideAttempt(NSUInteger attempt) {
 }
 
 static void SpliceKit_appDidLaunch(void) {
-    SpliceKit_sentrySetLaunchPhase(@"did-finish-launching");
     SpliceKit_log(@"================================================");
     SpliceKit_log(@"App launched. Starting control server...");
     SpliceKit_log(@"================================================");
@@ -4077,7 +4063,6 @@ static void SpliceKit_handleSubscriptionValidation(void) {
 __attribute__((constructor))
 static void SpliceKit_init(void) {
     SpliceKit_initLogging();
-    SpliceKit_sentrySetLaunchPhase(@"constructor");
 
     SpliceKit_log(@"================================================");
     SpliceKit_log(@"SpliceKit v%s initializing...", SPLICEKIT_VERSION);
@@ -4123,14 +4108,10 @@ static void SpliceKit_init(void) {
 
     sConstructorStart = CFAbsoluteTimeGetCurrent();
 
-    SpliceKit_sentryStartRuntime();
-    if (SpliceKit_sentryRuntimeEnabled()) {
-        SpliceKit_log(@"Sentry runtime crash handling enabled");
-    } else {
-        // Fall back to the legacy crash logger when Sentry isn't configured.
-        SpliceKit_installCrashHandlers();
-        SpliceKit_log(@"Legacy crash handlers installed (NSException + SIGTRAP/SIGABRT/SIGSEGV/SIGBUS)");
-    }
+    // Crash handling stays on this Mac: exceptions and signals are written to
+    // ~/Library/Logs/SpliceKit and nothing is reported anywhere.
+    SpliceKit_installCrashHandlers();
+    SpliceKit_log(@"Crash handlers installed (NSException + SIGTRAP/SIGABRT/SIGSEGV/SIGBUS); reports stay local");
 
     // These patches need to land before FCP's own init code runs
     SpliceKit_disableCloudContent();
@@ -4144,7 +4125,6 @@ static void SpliceKit_init(void) {
         addObserverForName:NSApplicationWillFinishLaunchingNotification
         object:nil queue:nil usingBlock:^(NSNotification *note) {
             sWillLaunchTime = CFAbsoluteTimeGetCurrent();
-            SpliceKit_sentrySetLaunchPhase(@"will-finish-launching");
             SpliceKit_log(@"WillFinishLaunching (%.2fs after constructor)",
                           sWillLaunchTime - sConstructorStart);
             SpliceKit_swizzleCloudContentClasses("willLaunch");

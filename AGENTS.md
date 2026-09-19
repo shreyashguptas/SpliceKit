@@ -347,7 +347,7 @@ close_transcript()                             # close the panel
 The transcript panel opens inside FCP as a floating window with an **engine selector dropdown**:
 - **Parakeet v3** (default) — NVIDIA Parakeet TDT 0.6B multilingual (25 languages), on-device via FluidAudio
 - **Parakeet v2** — English-optimized variant, same speed
-- **Apple Speech** — SFSpeechRecognizer (slower, network-capable)
+- **Apple Speech** — SFSpeechRecognizer (slower; SpliceKit requests on-device recognition)
 - **FCP Native** — Built-in AASpeechAnalyzer
 
 All clips are transcribed in a single batch process (model loaded once, reused across clips).

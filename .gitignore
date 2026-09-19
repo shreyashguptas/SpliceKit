@@ -28,10 +28,8 @@ patcher/build/
 patcher/SpliceKit.xcodeproj/xcuserdata/
 patcher/SpliceKit.xcodeproj/project.xcworkspace/xcuserdata/
 
-# Pre-built patcher app (generate via release.sh, distribute via GitHub Releases)
+# Pre-built patcher app (local build output)
 patcher/SpliceKitPatcher.app/
-patcher/Frameworks/Sentry.framework/
-patcher/Frameworks/.sentry-sdk-version
 
 # Keys and credentials
 *.pem

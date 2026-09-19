@@ -1,10 +1,10 @@
 # Changelog
 
-All notable user-facing changes to SpliceKit. Each release's full DMG,
-notarization ticket, and Sparkle signature live on the
-[GitHub Releases page](https://github.com/elliotttate/SpliceKit/releases).
-Sparkle users are notified automatically; manual download is available from the
-same page or via `appcast.xml`.
+All notable user-facing changes to SpliceKit. This fork has no release feed
+and no auto-update: build from the repository with `make install`, and update
+by pulling it. Entries below the fork point describe upstream releases as they
+shipped and mention features (Sparkle updates, Sentry reporting, log upload)
+that this fork has removed.
 
 ## [Unreleased]
 
@@ -60,6 +60,22 @@ same page or via `appcast.xml`.
   `reload_plugin_tools` no longer re-registers tools it already added, and the
   bridge socket is closed at exit. `SPLICEKIT_HOST` other than loopback is
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
+
+### Removed
+- **Every remaining path that could send data off this Mac, except the user's
+  own actions.** The dylib's Sentry stubs and their call sites (breadcrumbs,
+  launch phases, RPC exception capture), the patcher's Sentry SDK and Sparkle
+  auto-update packages, the "Check for Updates" command, the "Share Logs"
+  button (which uploaded the latest FCP crash report and SpliceKit logs to
+  filebin.net), the `SUFeedURL` / `SUPublicEDKey` / `SUEnableAutomaticChecks`
+  keys, the `appcast.xml` feed and the `release.sh` script (Sentry dSYM upload,
+  Sparkle signing, GitHub release) are gone. Crash handling is the local
+  NSException/signal logger writing under `~/Library/Logs/SpliceKit`. What
+  still talks to the network is listed in `docs/THIRD_PARTY_DEPENDENCIES.md`:
+  the loopback bridge, the Vision Pro preview on the local network, and
+  downloads the user starts (URL import, transcriber and Gemma models, the
+  `mcp` and `mlx-lm` packages from PyPI, install-time Homebrew/Python and
+  `insert_dylib`).
 
 ## [3.3.9] — 2026-08-29
 

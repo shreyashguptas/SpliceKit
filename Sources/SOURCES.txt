@@ -22,7 +22,6 @@ SpliceKitServer.m
 SpliceKitBridgeMetadata.m
 SpliceKitAsync.m
 SpliceKitLogPanel.m
-SpliceKitSentry.m
 SpliceKitTranscriptPanel.m
 SpliceKitTranscriptDiagnostics.m
 SpliceKitCaptionPanel.m

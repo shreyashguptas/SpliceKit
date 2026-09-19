@@ -60,19 +60,6 @@ struct StatusPanel: View {
                     .cornerRadius(6)
             }
 
-            // Crash-log share status
-            if let msg = model.crashShareMessage {
-                let accent: Color = model.isSharingCrashLog ? .secondary : .green
-                Label(msg, systemImage: model.isSharingCrashLog ? "arrow.up.circle" : "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(accent)
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(accent.opacity(0.1))
-                    .cornerRadius(6)
-            }
-
             Spacer()
 
             // Action buttons
@@ -82,21 +69,6 @@ struct StatusPanel: View {
                 } label: {
                     Label("Uninstall", systemImage: "trash")
                 }
-
-                Button {
-                    model.shareLatestCrashLog()
-                } label: {
-                    if model.isSharingCrashLog {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("Sharing...")
-                        }
-                    } else {
-                        Label("Share Logs", systemImage: "square.and.arrow.up")
-                    }
-                }
-                .disabled(model.isSharingCrashLog)
-                .help("Upload the latest Final Cut Pro crash log and SpliceKit logs to filebin.net and copy the link to your clipboard.")
 
                 Spacer()
 

@@ -7,9 +7,14 @@ work. Final Cut Pro itself, the injected dylib, the bridge and the MCP server
 have **no** third-party dependencies — they build from the source in this repo
 against Apple's own frameworks.
 
-Nothing is downloaded during `make install` unless a transcription helper
-actually needs rebuilding, and nothing phones home. Crash and analytics
-reporting was removed from this fork entirely (see `Sources/SpliceKitSentry.m`).
+`make install` downloads only what it needs to build and run (Homebrew and
+Python if they are missing, the `mcp` package, `insert_dylib`, and the
+transcriber packages when a helper needs rebuilding; all listed in the last
+section), and nothing phones home. Crash reporting (Sentry),
+the patcher's update feed (Sparkle) and its log upload (filebin.net) were
+removed from this fork entirely; crashes are logged locally under
+`~/Library/Logs/SpliceKit`. The section "What talks to the network" at the end
+lists every remaining outbound path and who starts it.
 
 ---
 
@@ -128,3 +133,61 @@ cd ../.. && make transcribers
 ```
 
 Commit the changed `Package.resolved` so other machines get the same revision.
+
+---
+
+## What talks to the network
+
+Every code path in this repository that opens a network connection, who
+starts each one, and where it goes. There is no analytics, no usage reporting,
+no update check and no crash upload anywhere in the tree; this section is what
+is left.
+
+### Loopback only (never leaves this Mac)
+
+| Path | Where | Goes to |
+| --- | --- | --- |
+| JSON-RPC bridge inside Final Cut Pro | `Sources/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
+| MCP server, `Scripts/splicekit_client.py`, `tools/splicekit-watchdog.py`, `tools/fcp_runtime_export.py`, the mixer app, the Loupedeck haptics plugin | `mcp/server.py` and the named files, `Plugins/LogiHaptics/.../FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
+| Command palette helper scripts | the Swift helper that the Apple Intelligence engines spawn, and the Gemma engine's port probe | 127.0.0.1:9876 and 127.0.0.1:8080 |
+| Test suites | `tests/` | a fake bridge on 127.0.0.1 |
+
+### Only when you start it inside Final Cut Pro
+
+| Feature | What happens | Goes to |
+| --- | --- | --- |
+| Transcript / caption panels, Parakeet or Whisper engine | model download on first use (table above); recognition is on-device | huggingface.co |
+| Transcript panel, Apple Speech engine | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` set on every request (`Sources/SpliceKitTranscriptPanel.m`), so recognition stays on this Mac where macOS supports it | Apple framework, on-device |
+| Command palette, Apple Intelligence engines (the default) | Apple's FoundationModels framework (Apple's on-device model); SpliceKit adds no network call of its own beyond the loopback bridge | Apple frameworks |
+| Command palette, "Gemma 4" engine | talks to an `mlx_lm.server` on this Mac at http://localhost:8080; if `mlx-lm` is missing it runs `pip install mlx-lm`, and the server downloads the model (`unsloth/gemma-4-E4B-it-UD-MLX-4bit` unless `SpliceKitGemmaModel` says otherwise) on first start; selecting the engine and sending a query is the consent, there is no second prompt | PyPI, huggingface.co, then loopback |
+| URL import | downloads the URL you pasted: direct media links with `NSURLSession`, YouTube/Vimeo through `yt-dlp` and `ffmpeg` found on PATH (or `SPLICEKIT_YTDLP_PATH` / `SPLICEKIT_FFMPEG_PATH`); `make url-import-tools` only symlinks binaries already on PATH and prints a `brew install` hint otherwise; it downloads nothing | the site you gave it |
+| Vision Pro preview panel | Apple's ImmersiveVideoToolbox discovers headsets by Bonjour (`_ivtpreviewclient._tcp`) or the host/IP you type, and streams frames to the one you pick | your local network |
+
+### Only during installation (`make install`)
+
+Homebrew and Python sit behind a yes/no prompt; `Scripts/install.sh` answers
+yes for you with `--yes`, or when it is not run from a terminal (a pipe, CI).
+The other rows have no prompt of their own: they run when what they fetch is
+missing, as part of the one-command install.
+
+| Step | Command | Goes to |
+| --- | --- | --- |
+| Homebrew, if missing (prompted) | `Scripts/install.sh` | raw.githubusercontent.com (Homebrew's installer), then Homebrew's own mirrors |
+| Python 3.10+, if missing (prompted) | `brew install python@3.13` | Homebrew |
+| MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` | PyPI |
+| `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`), GUI patcher (`curl`) | github.com/tyilo/insert_dylib |
+| Transcriber helpers, if they need rebuilding | SwiftPM (tables above) | github.com (FluidAudio, WhisperKit) |
+| Optional OTIO tools | `pip install opentimelineio ...`, only if you run it | PyPI |
+
+### Links that open your browser
+
+The patcher's "SpliceKit Help" menu item opens `https://splicekit.fcp.cafe/installation/`
+when you click it. Nothing is fetched until then.
+
+### What is deliberately not here
+
+Removed from this fork, with their configuration and call sites: the Sentry
+SDK and its stubs (dylib and patcher), the Sparkle update feed (`SUFeedURL`,
+`appcast.xml`, "Check for Updates"), the patcher's "Share Logs" upload to
+filebin.net, and `release.sh` (dSYM upload, feed signing). The GitHub Pages
+site under `docs/` has no analytics script.
