@@ -116,6 +116,16 @@ Many actions require a clip to be selected first:
   3. Then apply: timeline_action("addColorBoard") or timeline_action("retimeSlow50")
   Undo with: timeline_action("undo")
 
+## Targeting by handle (no playhead moves)
+get_timeline_clips() returns a handle (e.g. "obj_12") for every clip, connected clip and marker.
+  select_clips(["obj_12"])            # select that clip (replace/add/remove); playhead stays put
+  timeline_action("addColorBoard")    # then act on the selection as usual
+  begin_edit("Rough cut") ... end_edit()   # everything in between becomes ONE undo step (Edit > Undo Rough cut)
+  trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   # exact ripple trim; drop dry_run to apply
+A handle is SpliceKit bookkeeping (a reference from an earlier read), not an FCP term, and unrelated to
+FCP's "media handles" (extra source media beyond a clip's edges). Re-run get_timeline_clips() if a handle
+comes back unresolved. select_clips selects clips only; markers are changed through the marker actions.
+
 ## Playback (playback_action)
 playPause, goToStart, goToEnd, nextFrame, prevFrame, nextFrame10, prevFrame10
 
@@ -293,6 +303,7 @@ DESTRUCTIVE_TOOLS = {
     "move_transcript_words",
     "delete_transcript_silences",
     "blade_at_times",
+    "trim_clip",
     "trim_clips_to_beats",
     "sync_clips_to_song_beats",
     "assemble_random_clips_to_song_beats",
@@ -368,6 +379,7 @@ IDEMPOTENT_LOCAL_WRITE_TOOLS = {
     "set_transcript_engine",
     "open_project",
     "select_clip_in_lane",
+    "select_clips",
     "mixer_volume_begin",
     "mixer_volume_end",
     "open_livecam",
@@ -403,6 +415,10 @@ CUSTOM_TOOL_TITLES = {
     "build_song_cut": "Build Song Cut",
     "open_project": "Open Project",
     "select_clip_in_lane": "Select Clip In Lane",
+    "select_clips": "Select Clips",
+    "begin_edit": "Begin Undo Step",
+    "end_edit": "End Undo Step",
+    "trim_clip": "Trim Clip",
     "capture_viewer": "Capture Viewer",
     "capture_timeline": "Capture Timeline",
     "capture_inspector": "Capture Inspector",
@@ -663,9 +679,16 @@ class BridgeConnection:
 
     def ensure_connected(self):
         if self.sock is None:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(30)
-            self.sock.connect((SPLICEKIT_HOST, SPLICEKIT_PORT))
+            # Assign only after connect() succeeds: a refused connect must not leave
+            # a dead socket behind, or the next call fails once before reconnecting.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            try:
+                sock.connect((SPLICEKIT_HOST, SPLICEKIT_PORT))
+            except OSError:
+                sock.close()
+                raise
+            self.sock = sock
             self._buf = b""
 
     def call(self, method: str, params_dict=None, **params) -> dict:
@@ -1232,7 +1255,7 @@ def _connected_table_lines(connected):
 
 def _marker_table_lines(markers):
     """Render marker dicts (timeline.getDetailedState / timeline.getMarkers) as a table
-    sorted by time. The Done column only appears when some marker reports `completed`."""
+    sorted by time. The Completed column only appears when some marker reports `completed`."""
     if not markers:
         return []
     ordered = sorted(
@@ -1242,7 +1265,7 @@ def _marker_table_lines(markers):
     has_done = any("completed" in m for m in markers)
     header = f"{'Time':>9} {'Kind':<9} {'Name':<30}"
     if has_done:
-        header += f" {'Done':<5}"
+        header += f" {'Completed':<9}"
     header += " Handle"
     lines = [header, "-" * (len(header) + 8)]
     for m in ordered:
@@ -1252,7 +1275,7 @@ def _marker_table_lines(markers):
         if has_done:
             done = m.get("completed")
             done_str = "" if done is None else ("yes" if done else "no")
-            row += f" {done_str:<5}"
+            row += f" {done_str:<9}"
         row += f" {m.get('handle', '')}"
         lines.append(row)
     return lines
@@ -1268,12 +1291,14 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
     1. Primary storyline (spine) items: index, class, name, start/end, duration,
        lane, selected, handle.
     2. Connected clips -- everything anchored to spine clips: titles, B-roll,
-       captions-as-titles, music/SFX on negative lanes, and the contents of
+       captions and SpliceKit-generated caption titles, music/SFX on negative lanes, and the contents of
        connected storylines. Columns: lane (relative to the spine; positive is
        above, negative below), class, name, start, end, duration, parent (spine
        index the clip is anchored to), selected, handle.
-    3. Markers: time, kind (standard/todo/chapter/keyword/analysis), name,
-       done (to-do completion, when readable), handle. Marker handles work with
+    3. Markers: time, kind (FCP calls this the marker type: standard, todo =
+       to-do item, chapter; keyword and analysis are keyword ranges and analysis
+       keywords, which FCP's Timeline Index lists as tags), name, completed
+       (to-do items, when readable), handle. Marker handles work with
        timeline.directAction changeMarkerName / markMarkerCompleted / removeMarker.
 
     Args:
@@ -1373,7 +1398,9 @@ def list_markers(kind: str = "") -> str:
     resolved its time.
 
     Args:
-        kind: optional filter -- "standard", "todo", "chapter", "keyword" or "analysis"
+        kind: optional filter -- "standard", "todo" (FCP: to-do item), "chapter",
+              "keyword" or "analysis" (keyword ranges / analysis keywords, listed
+              as tags in FCP's Timeline Index). FCP calls this the marker type.
 
     Marker handles can be passed to timeline.directAction actions
     changeMarkerName / markMarkerCompleted / removeMarker (via the `marker` param).
@@ -4222,6 +4249,260 @@ def select_clip_in_lane(lane: int = 1) -> str:
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
+
+
+# ============================================================
+# Handle-based selection, edit grouping, exact trims
+# ============================================================
+# get_timeline_clips() hands back a handle for every clip. These tools act on
+# those handles directly instead of on whatever happens to be under the playhead.
+
+def _parse_handle_list(handles) -> list:
+    """Accept a Python list, a JSON array string, or a comma-separated string of handles."""
+    if handles is None:
+        return []
+    if isinstance(handles, str):
+        text = handles.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"handles is not a valid JSON array: {e}")
+            if not isinstance(parsed, list):
+                raise ValueError("handles JSON must be an array of handle strings")
+            return [str(h).strip() for h in parsed if str(h).strip()]
+        return [part.strip() for part in text.split(",") if part.strip()]
+    if isinstance(handles, (list, tuple)):
+        return [str(h).strip() for h in handles if str(h).strip()]
+    raise ValueError("handles must be a list of handle strings, a JSON array string, "
+                     "or a comma-separated string")
+
+
+@mcp.tool(annotations=_tool_annotations("select_clips"))
+def select_clips(handles: list[str] | str = "", mode: str = "replace") -> str:
+    """Select clips by handle -- the way to act on a specific clip after get_timeline_clips().
+
+    Workflow:
+        get_timeline_clips()                       # read handles (e.g. "obj_12")
+        select_clips(["obj_12"])                   # make that clip the selection
+        timeline_action("addColorBoard")           # act on the selection as usual
+
+    Works for clips in the primary storyline and for connected clips (titles,
+    B-roll, music) alike, at any depth. Like Option-clicking a clip in Final Cut
+    Pro, it never moves the playhead. An empty list is Edit > Deselect All. This
+    tool selects clips only; to change a marker use list_markers() and the marker
+    actions (changeMarkerName, markMarkerCompleted, removeMarker).
+
+    Args:
+        handles: a Python list, a JSON array string ('["obj_1","obj_2"]') or a
+                 comma-separated string ("obj_1, obj_2"). Empty = deselect all.
+        mode: "replace" (default) makes these clips the selection (a click in FCP);
+              "add" adds them to the current selection (Command-click);
+              "remove" takes them out of it (Command-click a selected clip).
+
+    If none of the handles resolve, the selection is left unchanged and an error
+    is returned. Handles and `matchesRequest` are SpliceKit bookkeeping, not Final
+    Cut Pro terms: a handle is a reference to an object from an earlier read
+    (re-run get_timeline_clips() if one comes back unresolved) and is unrelated to
+    FCP's "media handles"; matchesRequest reports whether FCP's selection after the
+    call equals the intended set (the requested clips for replace; the current
+    selection plus or minus them for add/remove).
+    """
+    mode_l = (mode or "replace").strip().lower()
+    if mode_l not in ("replace", "add", "remove"):
+        return 'Error: mode must be "replace", "add" or "remove"'
+    try:
+        handle_list = _parse_handle_list(handles)
+    except ValueError as e:
+        return f"Error: {e}"
+
+    r = bridge.call("timeline.selectItems", handles=handle_list, mode=mode_l)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+
+    selected = r.get("selected", []) or []
+    lines = [f"Selection ({r.get('mode', mode_l)}): {r.get('selectedCount', len(selected))} selected, "
+             f"{r.get('resolvedCount', 0)}/{r.get('requestedCount', len(handle_list))} handles resolved"]
+    if selected:
+        lines.append(f"  {'handle':<10} {'lane':>4} {'start':>8} {'end':>8}  name")
+        for item in selected:
+            lines.append(
+                f"  {str(item.get('handle', '?')):<10} {str(item.get('lane', '?')):>4} "
+                f"{_fmt_secs(_time_seconds(item, 'startTime'))} {_fmt_secs(_time_seconds(item, 'endTime'))}  "
+                f"{item.get('name', '')}"
+            )
+    elif not handle_list and mode_l == "replace":
+        lines.append("  (nothing selected -- deselected all)")
+    else:
+        lines.append("  (nothing selected)")
+
+    unresolved = r.get("unresolved", []) or []
+    if unresolved:
+        lines.append("Unresolved handles (stale? re-run get_timeline_clips): " + ", ".join(map(str, unresolved)))
+    for rej in r.get("rejected", []) or []:
+        lines.append(f"Rejected {rej.get('handle', '?')}: {rej.get('reason', 'rejected')}")
+    if r.get("matchesRequest") is False:
+        lines.append("WARNING: FCP's selection does not match the request (matchesRequest=false); "
+                     "check the rows above before acting on the selection.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_tool_annotations("begin_edit"))
+def begin_edit(name: str = "Edit") -> str:
+    """Open one undo step: everything until end_edit() reverts with a single Edit > Undo `name`.
+
+    Final Cut Pro's internal term for this is an undoable action. It is opened
+    on the sequence with actionBegin: and closed with actionEnd:save:error:,
+    the same pair FCP's own edits use, so a multi-step edit (several blades,
+    trims, markers, ...) undoes with one timeline_action("undo"). Always call
+    end_edit() afterwards, also after an error, or the step stays open.
+
+    Args:
+        name: the Edit > Undo menu name for the step, e.g. "Rough cut".
+    """
+    r = bridge.call("timeline.beginEdit", name=name)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    lines = [f"Undo step open: {r.get('name', name)}"
+             + (f" (opened with {r['openedWith']})" if r.get("openedWith") else "")]
+    if r.get("note"):
+        lines.append(f"Note: {r['note']}")
+    if "hadOpenTransaction" in r or "hasOpenTransaction" in r:
+        lines.append(f"(diagnostic) hasOpenTimelineTransaction before: {r.get('hadOpenTransaction', '?')}, "
+                     f"after: {r.get('hasOpenTransaction', '?')}")
+    lines.append("Remember to call end_edit() when the edit is complete.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_tool_annotations("end_edit"))
+def end_edit(name: str = "") -> str:
+    """Close the undo step opened by begin_edit(); everything since then is one Edit > Undo entry.
+
+    Always call this after begin_edit(), also when something went wrong in
+    between. Final Cut Pro registers the step under the name given to
+    begin_edit() (or `name` here, if provided). If SpliceKit has no step open
+    this does nothing, so it can never close a transaction FCP itself opened.
+
+    Args:
+        name: optional override for the Edit > Undo menu name.
+    """
+    params = {}
+    if name:
+        params["name"] = name
+    r = bridge.call("timeline.endEdit", **params)
+    if _err(r) and "status" not in r:
+        return f"Error: {r.get('error', r)}"
+    status = r.get("status", "ok")
+    lines = [f"Undo step closed ({status}): {r.get('name', name or 'Edit')}"
+             + (f" via {r['closedWith']}" if r.get("closedWith") else "")]
+    if r.get("note"):
+        lines.append(f"Note: {r['note']}")
+    if "hadOpenTransaction" in r or "hasOpenTransaction" in r:
+        lines.append(f"(diagnostic) hasOpenTimelineTransaction before: {r.get('hadOpenTransaction', '?')}, "
+                     f"after: {r.get('hasOpenTransaction', '?')}")
+    if r.get("error"):
+        lines.append(f"Error reported by FCP: {r['error']}")
+    if status == "ok" and not r.get("note"):
+        lines.append(f"Edit > Undo {r.get('name', name or 'Edit')} now reverts the whole step.")
+    return "\n".join(lines)
+
+
+def _trim_range_line(label, rng):
+    if not isinstance(rng, dict):
+        return f"  {label} ?"
+    return (f"  {label} {rng.get('start', 0):.3f}s - {rng.get('end', 0):.3f}s "
+            f"(duration {rng.get('duration', 0):.3f}s)")
+
+
+@mcp.tool(annotations=_tool_annotations("trim_clip"))
+def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
+              to_seconds: float | None = None, dry_run: bool = False) -> str:
+    """Ripple trim one edit point (a clip's start point or end point) by handle, to an exact time.
+
+    This is Final Cut Pro's default trim, a ripple edit: the same as dragging a
+    clip's start point or end point with the Select tool. On the primary
+    storyline the clip's duration changes and all subsequent clips ripple
+    earlier or later so no gap is left (the project duration changes);
+    connected clips attached to the trimmed clip or to any subsequent clip move
+    with them, as in FCP. For a connected clip only that clip changes.
+
+    A positive delta moves the edit point later on the timeline (to the right,
+    like pressing Period with the edit point selected), a negative delta moves
+    it earlier (Comma). Trimming the START point of a primary-storyline clip
+    keeps the clip in place: its start point moves within the source media, its
+    duration changes, and its end plus everything after it shifts.
+
+    Args:
+        handle: the clip's handle from get_timeline_clips() (e.g. "obj_12").
+        edge: "start" (the clip's start point) or "end" (its end point).
+        delta_seconds: move the edit point by this many seconds (+ later, - earlier).
+        to_seconds: or, the absolute timeline time the edit point should be at.
+                    Give exactly one of delta_seconds / to_seconds. For a start
+                    point on the primary storyline this sets how much head is
+                    removed or added (to_seconds minus the current start); the
+                    clip itself stays where it is.
+        dry_run: True reports the planned before/after ranges without changing
+                 anything (a SpliceKit preview; FCP has no dry run). Try it first.
+
+    Sub-frame requests are a no-op; a trim that would leave the clip shorter
+    than one frame is refused; transitions, storylines and compound clips are
+    not accepted. Undo with timeline_action("undo").
+    """
+    edge_l = (edge or "").strip().lower()
+    if edge_l not in ("start", "end"):
+        return 'Error: edge must be "start" or "end"'
+    if (delta_seconds is None) == (to_seconds is None):
+        return "Error: give exactly one of delta_seconds or to_seconds"
+    if not handle:
+        return "Error: handle is required (get it from get_timeline_clips())"
+
+    params = {"handle": handle, "edge": edge_l, "dryRun": bool(dry_run)}
+    if delta_seconds is not None:
+        params["deltaSeconds"] = float(delta_seconds)
+    else:
+        params["toSeconds"] = float(to_seconds)
+    r = bridge.call("timeline.trimClip", **params)
+    if _err(r) and "status" not in r:
+        # Validation refusals (bad handle, no-op, too short) carry no status; a
+        # status:"failed" response is rendered below with its before/after ranges.
+        lines = [f"Error: {r.get('error', r)}"]
+        if isinstance(r, dict) and r.get("before"):
+            lines.append(_trim_range_line("current:", r["before"]))
+        return "\n".join(lines)
+
+    name = r.get("name", "")
+    label = f"{edge_l} edit point of '{name}' ({r.get('handle', handle)})"
+    if r.get("dryRun"):
+        lines = [f"DRY RUN -- ripple trim of the {label}",
+                 f"  delta: {r.get('deltaSeconds', 0):+.3f}s "
+                 f"({'later' if r.get('deltaSeconds', 0) > 0 else 'earlier'} on the timeline"
+                 + (f", {r['deltaFrames']} frame(s)" if "deltaFrames" in r else "") + ")",
+                 _trim_range_line("before:   ", r.get("before")),
+                 _trim_range_line("projected:", r.get("projected"))]
+        if r.get("rippleScope"):
+            lines.append(f"  ripple: {r['rippleScope']}")
+        lines.append("  Ripple edit: subsequent clips move so no gap is left, connected clips move with them. "
+                     "Nothing was changed.")
+        return "\n".join(lines)
+
+    status = r.get("status", "?")
+    lines = [f"Ripple trim {'OK' if status == 'ok' else 'FAILED'} -- {label}",
+             f"  requested: {r.get('requestedDelta', 0):+.3f}s, applied: {r.get('appliedDelta', 0):+.3f}s"]
+    lines.append(_trim_range_line("before:", r.get("before")))
+    lines.append(_trim_range_line("after: ", r.get("after")))
+    if r.get("error"):
+        lines.append(f"  error: {r['error']}")
+    if r.get("warning"):
+        lines.append(f"  warning: {r['warning']}")
+    if r.get("note"):
+        lines.append(f"  note: {r['note']}")
+    if r.get("rippleScope"):
+        lines.append(f"  ripple: {r['rippleScope']}")
+    if status == "ok":
+        lines.append('  Ripple edit applied: subsequent clips moved so no gap is left. Undo with timeline_action("undo").')
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -7416,11 +7697,11 @@ def resource_timeline_clips() -> str:
               description="All markers in the active timeline with type, position, name, and notes",
               mime_type="application/json")
 def resource_timeline_markers() -> str:
-    """Return all markers from the active timeline."""
-    r = bridge.call("timeline.getState")
+    """Return all markers from the active timeline (timeline.getMarkers)."""
+    r = bridge.call("timeline.getMarkers")
     if _err(r):
         return json.dumps({"error": r.get("error", str(r))})
-    markers = r.get("markers", [])
+    markers = r.get("markers", []) or []
     return json.dumps({"markers": markers, "count": len(markers)}, indent=2, default=str)
 
 

@@ -18,10 +18,20 @@ and prints, without changing the timeline:
      the pre-existing timeline.selectClipInLane for the clip on that lane; the
      handles must match. This moves the playhead and selection (restored after),
      never the content.
+  5. Optional, each CHANGES STATE and reverts itself:
+     --select-check  selects one clip by handle via timeline.selectItems, verifies the
+                     readback, then restores the previous selection (or deselects all).
+     --edit-check    beginEdit -> addMarkers (2) -> endEdit, then undoes and reports
+                     whether ONE undo removed both markers (grouped) or one; undoes
+                     until the marker count is back at the baseline.
+     --trim-check    ripple-trims the last spine clip's end by one frame via
+                     timeline.trimClip (dry run first), verifies, then undoes and
+                     verifies the clip's end is back where it was.
 
 Usage:
     python3 tests/live_timeline_reads_check.py                # read-only report
     python3 tests/live_timeline_reads_check.py --cross-check  # also verify lanes/times
+    python3 tests/live_timeline_reads_check.py --select-check --edit-check --trim-check
     python3 tests/live_timeline_reads_check.py --json out.json # dump raw responses
 
 Open a project first that has at least one title, one connected audio clip,
@@ -280,12 +290,207 @@ def cross_check(conn):
     return checked, mismatches
 
 
+# ── 5. state-changing checks (each reverts itself) ────────────────────────────
+
+def _frame_seconds(st):
+    fps = st.get("frameRate")
+    if isinstance(fps, (int, float)) and fps > 0:
+        return 1.0 / float(fps)
+    return 1.0 / 24.0
+
+
+def _spine_clips(st):
+    return [i for i in (st.get("items") or [])
+            if not i.get("isGap") and not i.get("isTransition")
+            and "Transition" not in str(i.get("class", ""))
+            and secs(i, "startTime") is not None and secs(i, "endTime") is not None]
+
+
+def select_check(st, conn):
+    section("timeline.selectItems (changes selection, restored)")
+    fails = 0
+    previous = [i.get("handle") for i in (st.get("items") or []) if i.get("selected") and i.get("handle")]
+    previous += [c.get("handle") for c in conn if c.get("selected") and c.get("handle")]
+    print(f"previous selection: {previous or '(none)'}")
+
+    candidates = [c for c in conn if c.get("depth") == 0 and not c.get("isGap")
+                  and not c.get("isTransition") and c.get("handle")]
+    target = candidates[0] if candidates else (_spine_clips(st)[0] if _spine_clips(st) else None)
+    if not target:
+        print("SKIP  no clip with a handle to select")
+        return 0, 1
+    kind = "connected clip" if candidates else "spine clip"
+    print(f"target: {kind} {target.get('name')!r} handle={target.get('handle')} lane={target.get('effectiveLane', target.get('lane', 0))}")
+
+    r = rpc("timeline.selectItems", {"handles": [target["handle"]], "mode": "replace"})
+    if "error" in r:
+        print(f"FAIL  selectItems: {r['error']}")
+        return 1, 1
+    got = [s.get("handle") for s in (r.get("selected") or [])]
+    print(f"readback: selected={got} matchesRequest={r.get('matchesRequest')} selector={r.get('selector')} "
+          f"unresolved={r.get('unresolved')} rejected={r.get('rejected')}")
+    if target["handle"] in got and r.get("matchesRequest") is True and len(got) == 1:
+        print("OK    selection readback contains the target and matches the request")
+    else:
+        fails += 1
+        print("FAIL  selection readback does not match (see above)")
+
+    # also prove that a marker handle is rejected, not selected
+    markers = st.get("markers") or []
+    if markers and markers[0].get("handle"):
+        rm = rpc("timeline.selectItems", {"handles": [markers[0]["handle"]], "mode": "add"})
+        rej = [x.get("handle") for x in (rm.get("rejected") or [])]
+        if markers[0]["handle"] in rej:
+            print(f"OK    marker handle {markers[0]['handle']} rejected: {rm['rejected'][0].get('reason')}")
+        else:
+            fails += 1
+            print(f"FAIL  marker handle {markers[0]['handle']} was not rejected: {json.dumps(rm)[:200]}")
+
+    # restore
+    rr = rpc("timeline.selectItems", {"handles": previous, "mode": "replace"})
+    restored = [s.get("handle") for s in (rr.get("selected") or [])]
+    if set(restored) == set(previous):
+        print(f"OK    previous selection restored ({len(previous)} item(s))")
+    else:
+        fails += 1
+        print(f"FAIL  restore mismatch: wanted {previous}, got {restored} ({rr.get('error', '')})")
+    return fails, 1
+
+
+def _marker_count():
+    gm = rpc("timeline.getMarkers")
+    return gm.get("markerCount") if "error" not in gm else None
+
+
+def edit_check(st):
+    section("timeline.beginEdit / endEdit grouping (adds 2 markers, then undoes)")
+    clips = _spine_clips(st)
+    if not clips:
+        print("SKIP  no spine clip to put markers on")
+        return 0, 1
+    baseline = _marker_count()
+    if baseline is None:
+        print("FAIL  cannot read marker count")
+        return 1, 1
+    c = clips[0]
+    s, e = secs(c, "startTime"), secs(c, "endTime")
+    t1 = s + (e - s) * 0.25
+    t2 = s + (e - s) * 0.75
+    print(f"baseline markers={baseline}; adding at {t1:.3f}s and {t2:.3f}s inside {c.get('name')!r}")
+
+    b = rpc("timeline.beginEdit", {"name": "SpliceKit check"})
+    print(f"beginEdit -> {json.dumps(b)[:200]}")
+    if "error" in b:
+        return 1, 1
+    a = rpc("timeline.addMarkers", {"markers": [
+        {"time": t1, "name": "SpliceKit check 1"}, {"time": t2, "name": "SpliceKit check 2"}]})
+    print(f"addMarkers -> {json.dumps(a)[:200]}")
+    en = rpc("timeline.endEdit", {"name": "SpliceKit check"})
+    print(f"endEdit -> {json.dumps(en)[:200]}")
+
+    fails = 0
+    after_add = _marker_count()
+    if after_add == baseline + 2:
+        print(f"OK    markers after add = {after_add} (baseline + 2)")
+    else:
+        fails += 1
+        print(f"FAIL  markers after add = {after_add}, expected {baseline + 2}")
+
+    u = rpc("timeline.action", {"action": "undo"})
+    print(f"undo -> {json.dumps(u)[:200]}")
+    after_undo = _marker_count()
+    if after_undo == baseline:
+        print(f"OK    ONE undo removed both markers -> grouped as one undoable action "
+              f"({u.get('actionName', '?')!r})")
+    elif after_undo == baseline + 1:
+        fails += 1
+        print(f"FAIL  one undo removed only one marker -> NOT grouped (undo name {u.get('actionName', '?')!r})")
+    else:
+        fails += 1
+        print(f"FAIL  markers after one undo = {after_undo} (baseline {baseline})")
+
+    tries = 0
+    while after_undo is not None and after_undo > baseline and tries < 4:
+        u = rpc("timeline.action", {"action": "undo"})
+        after_undo = _marker_count()
+        tries += 1
+        print(f"extra undo #{tries} ({u.get('actionName', u.get('error', '?'))!r}) -> markers={after_undo}")
+    print(f"final markers={after_undo} vs baseline={baseline}: {'OK' if after_undo == baseline else 'MISMATCH'}")
+    if after_undo != baseline:
+        fails += 1
+    return fails, 1
+
+
+def trim_check(st):
+    section("timeline.trimClip (ripple-trims last spine clip end by one frame, then undoes)")
+    clips = _spine_clips(st)
+    if not clips:
+        print("SKIP  no spine clip to trim")
+        return 0, 1
+    c = clips[-1]
+    frame = _frame_seconds(st)
+    half = frame / 2.0
+    start0, end0 = secs(c, "startTime"), secs(c, "endTime")
+    print(f"target: {c.get('name')!r} handle={c.get('handle')} range=[{start0:.4f} .. {end0:.4f}] frame={frame:.5f}s")
+
+    dry = rpc("timeline.trimClip", {"handle": c["handle"], "edge": "end", "deltaSeconds": -frame, "dryRun": True})
+    print(f"dry run -> {json.dumps(dry)[:300]}")
+    if "error" in dry:
+        print(f"FAIL  dry run refused: {dry['error']}")
+        return 1, 1
+    fails = 0
+    if abs(dry.get("before", {}).get("end", -1) - end0) > half:
+        fails += 1
+        print("FAIL  dry-run 'before' does not match the snapshot's clip end")
+
+    real = rpc("timeline.trimClip", {"handle": c["handle"], "edge": "end", "deltaSeconds": -frame})
+    print(f"trim -> {json.dumps(real)[:400]}")
+    after_end = (real.get("after") or {}).get("end")
+    if real.get("status") == "ok" and after_end is not None and abs((end0 - after_end) - frame) <= half:
+        print(f"OK    end moved {end0:.4f} -> {after_end:.4f} (about one frame), status ok")
+    else:
+        fails += 1
+        print(f"FAIL  status={real.get('status')} end {end0:.4f} -> {after_end} error={real.get('error')}")
+
+    changed = after_end is not None and abs(after_end - end0) > half
+    if real.get("status") == "ok" or changed:
+        u = rpc("timeline.action", {"action": "undo"})
+        print(f"undo -> {json.dumps(u)[:200]}")
+    else:
+        print("SKIP  undo: the trim did not change the clip, nothing to revert")
+    st2 = rpc("timeline.getDetailedState")
+    back = None
+    for i in (st2.get("items") or []):
+        if i.get("handle") == c["handle"]:
+            back = secs(i, "endTime")
+    if back is None:
+        # handle may have been re-issued; match by start time
+        for i in _spine_clips(st2):
+            if abs(secs(i, "startTime") - start0) <= half:
+                back = secs(i, "endTime")
+    if back is not None and abs(back - end0) <= half:
+        print(f"OK    after undo the clip end is back at {back:.4f} (original {end0:.4f})")
+    else:
+        fails += 1
+        print(f"FAIL  after undo the clip end is {back} (original {end0:.4f})")
+    return fails, 1
+
+
 def main():
     global HOST, PORT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--cross-check", action="store_true", help="seek + selectClipInLane comparison")
+    ap.add_argument("--select-check", action="store_true",
+                    help="CHANGES STATE (reverted): select one clip by handle via timeline.selectItems, "
+                         "verify readback, restore previous selection")
+    ap.add_argument("--edit-check", action="store_true",
+                    help="CHANGES STATE (reverted): beginEdit + addMarkers x2 + endEdit, then undo; "
+                         "reports whether one undo removed both markers")
+    ap.add_argument("--trim-check", action="store_true",
+                    help="CHANGES STATE (reverted): ripple-trim last spine clip end by one frame via "
+                         "timeline.trimClip, verify, undo, verify")
     ap.add_argument("--json", metavar="PATH", help="write every raw RPC response to this file")
     args = ap.parse_args()
     HOST, PORT = args.host, args.port
@@ -300,13 +505,25 @@ def main():
         if args.cross_check:
             checked, mismatches = cross_check(conn)
             verdict.append(f"cross-check: {checked} lanes checked, {mismatches} mismatches")
+        if args.select_check:
+            fails, ran = select_check(st, conn)
+            verdict.append(f"select-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
+        if args.edit_check:
+            fails, ran = edit_check(st)
+            verdict.append(f"edit-check: {'not run' if not ran else ('OK (grouped)' if fails == 0 else f'{fails} failure(s)')}")
+        if args.trim_check:
+            fails, ran = trim_check(st)
+            verdict.append(f"trim-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
     section("Verdict")
     print("; ".join(verdict) if verdict else "no project open — vocabulary section is still valid evidence")
+    failed = any(("failure" in v) or ("mismatches" in v and not v.endswith("0 mismatches")) for v in verdict)
     print("Paste this whole output back for review.")
     if args.json:
         with open(args.json, "w") as f:
             json.dump(RAW, f, indent=2, default=str)
         print(f"raw responses written to {args.json}")
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

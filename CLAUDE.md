@@ -76,6 +76,14 @@ select_clip_in_lane(lane=-1)              # select connected clip below
 select_clip_in_lane(lane=0)               # same as selectClipAtPlayhead
 ```
 
+To act on a specific clip without moving the playhead, select it by handle:
+```
+get_timeline_clips()                      # every clip (spine + connected) comes with a handle
+select_clips(handles=["obj_12"])          # make that clip the selection (add/remove modes too)
+timeline_action("addColorBoard")          # now apply
+```
+Markers are not selectable this way; an empty list deselects everything.
+
 ### Playhead Positioning
 - 1 frame = ~0.042s at 24fps, ~0.033s at 30fps
 - Use `nextFrame` with repeat count for precise positioning
@@ -88,6 +96,13 @@ timeline_action("undo")   # undoes last edit, returns action name
 timeline_action("redo")   # redoes it
 ```
 Undo routes through FCP's FFUndoManager (not the responder chain).
+
+Group a multi-step edit into ONE undo step (Edit > Undo <name>; FCP's internal term is an undoable action):
+```
+begin_edit("Rough cut")   # open the group
+blade_at_times([...]); trim_clip(...); ...
+end_edit()                # close it -- always, also after an error; one undo now reverts it all
+```
 
 ### Timeline Data Model (Spine)
 FCP stores items in: `sequence -> primaryObject (FFAnchoredCollection) -> containedItems`
@@ -194,6 +209,17 @@ timeline_action("blade")  # cut there
 ```
 blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0])   # cut at all times in one call
 ```
+
+### Trim a clip to an exact time
+```
+get_timeline_clips()                                              # find the clip's handle
+trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)     # plan: before/projected ranges
+trim_clip("obj_12", edge="end", to_seconds=8.0)                   # ripple trim the end edit point to 8.0s
+```
+This is FCP's default trim, a ripple edit (dragging a clip's start or end point with the Select tool):
+subsequent clips move so no gap is left, and connected clips move with the clips they are attached to.
+A start-point trim on the primary storyline keeps the clip in place and changes its duration.
+`delta_seconds=-0.5` works too (negative = edit point earlier). Undo with `timeline_action("undo")`.
 
 ### Cuts at regular intervals across entire timeline
 ```

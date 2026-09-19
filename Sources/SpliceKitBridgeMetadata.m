@@ -69,8 +69,10 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"timeline.assembleRandomClipsToBeats": meta(@"destructive", @"Build beat-synced cut from browser pool."),
             @"timeline.batchActions": meta(@"destructive", @"Run a sequence of timeline+playback actions."),
             @"timeline.batchExport": meta(@"destructive", @"Export each clip via Share."),
-            @"timeline.beginEdit": meta(@"state_dependent", @"Open an FFEditActionMgr group for atomic edits."),
-            @"timeline.endEdit": meta(@"state_dependent", @"Close the current edit group."),
+            @"timeline.selectItems": meta(@"state_dependent", @"Select timeline items by handle (replace/add/remove); never moves the playhead."),
+            @"timeline.trimClip": meta(@"destructive", @"Ripple-trim one edit point of a clip by handle, by delta or to an absolute time."),
+            @"timeline.beginEdit": meta(@"state_dependent", @"Open one undoable action on the sequence; edits until endEdit become one undo step."),
+            @"timeline.endEdit": meta(@"state_dependent", @"Close the open undoable action (actionEnd:save:error:) so the group is one undo step."),
 
             // spine.*
             @"spine.getItems": meta(@"safe", @"Read spine-level items from primary storyline."),

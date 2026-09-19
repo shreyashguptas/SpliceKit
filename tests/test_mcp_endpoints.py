@@ -169,6 +169,30 @@ def test_timeline():
     else:
         ok("getMarkers", r,
            lambda r: "markers" in _res(r) and "markerCount" in _res(r))
+    # selectItems with no handles = deselect all (harmless; never moves the playhead)
+    r = rpc("timeline.selectItems", {"handles": []})
+    if "error" in str(r) and "No active" in str(r):
+        skip("selectItems (deselect all)", "no project open")
+    else:
+        ok("selectItems (deselect all)", r,
+           lambda r: "selected" in _res(r) and "matchesRequest" in _res(r))
+    expect_error("selectItems (bad mode)", rpc("timeline.selectItems", {"handles": [], "mode": "toggle"}), "mode")
+    # trimClip validates its params before touching the timeline
+    expect_error("trimClip (no params)", rpc("timeline.trimClip", {}), "handle")
+    expect_error("trimClip (no edge)", rpc("timeline.trimClip", {"handle": "obj_0"}), "edge")
+    expect_error("trimClip (both deltas)", rpc("timeline.trimClip",
+                 {"handle": "obj_0", "edge": "end", "deltaSeconds": -0.5, "toSeconds": 1.0}), "exactly one")
+    expect_error("trimClip (bogus handle)", rpc("timeline.trimClip",
+                 {"handle": "obj_does_not_exist", "edge": "end", "deltaSeconds": -0.5}))
+    # beginEdit / endEdit round trip: opens and closes one undoable action, no edits inside
+    r = rpc("timeline.beginEdit", {"name": "SpliceKit endpoint check"})
+    if "error" in str(r) and "No active" in str(r):
+        skip("beginEdit", "no project open")
+        skip("endEdit", "no project open")
+    else:
+        ok("beginEdit", r, lambda r: _res(r).get("status") == "ok")
+        ok("endEdit", rpc("timeline.endEdit", {"name": "SpliceKit endpoint check"}),
+           lambda r: _res(r).get("status") == "ok")
 
 
 def test_timeline_direct():

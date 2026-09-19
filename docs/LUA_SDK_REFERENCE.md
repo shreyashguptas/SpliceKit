@@ -250,6 +250,20 @@ sk.timeline("trimEnd")               -- trim end
 sk.timeline("joinClips")             -- join adjacent clips
 ```
 
+Exact ripple trim of one edit point by clip handle (handles come from `sk.clips()`):
+
+```lua
+local clips = sk.clips()
+local h = clips.items[2].handle
+-- move the END edit point 0.5s earlier (negative = earlier, positive = later);
+-- FCP's default trim, a ripple edit: subsequent clips move so no gap is left,
+-- and connected clips move with the clips they are attached to
+sk.rpc("timeline.trimClip", {handle = h, edge = "end", deltaSeconds = -0.5, dryRun = true})  -- plan
+local r = sk.rpc("timeline.trimClip", {handle = h, edge = "end", deltaSeconds = -0.5})
+print(r.status, r.before["end"], r.after["end"], r.appliedDelta)  -- "end" is a Lua keyword
+sk.rpc("timeline.trimClip", {handle = h, edge = "start", toSeconds = 6.5})  -- to an absolute time
+```
+
 ### Nudge
 
 ```lua
@@ -266,6 +280,16 @@ sk.select_clip()                     -- select clip at playhead
 sk.timeline("selectAll")             -- select all clips
 sk.timeline("deselectAll")           -- deselect all
 sk.timeline("selectToPlayhead")      -- extend selection to playhead
+```
+
+Select by handle (spine or connected clips; never moves the playhead):
+
+```lua
+local clips = sk.clips()
+sk.rpc("timeline.selectItems", {handles = {clips.items[1].handle}})                 -- replace
+sk.rpc("timeline.selectItems", {handles = {clips.items[2].handle}, mode = "add"})   -- add / "remove"
+sk.rpc("timeline.selectItems", {handles = {}})                                      -- deselect all
+-- result: selected[] (handle, name, class, lane, startTime, endTime), unresolved[], rejected[], matchesRequest
 ```
 
 ### Range Selection
@@ -290,6 +314,15 @@ sk.undo()                    -- undo last action
 sk.redo()                    -- redo
 -- Undo is unlimited — call multiple times to step back
 for i = 1, 5 do sk.undo() end
+```
+
+Group several edits into one undo step (Edit > Undo <name>; FCP's internal term is an undoable action):
+
+```lua
+sk.rpc("timeline.beginEdit", {name = "Rough cut"})
+sk.blade(); sk.seek(6.0); sk.blade()
+sk.rpc("timeline.endEdit", {})       -- always close it, also after an error
+sk.undo()                            -- one undo reverts the whole group
 ```
 
 ### Compound Clips & Storylines
