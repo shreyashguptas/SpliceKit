@@ -4906,9 +4906,11 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
         frame_max_width: longest side of the returned frame in pixels (64-1920, default 640).
 
     `kind` (video clip, audio clip, title, generator, gap clip, transition, compound
-    clip, multicam clip, connected storyline, caption), handles and `timings` are
-    SpliceKit's own bookkeeping, spelled with FCP's words; compound and multicam come
-    from FCP's own flags on the clip, not from its class name. Titles, generators and gap clips have no
+    clip, reference clip, multicam clip, connected storyline, caption), handles and
+    `timings` are SpliceKit's own bookkeeping, spelled with FCP's words; compound,
+    reference (an FFAnchoredClip standing in for an event clip: a compound, multicam or
+    synchronized clip) and multicam come from FCP's own flags on the clip, not from its
+    class name. Titles, generators and gap clips have no
     source media file and report that instead of a frame. A marker is not a clip;
     use list_markers().
     """

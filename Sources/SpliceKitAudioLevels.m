@@ -295,6 +295,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
         c[@"isGap"] = @([cls containsString:@"Gap"] || SKAL_bool(item[@"isGap"], NO));
         c[@"hasAudio"] = @(SKAL_bool(item[@"hasAudio"], NO));
         c[@"isCompound"] = @(SKAL_bool(item[@"isCompound"], NO));
+        c[@"isReferenceClip"] = @(SKAL_bool(item[@"isReferenceClip"], NO));
         if (!connected) [spineOrder addObject:c];
         if (wanted && ![wanted containsObject:h]) return;
         if (wanted) [seenWanted addObject:h];
@@ -353,6 +354,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
         else if ([c[@"isGap"] boolValue]) reason = @"gap clip (no audio)";
         else if (![c[@"hasAudio"] boolValue]) reason = @"no audio";
         else if ([c[@"isCompound"] boolValue]) reason = @"compound clip: no single source media file (open it to analyse the clips inside)";
+        else if ([c[@"isReferenceClip"] boolValue]) reason = @"reference clip (a compound, multicam or synchronized clip on the timeline): no single source media file (open it to analyse the clips inside)";
         else if (!haveRange) reason = @"no timeline range reported for this item";
         if (reason) {
             [skipped addObject:@{@"handle": c[@"handle"], @"name": c[@"name"], @"reason": reason}];
@@ -414,8 +416,10 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             if (kind.length > 0) entry[@"kind"] = kind;
             // A collection is skipped before its file is looked at: the media resolver would
             // otherwise hand back the first clip inside it under the container's name.
-            if ([kind isEqualToString:@"compound clip"]) {
-                entry[@"skipped"] = @"compound clip: no single source media file (open it to analyse the clips inside)";
+            if ([kind isEqualToString:@"compound clip"] || [kind isEqualToString:@"reference clip"]) {
+                entry[@"skipped"] = [kind isEqualToString:@"compound clip"]
+                    ? @"compound clip: no single source media file (open it to analyse the clips inside)"
+                    : @"reference clip (a compound, multicam or synchronized clip on the timeline): no single source media file (open it to analyse the clips inside)";
                 SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
@@ -432,18 +436,18 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 [clips addObject:entry];
                 continue;
             }
-            // The media resolver digs into nested containers for the first media component
-            // it finds. For an ordinary clip that is a direct child; two or more levels down
-            // means a compound, multicam or synchronized clip whose first file is not this
-            // clip's content -- skipped rather than analysed against the wrong file (QA
-            // run 2: a compound clip reported the second clip's file for its whole length).
+            // The media resolver digs into nested containers (containedItems) for the first
+            // media component it finds. For an ordinary clip that is a direct child (depth
+            // 1); two or more levels down it is the first file inside a container of
+            // containers, and nothing says which part of this clip that file is -- skipped
+            // rather than analysed against a file that may not be this clip's content.
             NSInteger mediaDepth = [src[@"mediaComponentDepth"] respondsToSelector:@selector(integerValue)]
                 ? [src[@"mediaComponentDepth"] integerValue] : -1;
             if (mediaDepth >= 2) {
                 entry[@"skipped"] = [NSString stringWithFormat:
-                    @"its source media file sits inside a nested container (%ld levels down), the way compound, "
-                    @"multicam and synchronized clips are built; the first file inside would give levels for the "
-                    @"wrong content, so it is skipped", (long)mediaDepth];
+                    @"its first source media file was found %ld levels down inside nested containers; SpliceKit "
+                    @"cannot tell which part of this clip that file is, so it is skipped (get_clip_info shows the "
+                    @"structure)", (long)mediaDepth];
                 SpliceKit_log(@"[AudioLevels] %@ \"%@\" skipped: %@", c[@"handle"], c[@"name"], entry[@"skipped"]);
                 [clips addObject:entry];
                 continue;
@@ -503,8 +507,9 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 fileStart = 0;
                 if (aEnd - aStart < 0.001) {
                     entry[@"skipped"] = [NSString stringWithFormat:
-                        @"FCP's readings place the whole clip before the start of its media file (source start %.3f s via %@, "
-                        @"media origin %.3f s via %@): the clip-to-file mapping does not fit this clip, so it is not analysed",
+                        @"SpliceKit's readings of FCP's clip object place the whole clip before the start of its media file "
+                        @"(source start %.3f s via %@, media origin %.3f s via %@; SpliceKit's terms): the clip-to-file mapping "
+                        @"does not fit this clip, so it is not analysed",
                         SKAL_number(src[@"sourceStart"], 0.0), sourceOut[@"sourceStartSelector"],
                         SKAL_number(src[@"mediaOrigin"], 0.0), sourceOut[@"mediaOriginSelector"]];
                     SpliceKit_log(@"[AudioLevels] %@ skipped: %@", c[@"handle"], entry[@"skipped"]);
@@ -512,8 +517,9 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                     continue;
                 }
                 [notes addObject:[NSString stringWithFormat:
-                    @"FCP's readings place the clip's first %.3f s before the start of its media file (source start via %@, "
-                    @"media origin via %@); the levels start at %.3f s on the timeline, where the file does",
+                    @"SpliceKit's readings of FCP's clip object place the clip's first %.3f s before the start of its media "
+                    @"file (source start via %@, media origin via %@; SpliceKit's terms); the levels start at %.3f s on the "
+                    @"timeline, where the file does",
                     missing, sourceOut[@"sourceStartSelector"], sourceOut[@"mediaOriginSelector"], aStart]];
             }
             double fileEnd = fileStart + (aEnd - aStart);
@@ -535,8 +541,8 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 NSString *err = helperError ?: @"audio-levels failed";
                 if ([err rangeOfString:@"empty range"].location != NSNotFound) {
                     err = [NSString stringWithFormat:
-                        @"the file range %.3f-%.3f s lies outside the media file (%@): the clip-to-file mapping from FCP's "
-                        @"readings (source start via %@, media origin via %@) does not fit this clip",
+                        @"the file range %.3f-%.3f s lies outside the media file (%@): SpliceKit's clip-to-file mapping from "
+                        @"FCP's clip object (source start via %@, media origin via %@; SpliceKit's terms) does not fit this clip",
                         fileStart, fileEnd, err, sourceOut[@"sourceStartSelector"], sourceOut[@"mediaOriginSelector"]];
                 }
                 entry[@"error"] = err;

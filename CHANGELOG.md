@@ -88,15 +88,19 @@ that this fork has removed.
 - **A compound clip was not detected and was analysed against the wrong file.** On the
   timeline a compound clip is an `FFAnchoredClip` that answers `isReferenceClip` = YES
   (verified on 12.3; an ordinary clip's `FFAnchoredCollection` answers NO to both
-  `isCompoundClip` and `isReferenceClip`); both flags are asked now, and the class-name
-  fallback covers `FFAnchoredClip`. Independently, `get_audio_levels` skips any clip whose media
-  component sits two or more containers down (how compound, multicam and synchronized
-  clips are built) rather than reporting the first file inside it as the clip's levels.
+  `isCompoundClip` and `isReferenceClip`). Both flags are asked now: `isCompoundClip` gives
+  `kind: compound clip`, `isReferenceClip` alone gives `kind: reference clip` (a compound,
+  multicam or synchronized clip stands in for an event clip the same way, so it is not
+  called a compound clip); `get_timeline_clips` carries `isCompound` or `isReferenceClip`,
+  and `get_audio_levels` skips both. Independently, it skips any clip whose first media
+  component was found two or more containers down, since nothing says which part of the
+  clip that file is.
 - **`timeline_action` said "ok" while Final Cut Pro was waiting on a sheet** (QA run 2:
   `createCompoundClip` and its Compound Clip Name sheet). The answer now carries
   `dialogPending`, the dialog's description and a note pointing at `detect_dialog` /
   `click_dialog_button` / `dismiss_dialog` when a sheet or modal dialog is open after the
-  action.
+  action. The check runs at the RPC entry only, so batch actions, `blade_at_times`, the
+  command palette and Lua, which run actions in loops, are unaffected.
 - **`add_clip_to_timeline` reported `status: ok` with nothing placed.** An edit after which
   no new clip appears is an error now (the pasteboard replacement and playhead move are
   reported with it). A project (FCP's `isProject`), including the open timeline's own, is

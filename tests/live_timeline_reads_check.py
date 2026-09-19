@@ -635,7 +635,7 @@ def _write_frame(frame, path):
 
 def audio_check(st):
     section("timeline.getAudioLevels (levels of the first spine clip with audio, then the whole timeline)")
-    spine = [c for c in _spine_clips(st) if c.get("hasAudio") and not c.get("isCompound")]
+    spine = [c for c in _spine_clips(st) if c.get("hasAudio") and not c.get("isCompound") and not c.get("isReferenceClip")]
     if not spine:
         print("SKIP  no primary-storyline clip with audio (compound clips are skipped: no single source file)")
         return 0, 0

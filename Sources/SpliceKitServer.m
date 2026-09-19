@@ -1227,20 +1227,23 @@ static BOOL SpliceKit_tryReadBoolSelector(id obj, NSString *name, BOOL *out) {
 // audio is an FFAnchoredCollection too, with its media components inside it, which
 // is what the earlier class-name check got wrong (every camera clip came back as a
 // compound clip). When no flag answers, the item is not called compound.
-static BOOL SpliceKit_itemIsCompoundClip(id item) {
-    if (!item) return NO;
+// Which of FCP's container flags `item` answers yes to: "compound clip" for
+// isCompoundClip (FFAnchoredCollection answers it: NO for an ordinary clip, verified on
+// 12.3), "reference clip" for isReferenceClip (an FFAnchoredClip standing in for an event
+// clip: a compound clip -- verified YES on 12.3 -- and, by the same mechanism, a multicam
+// or synchronized clip, which is why it is not called a compound clip), nil for neither.
+// The class name is asked only when no flag answers, and never "Collection", which is
+// what every ordinary audio+video clip is. Either kind has no single source media file.
+static NSString *SpliceKit_itemContainerKind(id item) {
+    if (!item) return nil;
     BOOL flag = NO, answered = NO;
-    // Verified on FCP 12.3: an ordinary clip (FFAnchoredCollection) answers
-    // isCompoundClip = NO and isReferenceClip = NO; a compound clip on the timeline is an
-    // FFAnchoredClip that has no isCompoundClip but answers isReferenceClip = YES (it
-    // refers to the compound clip's own sequence in the event).
-    if (SpliceKit_tryReadBoolSelector(item, @"isCompoundClip", &flag)) { if (flag) return YES; answered = YES; }
-    if (SpliceKit_tryReadBoolSelector(item, @"isReferenceClip", &flag)) { if (flag) return YES; answered = YES; }
-    if (answered) return NO;
-    // No flag to ask on this item's class: fall back to the class name, but never on
-    // "Collection" (that is what every ordinary audio+video clip is).
+    if (SpliceKit_tryReadBoolSelector(item, @"isCompoundClip", &flag)) { if (flag) return @"compound clip"; answered = YES; }
+    if (SpliceKit_tryReadBoolSelector(item, @"isReferenceClip", &flag)) { if (flag) return @"reference clip"; answered = YES; }
+    if (answered) return nil;
     NSString *cls = NSStringFromClass([item class]) ?: @"";
-    return [cls containsString:@"Sequence"] || [cls containsString:@"Compound"] || [cls containsString:@"AnchoredClip"];
+    if ([cls containsString:@"Compound"]) return @"compound clip";
+    if ([cls containsString:@"Sequence"] || [cls containsString:@"AnchoredClip"]) return @"reference clip";
+    return nil;
 }
 
 // Same for a multicam clip (FCP: Multicam Clip). Selector names unverified on a
@@ -1304,7 +1307,7 @@ static NSString *SpliceKit_tryReadStringSelector(id obj, NSString *name) {
 static SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
     SpliceKit_CMTime start = range.start, duration = range.duration;
     if (duration.timescale <= 0) return start;
-    if (start.timescale <= 0) return duration;
+    if (start.timescale <= 0) return start;   // an unknown start stays unknown
     if (duration.timescale == start.timescale) {
         start.value += duration.value;
         return start;
@@ -1911,8 +1914,10 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                         // Compound clips: FCP's own -isCompoundClip flag. An ordinary clip
                         // with video and audio is an FFAnchoredCollection too, so the class
                         // name is no test. Nested contents are exposed when the flag says yes.
-                        BOOL isCompound = SpliceKit_itemIsCompoundClip(item);
-                        if (isCompound) info[@"isCompound"] = @YES;
+                        NSString *containerKind = SpliceKit_itemContainerKind(item);
+                        BOOL isCompound = (containerKind != nil);
+                        if ([containerKind isEqualToString:@"compound clip"]) info[@"isCompound"] = @YES;
+                        if ([containerKind isEqualToString:@"reference clip"]) info[@"isReferenceClip"] = @YES;
                         if (isCompound && [item respondsToSelector:@selector(primaryObject)]) {
                             id innerPrimary = ((id (*)(id, SEL))objc_msgSend)(item, @selector(primaryObject));
                             if (innerPrimary && [innerPrimary respondsToSelector:@selector(containedItems)]) {
@@ -3456,24 +3461,6 @@ static NSDictionary *SpliceKit_sendEditorAction(NSString *selectorName) {
     return result;
 }
 
-#pragma mark - Timeline Command Handlers
-
-// This is the main entry point for all editing commands. Clients send a
-// friendly action name like "blade" or "addColorBoard", and we map it to
-// the actual ObjC selector on FFAnchoredTimelineModule.
-//
-// Forward declaration — defined later in the transition helpers section
-static NSUInteger SpliceKit_transitionCount(id timeline);
-
-// The actionMap below is essentially a reverse-engineered API surface of
-// FCP's editing engine. These were found by disassembling Flexo.framework
-// and looking at IB action connections, responder chain handlers, and
-// menu item targets.
-// After a timeline action: did it open a sheet or a modal dialog (Final Cut Pro asking
-// for a name, a confirmation...)? The action itself has returned, so the answer would
-// otherwise read "ok" while nothing has happened yet (QA run 2: createCompoundClip and
-// its Compound Clip Name sheet). Reported as dialogPending + dialog, never as an error;
-// a dialog that was already open before the action is reported the same way.
 // Actions that can put up a sheet (a name, a confirmation, a settings panel). Only these
 // get the short run-loop turn below; a blade or an undo in a batch must not pay for it.
 static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
@@ -3486,6 +3473,14 @@ static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
     return NO;
 }
 
+// After a timeline action: did it open a sheet or a modal dialog (Final Cut Pro asking
+// for a name, a confirmation...)? The action itself has returned, so the answer would
+// otherwise read "ok" while nothing has happened yet (QA run 2: createCompoundClip and
+// its Compound Clip Name sheet). Reported as dialogPending + dialog, never as an error;
+// a dialog that was already open before the action is reported the same way. Applied
+// by the RPC dispatcher to timeline.action only: the handler itself stays free of the
+// run-loop turn, so batch actions, blade_at_times, the command palette and Lua, which
+// call it in loops on the main thread, neither pay for it nor yield between steps.
 static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSString *action) {
     if (![result isKindOfClass:[NSDictionary class]] || result[@"error"]) return result;
     __block NSDictionary *dialog = nil;
@@ -3504,7 +3499,7 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
                 }
                 for (NSWindow *w in [NSApp windows]) {
                     NSWindow *sheet = [w attachedSheet];
-                    if (!sheet) continue;
+                    if (!sheet || ![sheet isVisible]) continue;
                     NSMutableDictionary *d = [SpliceKit_describeWindow(sheet) mutableCopy];
                     d[@"type"] = @"sheet";
                     d[@"parentWindow"] = [w title] ?: @"";
@@ -3527,6 +3522,19 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
     return out;
 }
 
+#pragma mark - Timeline Command Handlers
+
+// This is the main entry point for all editing commands. Clients send a
+// friendly action name like "blade" or "addColorBoard", and we map it to
+// the actual ObjC selector on FFAnchoredTimelineModule.
+//
+// Forward declaration — defined later in the transition helpers section
+static NSUInteger SpliceKit_transitionCount(id timeline);
+
+// The actionMap below is essentially a reverse-engineered API surface of
+// FCP's editing engine. These were found by disassembling Flexo.framework
+// and looking at IB action connections, responder chain handlers, and
+// menu item targets.
 NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
     SpliceKit_installEffectDragSwizzlesNow();
 
@@ -4382,7 +4390,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         }
     }
 
-    return SpliceKit_annotatePendingDialog(result, action);
+    return result;
 }
 
 #pragma mark - Direct Flexo Action Methods (Parameterized)
@@ -7310,6 +7318,13 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
     BOOL isStart = [edge isEqualToString:@"start"];
 
     __block NSDictionary *result = nil;
+    // The undo step this call opened, so the outer @catch can close it: an action left
+    // open would keep the sequence in an open transaction.
+    __block BOOL trimUndoOpen = NO;
+    __block id trimUndoSequence = nil;
+    NSString *undoStepName = @"Trim";
+    SEL undoBeginSel = NSSelectorFromString(@"actionBegin:");
+    SEL undoEndSel = NSSelectorFromString(@"actionEnd:save:error:");
     SpliceKit_executeOnMainThread(^{
         @try {
             id timeline = SpliceKit_getActiveTimelineModule();
@@ -7504,16 +7519,21 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             // "nothing to undo" and the trim was permanent (QA run 2) -- so it is wrapped
             // in the same actionBegin: / actionEnd:save:error: pair begin_edit uses, unless
             // a begin_edit group is open, whose step then covers it.
-            NSString *undoStepName = @"Trim";
             BOOL openedUndoStep = NO;
-            SEL undoBeginSel = NSSelectorFromString(@"actionBegin:");
-            SEL undoEndSel = NSSelectorFromString(@"actionEnd:save:error:");
-            if (!sOpenEditGroupName && [sequence respondsToSelector:undoBeginSel] &&
-                [sequence respondsToSelector:undoEndSel]) {
+            NSString *undoStepUnavailable = nil;   // why no step of our own was opened
+            if (sOpenEditGroupName) {
+                undoStepUnavailable = nil;         // the open begin_edit group covers it
+            } else if (![sequence respondsToSelector:undoBeginSel] || ![sequence respondsToSelector:undoEndSel]) {
+                undoStepUnavailable = @"the sequence does not answer actionBegin: / actionEnd:save:error:";
+            } else {
                 @try {
                     ((void (*)(id, SEL, id))objc_msgSend)(sequence, undoBeginSel, undoStepName);
                     openedUndoStep = YES;
-                } @catch (NSException *e) { openedUndoStep = NO; }
+                    trimUndoOpen = YES;
+                    trimUndoSequence = sequence;
+                } @catch (NSException *e) {
+                    undoStepUnavailable = [NSString stringWithFormat:@"actionBegin: raised: %@", e.reason ?: @"exception"];
+                }
             }
 
             if ([sequence respondsToSelector:@selector(beginEditing)]) {
@@ -7548,6 +7568,7 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             NSString *undoStepError = nil;
             if (openedUndoStep) {
                 NSError *undoEndErr = nil;
+                trimUndoOpen = NO;
                 @try {
                     if (SpliceKit_selectorReturnsBOOL(sequence, undoEndSel)) {
                         BOOL endOK = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
@@ -7590,7 +7611,8 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 out[@"undoStep"] = sOpenEditGroupName;
                 out[@"undoStepNote"] = @"inside the open begin_edit group; end_edit closes the step";
             } else {
-                out[@"undoStepNote"] = @"the sequence does not answer actionBegin: / actionEnd:save:error:, so no undo step could be registered for this trim";
+                out[@"undoStepNote"] = [NSString stringWithFormat:@"%@, so no undo step could be registered for this trim",
+                                        undoStepUnavailable ?: @"no undo step was opened"];
             }
             out[@"handle"] = handle;
             out[@"name"] = name;
@@ -7649,6 +7671,16 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             }
             result = out;
         } @catch (NSException *e) {
+            if (trimUndoOpen && trimUndoSequence) {
+                // Never leave the action open: close the step so the sequence is not
+                // stuck in an open transaction (the trim itself may or may not have run).
+                @try {
+                    NSError *closeErr = nil;
+                    ((void (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(trimUndoSequence, undoEndSel, undoStepName, YES, &closeErr);
+                } @catch (NSException *e2) {}
+                trimUndoOpen = NO;
+                SpliceKit_log(@"[Trim] %@: exception %@; the undo step was closed", handle, e.reason ?: @"");
+            }
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason], @"handle": handle};
         }
     });
@@ -8061,7 +8093,8 @@ static NSData *SpliceKit_clipInfoJPEGFromCGImage(CGImageRef image, int maxSide, 
 // FFAnchoredGeneratorComponent -> generator (FCP's titles are generator components
 // with a title effect; the caller upgrades a generator with text channels to
 // "title"); then FCP's own flags: isConnectedStoryline -> connected storyline,
-// isCompoundClip -> compound clip, a multicam flag -> multicam clip; everything else
+// isCompoundClip -> compound clip, isReferenceClip -> reference clip (a compound,
+// multicam or synchronized clip), a multicam flag -> multicam clip; everything else
 // (a media component, or the FFAnchoredCollection FCP wraps a clip with both video
 // and audio in) by its video/audio flags.
 static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasAudio) {
@@ -8080,7 +8113,8 @@ static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasA
     }
     if (SpliceKit_boolForSelector(item, @"isConnectedStoryline")) return @"connected storyline";
     if (SpliceKit_itemIsMulticamClip(item)) return @"multicam clip";
-    if (SpliceKit_itemIsCompoundClip(item)) return @"compound clip";
+    NSString *containerKind = SpliceKit_itemContainerKind(item);
+    if (containerKind) return containerKind;
     // An FFAnchoredCollection that is none of those is an ordinary clip: FCP wraps a
     // clip that carries both video and audio in a collection of media components.
     if (hasVideo) return @"video clip";
@@ -17000,9 +17034,9 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                 if ((flagged && clipIsProject) || (currentSequence && clip == currentSequence)) {
                     NSString *projectName = SpliceKit_browserClipName(clip);
                     result = @{@"error": [NSString stringWithFormat:
-                        @"\"%@\" is %@, not a source clip: Final Cut Pro does not paste a project into a timeline. "
-                        @"Pick a clip from browser_list_clips() (projects are marked isProject: true there), or open "
-                        @"the project with open_project().",
+                        @"\"%@\" is %@, not a source clip: SpliceKit does not place a project (pasting one placed "
+                        @"nothing in the QA run). Pick a clip from browser_list_clips() (projects are marked "
+                        @"isProject: true there), or open the project with open_project().",
                         projectName, (currentSequence && clip == currentSequence) ? @"the open timeline's own project" : @"a project"]};
                     return;
                 }
@@ -30994,7 +31028,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     }
     // timeline.* namespace
     else if ([method isEqualToString:@"timeline.action"]) {
-        result = SpliceKit_handleTimelineAction(params);
+        result = SpliceKit_annotatePendingDialog(SpliceKit_handleTimelineAction(params),
+                                                 [params[@"action"] isKindOfClass:[NSString class]] ? params[@"action"] : @"");
     } else if ([method isEqualToString:@"timeline.directAction"]) {
         result = SpliceKit_handleDirectTimelineAction(params);
     } else if ([method isEqualToString:@"timeline.getState"]) {
