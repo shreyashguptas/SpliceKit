@@ -6,6 +6,41 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [Unreleased]
+
+### Changed
+- **The MCP server now runs on the official MCP Python SDK 2.x** (`mcp>=2.2,<3`,
+  `MCPServer`), which implements the current stable protocol revision
+  2026-07-28. Older clients that still use the legacy `initialize` handshake
+  connect exactly as before. Tool annotations are built as the SDK's
+  `ToolAnnotations` model, and the server reports SpliceKit's version to the
+  client. An unexpected exception inside a tool now reaches the client as a
+  `ToolError` carrying the exception text, instead of the SDK's bare
+  "Error executing tool" message.
+- **`make install` verifies the whole chain before it reports success.** The
+  MCP server is started as a stdio subprocess and driven with the official SDK
+  (`tests/mcp_server_check.py`): both connect modes, every tool, resource and
+  prompt against a stand-in bridge; then the patched Final Cut Pro is opened
+  and read from through the same server. New targets: `make mcp-check`,
+  `make mcp-check-live`; new install flag `--no-launch`; the patcher gained
+  `--yes` and leaves the MCP config to `make install`
+  (`SPLICEKIT_SKIP_MCP_CONFIG=1`). `make install` now finds a Homebrew
+  keg-only Python, treats a running Claude Desktop (config not written) as
+  an unfinished install, and no longer swallows Ctrl-C after a menu.
+
+### Fixed
+- **Bridge round trips are serialized.** The 2.x SDK runs synchronous tools in
+  worker threads, so two tool calls can overlap; the shared socket to the bridge
+  is now guarded by a lock so responses cannot be mixed up between them.
+- **`batch_color_correct` and `batch_apply_effect` with `clip_count=0` are
+  bounded at 1000 clips** instead of looping until the bridge reports an error.
+- **Startup no longer waits on a busy Final Cut Pro.** The import-time plugin
+  probe uses a 2 s timeout (the bridge connect timeout is now 5 s, reads 30 s),
+  so the MCP handshake is not held up by a main thread stuck in a dialog.
+  `reload_plugin_tools` no longer re-registers tools it already added, and the
+  bridge socket is closed at exit. `SPLICEKIT_HOST` other than loopback is
+  refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
+
 ## [3.3.9] — 2026-08-29
 
 ### Added

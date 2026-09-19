@@ -14,45 +14,75 @@ AI model sees when deciding which tool to use and how to call it.
 import socket
 import json
 import sys
+import inspect
 import time
 import functools
 import base64
 import os
+import atexit
+import logging
+import threading
 
+# The official MCP Python SDK, major version 2 (mcp>=2.2,<3 in mcp/requirements.txt).
+# v2 renamed FastMCP to MCPServer and moved it to mcp.server.mcpserver; the old
+# mcp.server.fastmcp path no longer exists. The messages below tell apart "mcp is
+# not installed" from "an mcp 1.x is installed", because both raise the same
+# ModuleNotFoundError and the fix is the same command either way.
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] == "mcp":
+        import importlib.metadata
+        try:
+            installed = importlib.metadata.version("mcp")
+        except importlib.metadata.PackageNotFoundError:
+            installed = None
+        if installed is None:
+            problem = f"The `mcp` Python package is not installed for this interpreter ({sys.executable})."
+        else:
+            problem = (
+                f"This interpreter ({sys.executable}) has mcp {installed}; SpliceKit's server "
+                "needs the 2.x line of the official SDK (mcp>=2.2,<3)."
+            )
         sys.stderr.write(
-            "\n[splicekit-mcp] The `mcp` Python package is not installed for "
-            f"this interpreter ({sys.executable}).\n"
-            "Set up the recommended virtualenv and re-launch your MCP client:\n\n"
+            f"\n[splicekit-mcp] {problem}\n"
+            "Set up (or upgrade) the recommended virtualenv and re-launch your MCP client:\n\n"
             "    make mcp-setup\n\n"
             "Or manually:\n"
             "    python3 -m venv ~/.venvs/splicekit-mcp\n"
-            "    ~/.venvs/splicekit-mcp/bin/python -m pip install -r mcp/requirements.txt\n"
+            "    ~/.venvs/splicekit-mcp/bin/python -m pip install --upgrade -r mcp/requirements.txt\n"
             "Then point your MCP config `command` at "
             "~/.venvs/splicekit-mcp/bin/python.\n\n"
         )
         sys.exit(1)
     raise
 
-# FastMCP's Image helper turns bytes or a file into MCP image content, so a tool can
+# ToolAnnotations carries the read-only / destructive / idempotent / open-world hints
+# every tool below publishes. v2 spells the fields snake_case in Python and serializes
+# them camelCase on the wire, so construct the model instead of passing a dict.
+from mcp.types import ToolAnnotations
+# ToolError is the v2 SDK's "this tool failed, tell the client why" exception: its message
+# is forwarded to the client with isError=true. Any other exception escaping a tool is
+# reported to the client only as "Error executing tool <name>" (the detail stays in the
+# server log), which is useless to an AI that has to decide what to do next.
+from mcp.server.mcpserver.exceptions import ToolError
+
+# The SDK's Image helper turns bytes or a file into MCP image content, so a tool can
 # hand a frame or a screenshot to any MCP client inline. It only exists in the real
-# package (the offline tests load this module with a fake FastMCP); without it the
+# package (the offline tests load this module with a fake MCPServer); without it the
 # tools return text and point at the file / base64 instead.
 try:
-    from mcp.server.fastmcp.utilities.types import Image
+    from mcp.server.mcpserver import Image
 except Exception:  # pragma: no cover - exercised by the offline tests
     Image = None
 
 
 def _image_content(path=None, data=None, fmt=None):
-    """MCP image content (FastMCP Image) for a local file or raw bytes, or None when an
-    image cannot be returned: no Image class, the file does not exist, or empty data.
-    Tools that return images carry NO return annotation on purpose: FastMCP emits mixed
-    text + image content only for unannotated tools (a `-> str` tool returning a list
-    fails output validation)."""
+    """MCP image content (the SDK's Image helper) for a local file or raw bytes, or None
+    when an image cannot be returned: no Image class, the file does not exist, or empty
+    data. Tools that return images carry NO return annotation on purpose: the SDK emits
+    mixed text + image content only for unannotated tools (a `-> str` tool returning a
+    list fails output validation)."""
     if Image is None:
         return None
     try:
@@ -80,11 +110,54 @@ def _decode_base64_image(b64):
         return b""
 
 
-SPLICEKIT_HOST = "127.0.0.1"
-SPLICEKIT_PORT = 9876
+# Where the bridge inside Final Cut Pro listens. The environment overrides exist for
+# the test harness (tests/mcp_server_check.py points the server at a fake bridge);
+# a normal install never sets them. The bridge speaks plaintext JSON-RPC and this
+# server forwards clip names, transcript text and file paths to it, so a host other
+# than loopback is refused unless SPLICEKIT_ALLOW_REMOTE=1 says that is intended.
+_LOG = logging.getLogger("splicekit-mcp")
 
-mcp = FastMCP(
-    "splicekit",
+
+def _bridge_address() -> tuple:
+    host = os.environ.get("SPLICEKIT_HOST") or "127.0.0.1"
+    try:
+        port = int(os.environ.get("SPLICEKIT_PORT") or 9876)
+    except ValueError:
+        sys.stderr.write(f"[splicekit-mcp] ignoring SPLICEKIT_PORT={os.environ.get('SPLICEKIT_PORT')!r}; using 9876\n")
+        port = 9876
+    if host not in ("127.0.0.1", "localhost", "::1") and os.environ.get("SPLICEKIT_ALLOW_REMOTE") != "1":
+        sys.stderr.write(f"[splicekit-mcp] ignoring SPLICEKIT_HOST={host!r} (not loopback; set "
+                         "SPLICEKIT_ALLOW_REMOTE=1 if that is really intended); using 127.0.0.1\n")
+        host = "127.0.0.1"
+    if (host, port) != ("127.0.0.1", 9876):
+        sys.stderr.write(f"[splicekit-mcp] bridge address overridden by environment: {host}:{port}\n")
+    return host, port
+
+
+SPLICEKIT_HOST, SPLICEKIT_PORT = _bridge_address()
+
+
+def _splicekit_version() -> str:
+    """SpliceKit's version string (patcher/SpliceKit/Configuration/Version.xcconfig), or ""
+    when the file is not beside this checkout. Reported to MCP clients as the server version."""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "patcher",
+                            "SpliceKit", "Configuration", "Version.xcconfig")
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "SPLICEKIT_VERSION":
+                    return value.strip()
+    except OSError:
+        pass
+    return ""
+
+
+SPLICEKIT_VERSION = _splicekit_version()
+
+mcp = MCPServer(
+    name="splicekit",
+    version=SPLICEKIT_VERSION,
     instructions="""Direct in-process control of Final Cut Pro via injected SpliceKit dylib.
 Connects to a JSON-RPC server running INSIDE the FCP process with access to 78,000+ ObjC classes.
 All operations are fully programmatic - no AppleScript, no UI automation.
@@ -240,25 +313,28 @@ build_song_cut() -- one-shot song-based random primary-storyline cut with pacing
 )
 
 
+# Tool annotation hint sets (MCP ToolAnnotations, snake_case as the v2 SDK spells them;
+# they reach the client as readOnlyHint / destructiveHint / idempotentHint / openWorldHint).
+# open_world_hint is False everywhere: every tool talks to the one Final Cut Pro on this Mac.
 READ_ONLY = {
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
+    "read_only_hint": True,
+    "destructive_hint": False,
+    "idempotent_hint": True,
+    "open_world_hint": False,
 }
 
 LOCAL_WRITE = {
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": False,
-    "openWorldHint": False,
+    "read_only_hint": False,
+    "destructive_hint": False,
+    "idempotent_hint": False,
+    "open_world_hint": False,
 }
 
 DESTRUCTIVE_LOCAL_WRITE = {
-    "readOnlyHint": False,
-    "destructiveHint": True,
-    "idempotentHint": False,
-    "openWorldHint": False,
+    "read_only_hint": False,
+    "destructive_hint": True,
+    "idempotent_hint": False,
+    "open_world_hint": False,
 }
 
 READ_ONLY_TOOLS = {
@@ -686,19 +762,54 @@ def _titleize_tool_name(name: str) -> str:
                     for part in name.split("_"))
 
 
-def _tool_annotations(name: str) -> dict:
+def _tool_annotations(name: str) -> ToolAnnotations:
     if name in READ_ONLY_TOOLS:
-        annotations = dict(READ_ONLY)
+        hints = dict(READ_ONLY)
     elif name in DESTRUCTIVE_TOOLS:
-        annotations = dict(DESTRUCTIVE_LOCAL_WRITE)
+        hints = dict(DESTRUCTIVE_LOCAL_WRITE)
     else:
-        annotations = dict(LOCAL_WRITE)
+        hints = dict(LOCAL_WRITE)
 
     if name in IDEMPOTENT_LOCAL_WRITE_TOOLS:
-        annotations["idempotentHint"] = True
+        hints["idempotent_hint"] = True
 
-    annotations["title"] = CUSTOM_TOOL_TITLES.get(name, _titleize_tool_name(name))
-    return annotations
+    return ToolAnnotations(title=CUSTOM_TOOL_TITLES.get(name, _titleize_tool_name(name)), **hints)
+
+
+def _guard_tool_errors(fn):
+    """Turn an unexpected exception inside a tool into a ToolError carrying the exception
+    text, so the client (and the AI reading it) sees "KeyError: 'items'" instead of the
+    SDK's bare "Error executing tool ...". The SDK logs a ToolError without its traceback
+    (only unexpected exceptions get one), so the traceback is logged here first; the
+    SDK's logging goes to stderr, never to the protocol stream."""
+    if inspect.iscoroutinefunction(fn):
+        # A sync wrapper would hide an async tool from the SDK and return a coroutine.
+        raise TypeError(f"{fn.__name__}: SpliceKit tools are synchronous functions")
+
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            _LOG.exception("tool %s crashed", fn.__name__)
+            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+    return guarded
+
+
+def splicekit_tool(name: str):
+    """Register a SpliceKit MCP tool under the SDK: the tool annotations that belong to
+    `name` (see READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / IDEMPOTENT_LOCAL_WRITE_TOOLS) plus
+    the error guard above. `name` must equal the decorated function's name."""
+    register = mcp.tool(annotations=_tool_annotations(name))
+
+    def decorator(fn):
+        if fn.__name__ != name:
+            raise ValueError(f"splicekit_tool({name!r}) applied to {fn.__name__}()")
+        return register(_guard_tool_errors(fn))
+
+    return decorator
 
 
 def _handle_management_response(action: str, handle: str = "") -> str:
@@ -730,27 +841,56 @@ class BridgeConnection:
         self.sock = None
         self._buf = b""  # leftover bytes from previous recv (newline-delimited protocol)
         self._id = 0     # monotonically increasing JSON-RPC request ID
+        # The mcp 2.x SDK runs synchronous tools in worker threads, so two tool calls
+        # can be in flight at once (a client sending parallel calls, or a call that is
+        # still running after the client gave up on it). One socket, one read buffer and
+        # one id counter must not be shared between them: serialize every round trip.
+        self._lock = threading.Lock()
+
+    CONNECT_TIMEOUT = 5    # loopback either accepts at once or refuses
+    READ_TIMEOUT = 30      # some bridge calls wait on FCP's main thread (20 s watchdog inside)
 
     def ensure_connected(self):
         if self.sock is None:
             # Assign only after connect() succeeds: a refused connect must not leave
             # a dead socket behind, or the next call fails once before reconnecting.
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(30)
+            sock.settimeout(self.CONNECT_TIMEOUT)
             try:
                 sock.connect((SPLICEKIT_HOST, SPLICEKIT_PORT))
             except OSError:
                 sock.close()
                 raise
+            sock.settimeout(self.READ_TIMEOUT)
             self.sock = sock
             self._buf = b""
 
-    def call(self, method: str, params_dict=None, **params) -> dict:
+    def reset(self):
+        """Drop the connection (the next call reconnects). Safe to call from any thread;
+        deploy_and_restart uses it around killing and relaunching Final Cut Pro."""
+        with self._lock:
+            self._drop_socket()
+
+    close = reset
+
+    def _drop_socket(self):
+        sock, self.sock, self._buf = self.sock, None, b""
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def call(self, method: str, params_dict=None, timeout: float = None, **params) -> dict:
         """Send a JSON-RPC request and wait for the response.
 
         Accepts params as keyword args OR as a single dict positional arg:
             bridge.call("method", key="value")       # kwargs
             bridge.call("method", {"key": "value"})  # dict
+
+        `timeout` (seconds) bounds this one round trip instead of the usual READ_TIMEOUT;
+        the import-time plugin probe uses it so a Final Cut Pro whose main thread is busy
+        cannot hold up the MCP handshake.
 
         Returns the result dict on success, or {"error": "..."} on failure.
         Handles connection errors gracefully — the next call will auto-reconnect.
@@ -760,11 +900,20 @@ class BridgeConnection:
             if isinstance(params_dict, dict):
                 params = {**params_dict, **params}
             # else ignore non-dict positional (shouldn't happen)
+        # One round trip at a time: the lock is held across the read, so a call that
+        # waits on FCP's main thread delays the calls queued behind it (by design: there
+        # is one bridge and one socket, and interleaving frames would be worse).
+        with self._lock:
+            return self._call_locked(method, params, timeout)
+
+    def _call_locked(self, method: str, params: dict, timeout: float = None) -> dict:
         try:
             self.ensure_connected()
         except (ConnectionRefusedError, OSError) as e:
             return {"error": f"Cannot connect to SpliceKit at {SPLICEKIT_HOST}:{SPLICEKIT_PORT}. "
                     f"Is the modded FCP running? Error: {e}"}
+        if timeout is not None:
+            self.sock.settimeout(timeout)
 
         self._id += 1
         expected_id = self._id
@@ -802,11 +951,15 @@ class BridgeConnection:
                     return {"error": resp["error"]}
                 return resp.get("result", {})
         except Exception as e:
-            self.sock = None  # toss the broken socket so the next call reconnects
+            self._drop_socket()  # toss the broken socket so the next call reconnects
             return {"error": f"Bridge communication error: {e}"}
+        finally:
+            if timeout is not None and self.sock is not None:
+                self.sock.settimeout(self.READ_TIMEOUT)
 
 
 bridge = BridgeConnection()  # singleton -- shared by all tool functions below
+atexit.register(bridge.close)
 
 
 # -- Helpers used by every tool function --
@@ -851,7 +1004,7 @@ def bridge_tool(fn):
     """Decorator: catches BridgeError and returns 'Error: ...' string.
 
     Use with _call() to eliminate the repetitive if-_err-return pattern:
-        @mcp.tool(annotations=_tool_annotations("my_tool"))
+        @splicekit_tool("my_tool")
         @bridge_tool
         def my_tool() -> str:
             r = _call("my.method")
@@ -872,7 +1025,7 @@ def bridge_tool(fn):
 # The first thing any client should do is call bridge_status() to
 # verify FCP is running and the bridge is responsive.
 
-@mcp.tool(annotations=_tool_annotations("bridge_status"))
+@splicekit_tool("bridge_status")
 def bridge_status() -> str:
     """Check if SpliceKit is running and get FCP version info."""
     r = bridge.call("system.version")
@@ -881,7 +1034,7 @@ def bridge_status() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("bridge_alive"))
+@splicekit_tool("bridge_alive")
 def bridge_alive() -> str:
     """Cheap liveness probe that does not touch the main thread.
 
@@ -892,7 +1045,7 @@ def bridge_alive() -> str:
     return _call_or_error("bridge.alive")
 
 
-@mcp.tool(annotations=_tool_annotations("bridge_describe"))
+@splicekit_tool("bridge_describe")
 def bridge_describe(method: str = "", safety: str = "") -> str:
     """Return self-describing metadata for every known RPC method.
 
@@ -912,13 +1065,13 @@ def bridge_describe(method: str = "", safety: str = "") -> str:
     return _call_or_error("bridge.describe", **params)
 
 
-@mcp.tool(annotations=_tool_annotations("bridge_safety_tags"))
+@splicekit_tool("bridge_safety_tags")
 def bridge_safety_tags() -> str:
     """List the safety classifications used by bridge_describe with meanings."""
     return _call_or_error("bridge.safetyTags")
 
 
-@mcp.tool(annotations=_tool_annotations("events_subscribe"))
+@splicekit_tool("events_subscribe")
 def events_subscribe(patterns: list[str] | None = None) -> str:
     """Subscribe this connection to bridge events matching patterns.
 
@@ -936,19 +1089,19 @@ def events_subscribe(patterns: list[str] | None = None) -> str:
     return _call_or_error("events.subscribe", patterns=patterns or ["*"])
 
 
-@mcp.tool(annotations=_tool_annotations("events_unsubscribe"))
+@splicekit_tool("events_unsubscribe")
 def events_unsubscribe() -> str:
     """Remove this connection's event pattern allowlist."""
     return _call_or_error("events.unsubscribe")
 
 
-@mcp.tool(annotations=_tool_annotations("events_status"))
+@splicekit_tool("events_status")
 def events_status() -> str:
     """Report this connection's current event subscription state."""
     return _call_or_error("events.status")
 
 
-@mcp.tool(annotations=_tool_annotations("async_status"))
+@splicekit_tool("async_status")
 def async_status() -> str:
     """List in-flight async operations with elapsed time.
 
@@ -959,7 +1112,7 @@ def async_status() -> str:
     return _call_or_error("async.status")
 
 
-@mcp.tool(annotations=_tool_annotations("background_render_status"))
+@splicekit_tool("background_render_status")
 def background_render_status() -> str:
     """Inspect Final Cut Pro's live background-render state.
 
@@ -978,7 +1131,7 @@ def background_render_status() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("background_render_control"))
+@splicekit_tool("background_render_control")
 def background_render_control(action: str, seconds: float) -> str:
     """Temporarily reduce background-render impact while editing.
 
@@ -1009,7 +1162,7 @@ def background_render_control(action: str, seconds: float) -> str:
 # These map directly to FCP's IBAction methods on the timeline module.
 # Most require a clip to be selected first (selectClipAtPlayhead).
 
-@mcp.tool(annotations=_tool_annotations("timeline_action"))
+@splicekit_tool("timeline_action")
 def timeline_action(action: str, dry_run: bool = False) -> str:
     """Use this legacy catch-all tool when a timeline action does not fit the narrower action tools.
 
@@ -1091,7 +1244,7 @@ def timeline_action(action: str, dry_run: bool = False) -> str:
     return _call_or_error("timeline.action", action=action, dry_run=dry_run)
 
 
-@mcp.tool(annotations=_tool_annotations("timeline_navigation_action"))
+@splicekit_tool("timeline_navigation_action")
 def timeline_navigation_action(action: str) -> str:
     """Use this tool for non-destructive timeline navigation, selection, and view-state actions."""
     if action not in TIMELINE_NAVIGATION_ACTIONS:
@@ -1102,7 +1255,7 @@ def timeline_navigation_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@mcp.tool(annotations=_tool_annotations("timeline_edit_action"))
+@splicekit_tool("timeline_edit_action")
 def timeline_edit_action(action: str) -> str:
     """Use this tool for non-destructive timeline edits like markers, effects, titles, and range changes."""
     if action not in TIMELINE_EDIT_ACTIONS:
@@ -1113,7 +1266,7 @@ def timeline_edit_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@mcp.tool(annotations=_tool_annotations("timeline_destructive_action"))
+@splicekit_tool("timeline_destructive_action")
 def timeline_destructive_action(action: str) -> str:
     """Use this tool for destructive timeline edits such as delete, cut, blade, replace, trim, and retime."""
     if action not in TIMELINE_DESTRUCTIVE_ACTIONS:
@@ -1124,7 +1277,7 @@ def timeline_destructive_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@mcp.tool(annotations=_tool_annotations("history_action"))
+@splicekit_tool("history_action")
 def history_action(action: str) -> str:
     """Use this tool for timeline history operations that can undo or reapply prior edits."""
     if action not in TIMELINE_HISTORY_ACTIONS:
@@ -1135,7 +1288,7 @@ def history_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@mcp.tool(annotations=_tool_annotations("playback_action"))
+@splicekit_tool("playback_action")
 def playback_action(action: str) -> str:
     """Use this tool to move playback state without changing timeline content.
 
@@ -1152,7 +1305,7 @@ def playback_action(action: str) -> str:
     return _call_or_error("playback.action", action=action)
 
 
-@mcp.tool(annotations=_tool_annotations("set_playback_speed"))
+@splicekit_tool("set_playback_speed")
 def set_playback_speed(rate: float = None, action: str = None) -> str:
     """Set playback speed to an exact rate, or use shuttle actions.
 
@@ -1188,7 +1341,7 @@ def set_playback_speed(rate: float = None, action: str = None) -> str:
     return "Error: provide either rate (float) or action (string)"
 
 
-@mcp.tool(annotations=_tool_annotations("detect_scene_changes"))
+@splicekit_tool("detect_scene_changes")
 def detect_scene_changes(threshold: float = 0.35, action: str = "detect", sample_interval: float = 0.1) -> str:
     """Use this read-only tool to inspect scene changes before deciding whether to mark or blade them.
 
@@ -1217,19 +1370,19 @@ def detect_scene_changes(threshold: float = 0.35, action: str = "detect", sample
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("mark_scene_changes"))
+@splicekit_tool("mark_scene_changes")
 def mark_scene_changes(threshold: float = 0.35, sample_interval: float = 0.1) -> str:
     """Use this tool to add markers at detected scene changes without cutting the timeline."""
     return _call_or_error("scene.detect", threshold=threshold, action="markers", sampleInterval=sample_interval)
 
 
-@mcp.tool(annotations=_tool_annotations("blade_scene_changes"))
+@splicekit_tool("blade_scene_changes")
 def blade_scene_changes(threshold: float = 0.35, sample_interval: float = 0.1) -> str:
     """Use this tool to blade the timeline at detected scene changes."""
     return _call_or_error("scene.detect", threshold=threshold, action="blade", sampleInterval=sample_interval)
 
 
-@mcp.tool(annotations=_tool_annotations("seek_to_time"))
+@splicekit_tool("seek_to_time")
 def seek_to_time(seconds: float) -> str:
     """Use this tool to jump the playhead to an exact time before another operation.
 
@@ -1335,7 +1488,7 @@ def _marker_table_lines(markers):
     return lines
 
 
-@mcp.tool(annotations=_tool_annotations("get_timeline_clips"))
+@splicekit_tool("get_timeline_clips")
 def get_timeline_clips(limit: int = 100, include_connected: bool = True,
                        include_markers: bool = True) -> str:
     """Get a structured view of everything in the current timeline.
@@ -1442,7 +1595,7 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("list_markers"))
+@splicekit_tool("list_markers")
 def list_markers(kind: str = "") -> str:
     """List all markers on the current timeline with time, kind, name, completion, handle.
 
@@ -1496,7 +1649,7 @@ def list_markers(kind: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_selected_clips"))
+@splicekit_tool("get_selected_clips")
 def get_selected_clips() -> str:
     """Get only the currently selected clips in the timeline.
     Includes selected connected clips (titles, B-roll, music), marked with "connected": true.
@@ -1511,7 +1664,7 @@ def get_selected_clips() -> str:
     return _fmt({"selectedCount": len(items), "items": items})
 
 
-@mcp.tool(annotations=_tool_annotations("set_timeline_range"))
+@splicekit_tool("set_timeline_range")
 def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
     """Set the timeline in/out range (mark in/out) to specific times in seconds.
     This positions the playhead and marks the range start and end points.
@@ -1527,7 +1680,7 @@ def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
     )
 
 
-@mcp.tool(annotations=_tool_annotations("batch_export"))
+@splicekit_tool("batch_export")
 def batch_export(scope: str = "all", folder: str = "") -> str:
     """Batch export every clip from the active timeline as individual files.
     A folder picker appears once, then all clips are exported automatically
@@ -1559,7 +1712,7 @@ def batch_export(scope: str = "all", folder: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("verify_action"))
+@splicekit_tool("verify_action")
 def verify_action(description: str = "") -> str:
     """Capture timeline state for before/after verification.
     Call before an action, then after, and compare the snapshots.
@@ -1589,7 +1742,7 @@ def verify_action(description: str = "") -> str:
 # The swiss army knife — call any ObjC method on any object.
 # Use this when a specific tool doesn't exist for what you need.
 
-@mcp.tool(annotations=_tool_annotations("call_method_with_args"))
+@splicekit_tool("call_method_with_args")
 def call_method_with_args(target: str, selector: str, args: str | list = "[]",
                           class_method: bool = True, return_handle: bool = False) -> str:
     """Call any ObjC method with typed arguments via NSInvocation.
@@ -1654,7 +1807,7 @@ def call_method_with_args(target: str, selector: str, args: str | list = "[]",
 # across multiple tool calls. Think of handles as pointers that
 # survive between requests. Always release_all when you're done.
 
-@mcp.tool(annotations=_tool_annotations("manage_handles"))
+@splicekit_tool("manage_handles")
 def manage_handles(action: str = "list", handle: str = "") -> str:
     """Use this legacy handle-management tool when you need both inspection and release operations in one interface.
 
@@ -1667,31 +1820,31 @@ def manage_handles(action: str = "list", handle: str = "") -> str:
     return _handle_management_response(action, handle)
 
 
-@mcp.tool(annotations=_tool_annotations("list_handles"))
+@splicekit_tool("list_handles")
 def list_handles() -> str:
     """Use this tool to inspect the currently retained bridge object handles."""
     return _handle_management_response("list")
 
 
-@mcp.tool(annotations=_tool_annotations("inspect_handle"))
+@splicekit_tool("inspect_handle")
 def inspect_handle(handle: str) -> str:
     """Use this tool to inspect one retained bridge object handle."""
     return _handle_management_response("inspect", handle)
 
 
-@mcp.tool(annotations=_tool_annotations("release_handle"))
+@splicekit_tool("release_handle")
 def release_handle(handle: str) -> str:
     """Use this tool to release one retained bridge object handle when it is no longer needed."""
     return _handle_management_response("release", handle)
 
 
-@mcp.tool(annotations=_tool_annotations("release_all_handles"))
+@splicekit_tool("release_all_handles")
 def release_all_handles() -> str:
     """Use this tool to release every retained bridge object handle."""
     return _handle_management_response("release_all")
 
 
-@mcp.tool(annotations=_tool_annotations("get_object_property"))
+@splicekit_tool("get_object_property")
 def get_object_property(handle: str, key: str, return_handle: bool = False) -> str:
     """Use this tool to inspect one property on a retained Objective-C object handle.
 
@@ -1707,7 +1860,7 @@ def get_object_property(handle: str, key: str, return_handle: bool = False) -> s
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_object_property"))
+@splicekit_tool("set_object_property")
 def set_object_property(handle: str, key: str, value: str, value_type: str = "string") -> str:
     """Set a property on an object handle using Key-Value Coding.
 
@@ -1739,7 +1892,7 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
 # generate it programmatically and import it to create complex
 # timelines without clicking through FCP's UI.
 
-@mcp.tool(annotations=_tool_annotations("import_fcpxml"))
+@splicekit_tool("import_fcpxml")
 def import_fcpxml(xml: str, internal: bool = True) -> str:
     """Import FCPXML into FCP. If internal=True, uses PEAppController's import method
     (imports into the running instance without restart). If internal=False, opens via NSWorkspace.
@@ -1751,7 +1904,7 @@ def import_fcpxml(xml: str, internal: bool = True) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("import_url"))
+@splicekit_tool("import_url")
 def import_url(url: str, mode: str = "import_only", target_event: str = "",
                title: str = "", highest_quality: bool = False,
                wait_until_complete: bool = True) -> str:
@@ -1788,7 +1941,7 @@ def import_url(url: str, mode: str = "import_only", target_event: str = "",
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("import_url_status"))
+@splicekit_tool("import_url_status")
 def import_url_status(job_id: str) -> str:
     """Check the current status of a URL import job."""
     r = bridge.call("urlImport.status", job_id=job_id)
@@ -1797,7 +1950,7 @@ def import_url_status(job_id: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("cancel_import_url"))
+@splicekit_tool("cancel_import_url")
 def cancel_import_url(job_id: str) -> str:
     """Cancel an in-flight URL import job."""
     r = bridge.call("urlImport.cancel", job_id=job_id)
@@ -1806,7 +1959,7 @@ def cancel_import_url(job_id: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("generate_fcpxml"))
+@splicekit_tool("generate_fcpxml")
 def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "SpliceKit Project",
                     frame_rate: str = "24", width: int = 1920, height: int = 1080,
                     items: str = "[]") -> str:
@@ -2007,7 +2160,7 @@ def _generate_fcpxml_direct(event_name, project_name, frame_rate, width, height,
 # ============================================================
 # Tools for inspecting and applying effects on clips.
 
-@mcp.tool(annotations=_tool_annotations("get_clip_effects"))
+@splicekit_tool("get_clip_effects")
 def get_clip_effects(handle: str = "") -> str:
     """Get the effects applied to a clip. If no handle provided, uses the first selected clip.
     Returns effect names, IDs, classes, and handles for further inspection.
@@ -2037,7 +2190,7 @@ def get_clip_effects(handle: str = "") -> str:
 # Lets the AI chain many small edits in one round-trip instead
 # of making a separate tool call for each step.
 
-@mcp.tool(annotations=_tool_annotations("batch_timeline_actions"))
+@splicekit_tool("batch_timeline_actions")
 def batch_timeline_actions(actions: str) -> str:
     """Execute multiple timeline/playback actions in sequence.
     Much more efficient than calling individual tools.
@@ -2111,7 +2264,7 @@ def batch_timeline_actions(actions: str) -> str:
 # Computes statistics the AI can use to understand the timeline
 # before suggesting edits (pacing, flash frames, etc).
 
-@mcp.tool(annotations=_tool_annotations("analyze_timeline"))
+@splicekit_tool("analyze_timeline")
 def analyze_timeline() -> str:
     """Analyze the current timeline: duration, clip count, pacing stats,
     potential issues (short clips, gaps). Returns a structured report.
@@ -2190,7 +2343,7 @@ def analyze_timeline() -> str:
 # Bulk marker placement. The bridge handles seeking internally
 # so we don't have to move the playhead for each marker.
 
-@mcp.tool(annotations=_tool_annotations("add_markers_at_times"))
+@splicekit_tool("add_markers_at_times")
 def add_markers_at_times(markers: str) -> str:
     """Add multiple markers at specific times in a single batch call.
     Much faster than seeking + adding markers one at a time.
@@ -2220,7 +2373,7 @@ def add_markers_at_times(markers: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("blade_at_times"))
+@splicekit_tool("blade_at_times")
 def blade_at_times(times: str) -> str:
     """Blade (cut) the timeline at multiple specific times in a single batch call.
     Much faster than seeking + blading one at a time.
@@ -2250,7 +2403,7 @@ def blade_at_times(times: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("trim_clips_to_beats"))
+@splicekit_tool("trim_clips_to_beats")
 def trim_clips_to_beats(
     grid: str = "beat",
     randomize: bool = False,
@@ -2409,7 +2562,7 @@ def _song_cut_preset(pace: str) -> dict | None:
     return presets.get((pace or "").lower())
 
 
-@mcp.tool(annotations=_tool_annotations("sync_clips_to_song_beats"))
+@splicekit_tool("sync_clips_to_song_beats")
 def sync_clips_to_song_beats(
     mode: str = "beat",
     target_mode: str = "auto",
@@ -2465,7 +2618,7 @@ def sync_clips_to_song_beats(
     return _format_trim_to_beats_result(r, random_min_step, random_max_step, random_seed)
 
 
-@mcp.tool(annotations=_tool_annotations("build_song_cut"))
+@splicekit_tool("build_song_cut")
 def build_song_cut(
     pace: str = "natural",
     project_name: str = "Song Beat Cut",
@@ -2543,7 +2696,7 @@ def build_song_cut(
     return f"{prefix}\n{result}"
 
 
-@mcp.tool(annotations=_tool_annotations("assemble_random_clips_to_song_beats"))
+@splicekit_tool("assemble_random_clips_to_song_beats")
 def assemble_random_clips_to_song_beats(
     grid: str = "half_beat",
     project_name: str = "Beat Random Cut",
@@ -2676,7 +2829,7 @@ def assemble_random_clips_to_song_beats(
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("import_srt_as_markers"))
+@splicekit_tool("import_srt_as_markers")
 def import_srt_as_markers(srt_content: str) -> str:
     """Import SRT subtitle content as markers in the current timeline.
     Each subtitle becomes a standard marker at the corresponding timecode.
@@ -2735,7 +2888,7 @@ def import_srt_as_markers(srt_content: str) -> str:
 # ============================================================
 # Thin wrappers around FCP's FFLibraryDocument class methods.
 
-@mcp.tool(annotations=_tool_annotations("get_active_libraries"))
+@splicekit_tool("get_active_libraries")
 def get_active_libraries() -> str:
     """Get list of currently open libraries in FCP."""
     r = bridge.call("system.callMethodWithArgs", target="FFLibraryDocument",
@@ -2745,7 +2898,7 @@ def get_active_libraries() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("is_library_updating"))
+@splicekit_tool("is_library_updating")
 def is_library_updating() -> str:
     """Check if any library is currently being updated/saved."""
     r = bridge.call("system.callMethod", className="FFLibraryDocument",
@@ -2761,7 +2914,7 @@ def is_library_updating() -> str:
 # Reverse-engineering tools — enumerate classes, explore methods,
 # inspect the class hierarchy. Use these to discover new APIs.
 
-@mcp.tool(annotations=_tool_annotations("get_classes"))
+@splicekit_tool("get_classes")
 def get_classes(filter: str = "") -> str:
     """List ObjC classes loaded in FCP's process.
     Common prefixes: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit), TK (TimelineKit), IX (Interchange).
@@ -2776,7 +2929,7 @@ def get_classes(filter: str = "") -> str:
     return f"Found {count} classes:\n" + "\n".join(classes)
 
 
-@mcp.tool(annotations=_tool_annotations("get_methods"))
+@splicekit_tool("get_methods")
 def get_methods(class_name: str, include_super: bool = False) -> str:
     """List all methods on an ObjC class with type encodings."""
     r = bridge.call("system.getMethods", className=class_name, includeSuper=include_super)
@@ -2794,7 +2947,7 @@ def get_methods(class_name: str, include_super: bool = False) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_properties"))
+@splicekit_tool("get_properties")
 def get_properties(class_name: str) -> str:
     """List declared @property definitions on an ObjC class."""
     r = bridge.call("system.getProperties", className=class_name)
@@ -2806,7 +2959,7 @@ def get_properties(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_ivars"))
+@splicekit_tool("get_ivars")
 def get_ivars(class_name: str) -> str:
     """List instance variables of an ObjC class with their types."""
     r = bridge.call("system.getIvars", className=class_name)
@@ -2818,7 +2971,7 @@ def get_ivars(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_protocols"))
+@splicekit_tool("get_protocols")
 def get_protocols(class_name: str) -> str:
     """List protocols adopted by an ObjC class."""
     r = bridge.call("system.getProtocols", className=class_name)
@@ -2827,7 +2980,7 @@ def get_protocols(class_name: str) -> str:
     return f"{class_name}: {r.get('count', 0)} protocols\n" + "\n".join(f"  {p}" for p in r.get("protocols", []))
 
 
-@mcp.tool(annotations=_tool_annotations("get_superchain"))
+@splicekit_tool("get_superchain")
 def get_superchain(class_name: str) -> str:
     """Get the inheritance chain for an ObjC class."""
     r = bridge.call("system.getSuperchain", className=class_name)
@@ -2836,7 +2989,7 @@ def get_superchain(class_name: str) -> str:
     return " -> ".join(r.get("superchain", []))
 
 
-@mcp.tool(annotations=_tool_annotations("explore_class"))
+@splicekit_tool("explore_class")
 def explore_class(class_name: str) -> str:
     """Comprehensive overview of an ObjC class: inheritance, protocols, properties, ivars, key methods."""
     lines = [f"=== {class_name} ===\n"]
@@ -2876,7 +3029,7 @@ def explore_class(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("search_methods"))
+@splicekit_tool("search_methods")
 def search_methods(class_name: str, keyword: str) -> str:
     """Search for methods on a class by keyword."""
     r = bridge.call("system.getMethods", className=class_name)
@@ -2896,7 +3049,7 @@ def search_methods(class_name: str, keyword: str) -> str:
 
 # -- Low-level escape hatches for arbitrary ObjC calls --
 
-@mcp.tool(annotations=_tool_annotations("call_method"))
+@splicekit_tool("call_method")
 def call_method(class_name: str, selector: str, class_method: bool = True) -> str:
     """Call a zero-argument ObjC method. For methods WITH arguments, use call_method_with_args instead."""
     r = bridge.call("system.callMethod", className=class_name, selector=selector, classMethod=class_method)
@@ -2905,7 +3058,7 @@ def call_method(class_name: str, selector: str, class_method: bool = True) -> st
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("raw_call"))
+@splicekit_tool("raw_call")
 def raw_call(method: str, params: str = "{}") -> str:
     """Send a raw JSON-RPC call to SpliceKit. Last resort when no other tool fits."""
     try:
@@ -2923,7 +3076,7 @@ def raw_call(method: str, params: str = "{}") -> str:
 # editing the text. Delete words to remove video segments,
 # drag words to reorder clips.
 
-@mcp.tool(annotations=_tool_annotations("open_transcript"))
+@splicekit_tool("open_transcript")
 def open_transcript(file_url: str = "", force_retranscribe: bool = False) -> str:
     """Open the transcript panel and start transcribing.
 
@@ -2952,7 +3105,7 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False) -> str
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_transcript"))
+@splicekit_tool("get_transcript")
 def get_transcript() -> str:
     """Get the current transcript state, including all words with timestamps, speakers, and silences.
 
@@ -3021,7 +3174,7 @@ def get_transcript() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("delete_transcript_words"))
+@splicekit_tool("delete_transcript_words")
 def delete_transcript_words(start_index: int, count: int) -> str:
     """Delete words from the transcript, which removes the corresponding video segments.
 
@@ -3043,7 +3196,7 @@ def delete_transcript_words(start_index: int, count: int) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("move_transcript_words"))
+@splicekit_tool("move_transcript_words")
 def move_transcript_words(start_index: int, count: int, dest_index: int) -> str:
     """Move words in the transcript to a new position, which reorders clips on the timeline.
 
@@ -3066,7 +3219,7 @@ def move_transcript_words(start_index: int, count: int, dest_index: int) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("close_transcript"))
+@splicekit_tool("close_transcript")
 def close_transcript() -> str:
     """Close the transcript panel."""
     r = bridge.call("transcript.close")
@@ -3075,7 +3228,7 @@ def close_transcript() -> str:
     return "Transcript panel closed."
 
 
-@mcp.tool(annotations=_tool_annotations("search_transcript"))
+@splicekit_tool("search_transcript")
 def search_transcript(query: str) -> str:
     """Search the transcript for text or special keywords.
 
@@ -3104,7 +3257,7 @@ def search_transcript(query: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("delete_transcript_silences"))
+@splicekit_tool("delete_transcript_silences")
 def delete_transcript_silences(min_duration: float = 0.0) -> str:
     """Delete all detected silences/pauses from the timeline.
 
@@ -3129,7 +3282,7 @@ def delete_transcript_silences(min_duration: float = 0.0) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("set_transcript_speaker"))
+@splicekit_tool("set_transcript_speaker")
 def set_transcript_speaker(start_index: int, count: int, speaker: str) -> str:
     """Assign a speaker name to a range of words in the transcript.
 
@@ -3146,7 +3299,7 @@ def set_transcript_speaker(start_index: int, count: int, speaker: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_silence_threshold"))
+@splicekit_tool("set_silence_threshold")
 def set_silence_threshold(threshold: float) -> str:
     """Set the minimum gap duration (seconds) to detect as a silence/pause.
 
@@ -3169,7 +3322,7 @@ def set_silence_threshold(threshold: float) -> str:
 # Enumerate FCP's installed effects and apply them to clips.
 # FCP organizes effects by type (filter, generator, title, audio).
 
-@mcp.tool(annotations=_tool_annotations("list_effects"))
+@splicekit_tool("list_effects")
 def list_effects(type: str = "filter", filter: str = "") -> str:
     """List available effects in FCP by type.
 
@@ -3205,7 +3358,7 @@ def list_effects(type: str = "filter", filter: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("apply_effect"))
+@splicekit_tool("apply_effect")
 def apply_effect(name: str = "", effectID: str = "") -> str:
     """Apply a video effect, generator, or title to the selected clip(s).
 
@@ -3240,7 +3393,7 @@ def apply_effect(name: str = "", effectID: str = "") -> str:
 # FCP has 376+ built-in transitions. These tools enumerate them
 # and apply them at edit points (between adjacent clips).
 
-@mcp.tool(annotations=_tool_annotations("list_transitions"))
+@splicekit_tool("list_transitions")
 def list_transitions(filter: str = "") -> str:
     """List all available video transitions installed in FCP.
 
@@ -3277,7 +3430,7 @@ def list_transitions(filter: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("apply_transition"))
+@splicekit_tool("apply_transition")
 def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = True) -> str:
     """Apply a specific transition at the current edit point.
 
@@ -3316,7 +3469,7 @@ def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = T
     return msg
 
 
-@mcp.tool(annotations=_tool_annotations("apply_transition_to_all_clips"))
+@splicekit_tool("apply_transition_to_all_clips")
 def apply_transition_to_all_clips() -> str:
     """Apply the default transition (Cross Dissolve) between every clip on the timeline.
 
@@ -3338,7 +3491,7 @@ def apply_transition_to_all_clips() -> str:
 # can also pipe queries through Apple Intelligence for natural
 # language editing commands.
 
-@mcp.tool(annotations=_tool_annotations("show_command_palette"))
+@splicekit_tool("show_command_palette")
 def show_command_palette() -> str:
     """Open the command palette inside FCP.
     The palette provides quick access to all FCP actions via fuzzy search,
@@ -3351,7 +3504,7 @@ def show_command_palette() -> str:
     return "Command palette opened."
 
 
-@mcp.tool(annotations=_tool_annotations("hide_command_palette"))
+@splicekit_tool("hide_command_palette")
 def hide_command_palette() -> str:
     """Close the command palette."""
     r = bridge.call("command.hide")
@@ -3360,7 +3513,7 @@ def hide_command_palette() -> str:
     return "Command palette closed."
 
 
-@mcp.tool(annotations=_tool_annotations("open_livecam"))
+@splicekit_tool("open_livecam")
 def open_livecam() -> str:
     """Open the LiveCam panel inside Final Cut Pro."""
     r = bridge.call("liveCam.show")
@@ -3369,7 +3522,7 @@ def open_livecam() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("close_livecam"))
+@splicekit_tool("close_livecam")
 def close_livecam() -> str:
     """Close the LiveCam panel."""
     r = bridge.call("liveCam.hide")
@@ -3378,7 +3531,7 @@ def close_livecam() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_livecam_status"))
+@splicekit_tool("get_livecam_status")
 def get_livecam_status() -> str:
     """Get the current LiveCam panel state, selected devices, recording flags, and destination."""
     r = bridge.call("liveCam.status")
@@ -3387,7 +3540,7 @@ def get_livecam_status() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("search_commands"))
+@splicekit_tool("search_commands")
 def search_commands(query: str, limit: int = 20) -> str:
     """Search available FCP commands by name, keyword, or category.
 
@@ -3414,7 +3567,7 @@ def search_commands(query: str, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("execute_command"))
+@splicekit_tool("execute_command")
 def execute_command(action: str, type: str = "timeline") -> str:
     """Execute a command from the palette by action name.
 
@@ -3430,7 +3583,7 @@ def execute_command(action: str, type: str = "timeline") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("ai_command"))
+@splicekit_tool("ai_command")
 def ai_command(query: str) -> str:
     """Use Apple Intelligence (on-device LLM) to interpret a natural language
     editing instruction and execute the appropriate FCP actions.
@@ -3523,7 +3676,7 @@ def ai_command(query: str) -> str:
     return f"AI executed {len(actions)} action(s):\n" + "\n".join(results)
 
 
-@mcp.tool(annotations=_tool_annotations("ai_command_gemma"))
+@splicekit_tool("ai_command_gemma")
 def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bit") -> str:
     """Use Gemma 4 (via MLX on Apple Silicon) for agentic natural language editing.
     Unlike ai_command which uses a fixed action schema, this runs a multi-turn
@@ -3546,7 +3699,7 @@ def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bi
 # Fallback for anything that doesn't have a dedicated tool.
 # Walks FCP's NSMenu hierarchy by title to reach any menu item.
 
-@mcp.tool(annotations=_tool_annotations("execute_menu_command"))
+@splicekit_tool("execute_menu_command")
 def execute_menu_command(menu_path: list[str], dry_run: bool = False) -> str:
     """Execute ANY FCP menu command by navigating the menu bar hierarchy.
 
@@ -3569,7 +3722,7 @@ def execute_menu_command(menu_path: list[str], dry_run: bool = False) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("list_menus"))
+@splicekit_tool("list_menus")
 def list_menus(menu: str = "", depth: int = 2) -> str:
     """List FCP menu items to discover available commands.
 
@@ -3595,7 +3748,7 @@ def list_menus(menu: str = "", depth: int = 2) -> str:
 # Reads/writes FCP's internal effect parameter channels directly,
 # bypassing the inspector UI. Works on transform, compositing, audio, crop.
 
-@mcp.tool(annotations=_tool_annotations("get_inspector_properties"))
+@splicekit_tool("get_inspector_properties")
 def get_inspector_properties(property: str = "all") -> str:
     """Read properties of the selected clip from the inspector.
 
@@ -3618,7 +3771,7 @@ def get_inspector_properties(property: str = "all") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_inspector_property"))
+@splicekit_tool("set_inspector_property")
 def set_inspector_property(property: str, value: float | str | bool) -> str:
     """Set a property on the selected clip's effect parameters.
 
@@ -3646,7 +3799,7 @@ def set_inspector_property(property: str, value: float | str | bool) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_title_text"))
+@splicekit_tool("get_title_text")
 def get_title_text() -> str:
     """Read text content, font, and size from the selected Motion title clip.
 
@@ -3665,7 +3818,7 @@ def get_title_text() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("verify_captions"))
+@splicekit_tool("verify_captions")
 def verify_captions() -> str:
     """Verify that generated captions rendered correctly on the timeline.
 
@@ -3687,7 +3840,7 @@ def verify_captions() -> str:
 # ============================================================
 # Show/hide FCP's various panels and viewers.
 
-@mcp.tool(annotations=_tool_annotations("toggle_panel"))
+@splicekit_tool("toggle_panel")
 def toggle_panel(panel: str) -> str:
     """Show or hide a panel/viewer in the FCP interface.
 
@@ -3707,7 +3860,7 @@ def toggle_panel(panel: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_workspace"))
+@splicekit_tool("set_workspace")
 def set_workspace(workspace: str) -> str:
     """Switch to a predefined workspace layout.
 
@@ -3725,7 +3878,7 @@ def set_workspace(workspace: str) -> str:
 # ============================================================
 # Switch the active editing tool (blade, trim, range, etc).
 
-@mcp.tool(annotations=_tool_annotations("select_tool"))
+@splicekit_tool("select_tool")
 def select_tool(tool: str) -> str:
     """Switch to a specific editing tool.
 
@@ -3745,7 +3898,7 @@ def select_tool(tool: str) -> str:
 # Roles control how clips appear in the timeline index and
 # how they're grouped during export (e.g. separate Dialogue/Music stems).
 
-@mcp.tool(annotations=_tool_annotations("assign_role"))
+@splicekit_tool("assign_role")
 def assign_role(type: str, role: str) -> str:
     """Assign a role to the selected clip.
 
@@ -3765,7 +3918,7 @@ def assign_role(type: str, role: str) -> str:
 # Real-time audio mixer with per-clip volume faders.
 # Returns clips overlapping the playhead with volume levels.
 
-@mcp.tool(annotations=_tool_annotations("mixer_get_state"))
+@splicekit_tool("mixer_get_state")
 def mixer_get_state() -> str:
     """Get current mixer state: all clips overlapping the playhead with their volumes.
 
@@ -3809,7 +3962,7 @@ def mixer_get_state() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_set_volume"))
+@splicekit_tool("mixer_set_volume")
 def mixer_set_volume(handle: str, volume_db: float = None,
                      volume_linear: float = None) -> str:
     """Set volume on a specific clip via its volumeChannelHandle.
@@ -3837,7 +3990,7 @@ def mixer_set_volume(handle: str, volume_db: float = None,
     return f"Volume set: {db_str} dB (linear: {r.get('volumeLinear', 0):.3f})"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_set_solo"))
+@splicekit_tool("mixer_set_solo")
 def mixer_set_solo(index: int = -1, role: str = "", mode: str = "toggle",
                    solo: bool = None) -> str:
     """Solo, unsolo, or clear solo for a mixer role fader.
@@ -3866,7 +4019,7 @@ def mixer_set_solo(index: int = -1, role: str = "", mode: str = "toggle",
     return f"Mixer role {target}: {state} ({r.get('soloObjectCount', 0)} soloed objects)"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_set_mute"))
+@splicekit_tool("mixer_set_mute")
 def mixer_set_mute(index: int = -1, role: str = "", mode: str = "toggle",
                    muted: bool = None) -> str:
     """Mute, unmute, or clear mute for a mixer role fader.
@@ -3898,7 +4051,7 @@ def mixer_set_mute(index: int = -1, role: str = "", mode: str = "toggle",
     return f"Mixer role {target}: {state} ({r.get('roleUIDCount', 0)} role UIDs)"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_apply_bus_effect"))
+@splicekit_tool("mixer_apply_bus_effect")
 def mixer_apply_bus_effect(effect_id: str = "", name: str = "",
                            index: int = -1, role: str = "",
                            dry_run: bool = False,
@@ -3939,7 +4092,7 @@ def mixer_apply_bus_effect(effect_id: str = "", name: str = "",
     return f"Applied {effect_name} to mixer role {target} ({count} bus object{'s' if count != 1 else ''})"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_open_bus_effect"))
+@splicekit_tool("mixer_open_bus_effect")
 def mixer_open_bus_effect(effect_index: int = -1, index: int = -1, role: str = "",
                           effect_handle: str = "", effect_stack_handle: str = "",
                           allow_object_fallback: bool = False) -> str:
@@ -3975,7 +4128,7 @@ def mixer_open_bus_effect(effect_index: int = -1, index: int = -1, role: str = "
     return f"Opened {effect_name} editor for mixer role {target}"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_set_bus_effect_enabled"))
+@splicekit_tool("mixer_set_bus_effect_enabled")
 def mixer_set_bus_effect_enabled(effect_index: int = -1, enabled: bool = True,
                                  index: int = -1, role: str = "",
                                  effect_handle: str = "", effect_stack_handle: str = "",
@@ -4015,7 +4168,7 @@ def mixer_set_bus_effect_enabled(effect_index: int = -1, enabled: bool = True,
     return f"Mixer bus effect {effect_index} on {target}: {state}"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_remove_bus_effect"))
+@splicekit_tool("mixer_remove_bus_effect")
 def mixer_remove_bus_effect(effect_index: int = -1, index: int = -1, role: str = "",
                             effect_handle: str = "", effect_stack_handle: str = "",
                             allow_object_fallback: bool = False) -> str:
@@ -4050,7 +4203,7 @@ def mixer_remove_bus_effect(effect_index: int = -1, index: int = -1, role: str =
     return f"Removed mixer bus effect {effect_index} from {target} ({count} bus object{'s' if count != 1 else ''})"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_volume_begin"))
+@splicekit_tool("mixer_volume_begin")
 def mixer_volume_begin(effect_stack_handle: str) -> str:
     """Begin an undo-batched volume change (call before a series of mixer_set_volume).
 
@@ -4066,7 +4219,7 @@ def mixer_volume_begin(effect_stack_handle: str) -> str:
     return "Undo transaction opened for volume adjustment"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_volume_end"))
+@splicekit_tool("mixer_volume_end")
 def mixer_volume_end(effect_stack_handle: str) -> str:
     """End an undo-batched volume change (call after mixer_set_volume series).
 
@@ -4081,7 +4234,7 @@ def mixer_volume_end(effect_stack_handle: str) -> str:
     return "Undo transaction closed"
 
 
-@mcp.tool(annotations=_tool_annotations("mixer_set_all_volumes"))
+@splicekit_tool("mixer_set_all_volumes")
 def mixer_set_all_volumes(volumes: list) -> str:
     """Set volumes for multiple faders at once.
 
@@ -4111,7 +4264,7 @@ def mixer_set_all_volumes(volumes: list) -> str:
 # ============================================================
 # Triggers FCP's share destinations (Export File, YouTube, etc).
 
-@mcp.tool(annotations=_tool_annotations("share_project"))
+@splicekit_tool("share_project")
 def share_project(destination: str = "") -> str:
     """Share/export the project using a specific or default destination.
 
@@ -4134,7 +4287,7 @@ def share_project(destination: str = "") -> str:
 # ============================================================
 # Create new projects, events, and libraries via FCP's internal APIs.
 
-@mcp.tool(annotations=_tool_annotations("create_project"))
+@splicekit_tool("create_project")
 def create_project() -> str:
     """Open the New Project dialog in FCP."""
     r = bridge.call("project.create")
@@ -4143,7 +4296,7 @@ def create_project() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("create_event"))
+@splicekit_tool("create_event")
 def create_event() -> str:
     """Create a new event in the current library."""
     r = bridge.call("project.createEvent")
@@ -4152,7 +4305,7 @@ def create_event() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("create_library"))
+@splicekit_tool("create_library")
 def create_library() -> str:
     """Open the New Library dialog."""
     r = bridge.call("project.createLibrary")
@@ -4167,7 +4320,7 @@ def create_library() -> str:
 # Find a sequence by name (and optionally event) and load it
 # into the editor — no manual handle navigation required.
 
-@mcp.tool(annotations=_tool_annotations("open_project"))
+@splicekit_tool("open_project")
 def open_project(name: str, event: str = "") -> str:
     """Open a project/sequence by name, loading it into the timeline editor.
 
@@ -4199,13 +4352,13 @@ def open_project(name: str, event: str = "") -> str:
 # Floating secondary timeline window backed by a second
 # PEEditorContainerModule. Commands route to the focused pane.
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_status"))
+@splicekit_tool("dual_timeline_status")
 def dual_timeline_status() -> str:
     """Inspect the primary/secondary timeline panes and current focused pane."""
     return _call_or_error("dualTimeline.status")
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_open"))
+@splicekit_tool("dual_timeline_open")
 def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
     """Open a floating secondary timeline window with a sequence loaded.
 
@@ -4219,7 +4372,7 @@ def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
     return _call_or_error("dualTimeline.open", **params)
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_sync_root"))
+@splicekit_tool("dual_timeline_sync_root")
 def dual_timeline_sync_root(source: str = "primary", focus: bool = False) -> str:
     """Clone the source pane's current root into the secondary timeline.
 
@@ -4230,7 +4383,7 @@ def dual_timeline_sync_root(source: str = "primary", focus: bool = False) -> str
     return _call_or_error("dualTimeline.syncRoot", **params)
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_open_selected_in_secondary"))
+@splicekit_tool("dual_timeline_open_selected_in_secondary")
 def dual_timeline_open_selected_in_secondary(source: str = "primary", focus: bool = True) -> str:
     """Open the selected compound clip / multicam item in the secondary timeline.
 
@@ -4241,7 +4394,7 @@ def dual_timeline_open_selected_in_secondary(source: str = "primary", focus: boo
     return _call_or_error("dualTimeline.openSelectedInSecondary", **params)
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_focus"))
+@splicekit_tool("dual_timeline_focus")
 def dual_timeline_focus(pane: str) -> str:
     """Focus a specific timeline pane so subsequent commands target it.
 
@@ -4251,7 +4404,7 @@ def dual_timeline_focus(pane: str) -> str:
     return _call_or_error("dualTimeline.focus", pane=pane)
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_close"))
+@splicekit_tool("dual_timeline_close")
 def dual_timeline_close(focus_primary: bool = True) -> str:
     """Close the floating secondary timeline window.
 
@@ -4261,7 +4414,7 @@ def dual_timeline_close(focus_primary: bool = True) -> str:
     return _call_or_error("dualTimeline.close", focusPrimary=focus_primary)
 
 
-@mcp.tool(annotations=_tool_annotations("dual_timeline_toggle_panel"))
+@splicekit_tool("dual_timeline_toggle_panel")
 def dual_timeline_toggle_panel(panel: str, pane: str = "secondary") -> str:
     """Toggle a container-local panel on a specific timeline pane.
 
@@ -4282,7 +4435,7 @@ def dual_timeline_toggle_panel(panel: str, pane: str = "secondary") -> str:
 # The standard selectClipAtPlayhead only selects the primary
 # storyline clip. This tool selects clips in any lane.
 
-@mcp.tool(annotations=_tool_annotations("select_clip_in_lane"))
+@splicekit_tool("select_clip_in_lane")
 def select_clip_in_lane(lane: int = 1) -> str:
     """Select the clip at the playhead in a specific lane (connected storyline).
 
@@ -4334,7 +4487,7 @@ def _parse_handle_list(handles) -> list:
                      "or a comma-separated string")
 
 
-@mcp.tool(annotations=_tool_annotations("select_clips"))
+@splicekit_tool("select_clips")
 def select_clips(handles: list[str] | str = "", mode: str = "replace") -> str:
     """Select clips by handle -- the way to act on a specific clip after get_timeline_clips().
 
@@ -4403,7 +4556,7 @@ def select_clips(handles: list[str] | str = "", mode: str = "replace") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("begin_edit"))
+@splicekit_tool("begin_edit")
 def begin_edit(name: str = "Edit") -> str:
     """Open one undo step: everything until end_edit() reverts with a single Edit > Undo `name`.
 
@@ -4430,7 +4583,7 @@ def begin_edit(name: str = "Edit") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("end_edit"))
+@splicekit_tool("end_edit")
 def end_edit(name: str = "") -> str:
     """Close the undo step opened by begin_edit(); everything since then is one Edit > Undo entry.
 
@@ -4470,7 +4623,7 @@ def _trim_range_line(label, rng):
             f"(duration {rng.get('duration', 0):.3f}s)")
 
 
-@mcp.tool(annotations=_tool_annotations("trim_clip"))
+@splicekit_tool("trim_clip")
 def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
               to_seconds: float | None = None, dry_run: bool = False) -> str:
     """Ripple trim one edit point (a clip's start point or end point) by handle, to an exact time.
@@ -4691,7 +4844,7 @@ def _render_clip_info(r: dict) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_clip_info"))
+@splicekit_tool("get_clip_info")
 def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | None = None,
                   frame_max_width: int = 640):
     """Clip information for one clip by handle: the fields Final Cut Pro's Info
@@ -4758,7 +4911,7 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
     return _maybe_with_image(text, image)
 
 
-@mcp.tool(annotations=_tool_annotations("capture_clip_frame"))
+@splicekit_tool("capture_clip_frame")
 def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960):
     """The clip as rendered in the Viewer: effects, color correction and transforms
     included. Moves the playhead to the frame time and restores it afterwards.
@@ -4833,7 +4986,7 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
 # Captures the viewer/canvas contents directly — no external
 # screencapture tool needed, no other windows in the way.
 
-@mcp.tool(annotations=_tool_annotations("capture_viewer"))
+@splicekit_tool("capture_viewer")
 def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool = True):
     """Capture the FCP viewer/canvas as a PNG screenshot.
 
@@ -4869,7 +5022,7 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool =
 # Capture Timeline Screenshot
 # ============================================================
 
-@mcp.tool(annotations=_tool_annotations("capture_timeline"))
+@splicekit_tool("capture_timeline")
 def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bool = True):
     """Capture the FCP timeline as a PNG screenshot.
 
@@ -4906,7 +5059,7 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bo
 # Capture Inspector Screenshot
 # ============================================================
 
-@mcp.tool(annotations=_tool_annotations("capture_inspector"))
+@splicekit_tool("capture_inspector")
 def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: str = "",
                       return_image: bool = True):
     """Capture the FCP Inspector pane as a PNG screenshot.
@@ -4952,7 +5105,7 @@ def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: st
 # ============================================================
 # Export the current project to FCPXML without the save dialog.
 
-@mcp.tool(annotations=_tool_annotations("export_xml"))
+@splicekit_tool("export_xml")
 def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
     """Export the current project/sequence as FCPXML to a file — no save dialog.
 
@@ -5212,7 +5365,7 @@ def _otio_normalize_rate(rate):
     return rate
 
 
-@mcp.tool(annotations=_tool_annotations("export_otio"))
+@splicekit_tool("export_otio")
 def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> str:
     """Export the current project/sequence via OpenTimelineIO.
 
@@ -5317,7 +5470,7 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
     return _fmt(summary)
 
 
-@mcp.tool(annotations=_tool_annotations("import_otio"))
+@splicekit_tool("import_otio")
 def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
     """Import a timeline file into FCP via OpenTimelineIO.
 
@@ -5473,7 +5626,7 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
 # One-shot command to build, deploy, re-sign, kill FCP, relaunch,
 # and wait for the bridge to come back online.
 
-@mcp.tool(annotations=_tool_annotations("deploy_and_restart"))
+@splicekit_tool("deploy_and_restart")
 def deploy_and_restart(skip_build: bool = False) -> str:
     """Build SpliceKit, deploy to the modded FCP app, and restart FCP.
 
@@ -5534,8 +5687,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
 
     # Step 4: Wait for bridge
     # Drop the existing connection so we don't use a stale socket
-    bridge.sock = None
-    bridge._buf = b""
+    bridge.reset()
 
     max_wait = 30
     start = _time.time()
@@ -5549,8 +5701,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
                 break
         except Exception:
             pass
-        bridge.sock = None  # reset on failure
-        bridge._buf = b""
+        bridge.reset()  # reset on failure
 
     if connected:
         results.append(f"Bridge connected ({_time.time() - start:.1f}s)")
@@ -5565,7 +5716,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
 # ============================================================
 # Query current playhead position, frame rate, and play state.
 
-@mcp.tool(annotations=_tool_annotations("get_playhead_position"))
+@splicekit_tool("get_playhead_position")
 def get_playhead_position() -> str:
     """Get the current playhead position, timeline duration, frame rate, and playing state.
 
@@ -5591,7 +5742,7 @@ def get_playhead_position() -> str:
 # export, missing media, etc). These tools detect and interact with
 # them so the AI can handle dialogs without human intervention.
 
-@mcp.tool(annotations=_tool_annotations("detect_dialog"))
+@splicekit_tool("detect_dialog")
 def detect_dialog() -> str:
     """Detect if any dialog, sheet, alert, or popup is currently showing in FCP.
 
@@ -5612,7 +5763,7 @@ def detect_dialog() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("click_dialog_button"))
+@splicekit_tool("click_dialog_button")
 def click_dialog_button(button: str = "", index: int = -1) -> str:
     """Click a button in the currently showing dialog/sheet/alert.
 
@@ -5635,7 +5786,7 @@ def click_dialog_button(button: str = "", index: int = -1) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("fill_dialog_field"))
+@splicekit_tool("fill_dialog_field")
 def fill_dialog_field(value: str, index: int = 0) -> str:
     """Fill a text field in the currently showing dialog.
 
@@ -5651,7 +5802,7 @@ def fill_dialog_field(value: str, index: int = 0) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("toggle_dialog_checkbox"))
+@splicekit_tool("toggle_dialog_checkbox")
 def toggle_dialog_checkbox(checkbox: str, checked: bool = None) -> str:
     """Toggle or set a checkbox in the currently showing dialog.
 
@@ -5670,7 +5821,7 @@ def toggle_dialog_checkbox(checkbox: str, checked: bool = None) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("select_dialog_popup"))
+@splicekit_tool("select_dialog_popup")
 def select_dialog_popup(select: str, popup_index: int = 0) -> str:
     """Select an item from a popup menu in the currently showing dialog.
 
@@ -5686,7 +5837,7 @@ def select_dialog_popup(select: str, popup_index: int = 0) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("dismiss_dialog"))
+@splicekit_tool("dismiss_dialog")
 def dismiss_dialog(action: str = "default") -> str:
     """Dismiss the currently showing dialog.
 
@@ -5710,7 +5861,7 @@ def dismiss_dialog(action: str = "default") -> str:
 # ============================================================
 # Get/set the canvas zoom level. 0.0 = fit-to-window.
 
-@mcp.tool(annotations=_tool_annotations("get_viewer_zoom"))
+@splicekit_tool("get_viewer_zoom")
 def get_viewer_zoom() -> str:
     """Get the current viewer zoom level.
 
@@ -5723,7 +5874,7 @@ def get_viewer_zoom() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_viewer_zoom"))
+@splicekit_tool("set_viewer_zoom")
 def set_viewer_zoom(zoom: float) -> str:
     """Set the viewer zoom level to any value.
 
@@ -5743,7 +5894,7 @@ def set_viewer_zoom(zoom: float) -> str:
 # ============================================================
 # Runtime configuration for SpliceKit's own behavioral tweaks.
 
-@mcp.tool(annotations=_tool_annotations("get_bridge_options"))
+@splicekit_tool("get_bridge_options")
 def get_bridge_options() -> str:
     """Get the current SpliceKit option settings.
 
@@ -5757,7 +5908,7 @@ def get_bridge_options() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_bridge_option"))
+@splicekit_tool("set_bridge_option")
 def set_bridge_option(option: str, enabled: bool) -> str:
     """Toggle a boolean SpliceKit option.
 
@@ -5781,7 +5932,7 @@ def set_bridge_option(option: str, enabled: bool) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_bridge_option_value"))
+@splicekit_tool("set_bridge_option_value")
 def set_bridge_option_value(option: str, value: str) -> str:
     """Set a string-valued SpliceKit option.
 
@@ -5806,7 +5957,7 @@ def set_bridge_option_value(option: str, value: str) -> str:
 # deadlocks inside FCP's hardened runtime). Returns beat/bar/section
 # timestamps for syncing video cuts to music.
 
-@mcp.tool(annotations=_tool_annotations("detect_beats"))
+@splicekit_tool("detect_beats")
 def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Detect beats, bars, and sections in any audio file (MP3, WAV, M4A, etc.).
 
@@ -5899,7 +6050,7 @@ def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
         return {"error": str(e)}
 
 
-@mcp.tool(annotations=_tool_annotations("analyze_song_structure"))
+@splicekit_tool("analyze_song_structure")
 def analyze_song_structure(file_path: str, sensitivity: float = 0.5,
                            min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Analyze a song's structure — detect verse, chorus, bridge, intro, outro sections.
@@ -5939,7 +6090,7 @@ def analyze_song_structure(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("beat_sync_blade"))
+@splicekit_tool("beat_sync_blade")
 def beat_sync_blade(file_path: str, cut_on: str = "bar",
                     sensitivity: float = 0.5, min_bpm: float = 60.0,
                     max_bpm: float = 200.0,
@@ -6099,7 +6250,7 @@ def _structure_caption_role():
     return "SRT.structure"
 
 
-@mcp.tool(annotations=_tool_annotations("song_structure_blocks"))
+@splicekit_tool("song_structure_blocks")
 def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
                           min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Analyze a song and place section labels in FCP's native caption lane.
@@ -6198,7 +6349,7 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("toggle_structure_blocks"))
+@splicekit_tool("toggle_structure_blocks")
 def toggle_structure_blocks() -> str:
     """Toggle visibility of song structure blocks on the timeline.
 
@@ -6214,7 +6365,7 @@ def toggle_structure_blocks() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("remove_structure_blocks"))
+@splicekit_tool("remove_structure_blocks")
 def remove_structure_blocks() -> str:
     """Remove all song structure blocks from the timeline."""
     r = bridge.call("structure.remove")
@@ -6231,7 +6382,7 @@ def remove_structure_blocks() -> str:
 # song structure sections. Each section has its own color and can be
 # modified via right-click context menu or these MCP tools.
 
-@mcp.tool(annotations=_tool_annotations("song_structure_sections"))
+@splicekit_tool("song_structure_sections")
 def song_structure_sections(file_path: str, sensitivity: float = 0.5,
                              min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Analyze a song and display color-coded sections in a dedicated bar above the timeline.
@@ -6276,7 +6427,7 @@ def song_structure_sections(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_sections"))
+@splicekit_tool("get_sections")
 def get_sections() -> str:
     """Get the current sections displayed in the timeline sections bar."""
     r = bridge.call("sections.get")
@@ -6285,7 +6436,7 @@ def get_sections() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("hide_sections"))
+@splicekit_tool("hide_sections")
 def hide_sections() -> str:
     """Hide the sections bar from the timeline."""
     r = bridge.call("sections.hide")
@@ -6300,7 +6451,7 @@ def hide_sections() -> str:
 # FCP's built-in AI music engine. Songs can stretch/shrink to
 # any duration by rearranging their musical sections dynamically.
 
-@mcp.tool(annotations=_tool_annotations("flexmusic_list_songs"))
+@splicekit_tool("flexmusic_list_songs")
 def flexmusic_list_songs(filter: str = "") -> str:
     """List available FlexMusic songs that can dynamically fit any project duration.
 
@@ -6316,7 +6467,7 @@ def flexmusic_list_songs(filter: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("flexmusic_get_song"))
+@splicekit_tool("flexmusic_get_song")
 def flexmusic_get_song(song_uid: str) -> str:
     """Get detailed info about a specific FlexMusic song.
 
@@ -6332,7 +6483,7 @@ def flexmusic_get_song(song_uid: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("flexmusic_get_timing"))
+@splicekit_tool("flexmusic_get_timing")
 def flexmusic_get_timing(song_uid: str, duration_seconds: float) -> str:
     """Get beat, bar, and section timing for a FlexMusic song fitted to a specific duration.
 
@@ -6353,7 +6504,7 @@ def flexmusic_get_timing(song_uid: str, duration_seconds: float) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("flexmusic_render_to_file"))
+@splicekit_tool("flexmusic_render_to_file")
 def flexmusic_render_to_file(song_uid: str, duration_seconds: float, output_path: str, format: str = "m4a") -> str:
     """Render a FlexMusic song fitted to a specific duration as an audio file.
 
@@ -6373,7 +6524,7 @@ def flexmusic_render_to_file(song_uid: str, duration_seconds: float, output_path
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("flexmusic_add_to_timeline"))
+@splicekit_tool("flexmusic_add_to_timeline")
 def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str:
     """Add a FlexMusic song to the current timeline as background music.
 
@@ -6398,7 +6549,7 @@ def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str
 # -> assemble a montage timeline. Can run as individual steps
 # or as a single montage_auto() call.
 
-@mcp.tool(annotations=_tool_annotations("montage_analyze_clips"))
+@splicekit_tool("montage_analyze_clips")
 def montage_analyze_clips(event_name: str = "") -> str:
     """Analyze clips in the browser for montage creation.
 
@@ -6415,7 +6566,7 @@ def montage_analyze_clips(event_name: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("montage_plan_edit"))
+@splicekit_tool("montage_plan_edit")
 def montage_plan_edit(beats: str, clips: str, style: str = "bar", total_duration: float = 0) -> str:
     """Create an edit decision list (EDL) that maps clips to musical beats.
 
@@ -6440,7 +6591,7 @@ def montage_plan_edit(beats: str, clips: str, style: str = "bar", total_duration
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("montage_assemble"))
+@splicekit_tool("montage_assemble")
 def montage_assemble(edit_plan: str, project_name: str = "Montage", song_file: str = "") -> str:
     """Assemble a montage on the timeline from an edit plan.
 
@@ -6463,7 +6614,7 @@ def montage_assemble(edit_plan: str, project_name: str = "Montage", song_file: s
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("montage_auto"))
+@splicekit_tool("montage_auto")
 def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", project_name: str = "Montage") -> str:
     """One-shot automatic montage creation.
 
@@ -6493,7 +6644,7 @@ def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", p
 # ProAppSupport logging, CFPreferences keys) and SpliceKit's own
 # debugging toolkit (breakpoints, tracing, eval, crash handling).
 
-@mcp.tool(annotations=_tool_annotations("debug_get_config"))
+@splicekit_tool("debug_get_config")
 def debug_get_config() -> str:
     """Get current state of all FCP internal debug/logging settings.
 
@@ -6511,7 +6662,7 @@ def debug_get_config() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("debug_set_config"))
+@splicekit_tool("debug_set_config")
 def debug_set_config(key: str, value: str = "true") -> str:
     """Set a single FCP internal debug/logging flag.
 
@@ -6579,7 +6730,7 @@ def debug_set_config(key: str, value: str = "true") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("debug_reset_config"))
+@splicekit_tool("debug_reset_config")
 def debug_reset_config(scope: str = "all") -> str:
     """Reset debug/logging settings to defaults.
 
@@ -6596,7 +6747,7 @@ def debug_reset_config(scope: str = "all") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("debug_enable_preset"))
+@splicekit_tool("debug_enable_preset")
 def debug_enable_preset(preset: str) -> str:
     """Enable a preset group of debug settings.
 
@@ -6620,7 +6771,7 @@ def debug_enable_preset(preset: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("debug_start_framerate_monitor"))
+@splicekit_tool("debug_start_framerate_monitor")
 def debug_start_framerate_monitor(interval: float = 2.0) -> str:
     """Start FCP's built-in HMD framerate monitor.
 
@@ -6638,7 +6789,7 @@ def debug_start_framerate_monitor(interval: float = 2.0) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("debug_stop_framerate_monitor"))
+@splicekit_tool("debug_stop_framerate_monitor")
 def debug_stop_framerate_monitor() -> str:
     """Stop the HMD framerate monitor."""
     r = bridge.call("debug.stopFramerateMonitor")
@@ -6649,7 +6800,7 @@ def debug_stop_framerate_monitor() -> str:
 
 # -- Runtime metadata export (for reverse engineering / IDA Pro) --
 
-@mcp.tool(annotations=_tool_annotations("dump_runtime_metadata"))
+@splicekit_tool("dump_runtime_metadata")
 def dump_runtime_metadata(binary: str = "", classes_only: bool = False) -> str:
     """Bulk-export ObjC runtime metadata from a running FCP process for IDA Pro import.
 
@@ -6672,7 +6823,7 @@ def dump_runtime_metadata(binary: str = "", classes_only: bool = False) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("list_loaded_images"))
+@splicekit_tool("list_loaded_images")
 def list_loaded_images(filter: str = "") -> str:
     """List all Mach-O images loaded in FCP's process with base addresses and ASLR slides.
 
@@ -6691,7 +6842,7 @@ def list_loaded_images(filter: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_image_sections"))
+@splicekit_tool("get_image_sections")
 def get_image_sections(binary: str) -> str:
     """Get ObjC section data for a loaded binary: selector refs, class refs, superclass refs.
 
@@ -6708,7 +6859,7 @@ def get_image_sections(binary: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_image_symbols"))
+@splicekit_tool("get_image_symbols")
 def get_image_symbols(binary: str, filter: str = "", demangle: bool = True) -> str:
     """Get exported symbols from a loaded binary's symbol table.
 
@@ -6731,7 +6882,7 @@ def get_image_symbols(binary: str, filter: str = "", demangle: bool = True) -> s
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("get_notification_names"))
+@splicekit_tool("get_notification_names")
 def get_notification_names(binary: str = "") -> str:
     """Enumerate NSNotification name constants from exported symbols.
 
@@ -6757,7 +6908,7 @@ def get_notification_names(binary: str = "") -> str:
 # True breakpoints that freeze FCP mid-execution. The JSON-RPC server
 # stays alive on a background thread so you can inspect state while paused.
 
-@mcp.tool(annotations=_tool_annotations("debug_breakpoint"))
+@splicekit_tool("debug_breakpoint")
 def debug_breakpoint(action: str = "list", class_name: str = "", selector: str = "",
                      condition: str = "", hit_count: int = 0, one_shot: bool = False,
                      key_path: str = "", store_result: bool = False,
@@ -6827,7 +6978,7 @@ def debug_breakpoint(action: str = "list", class_name: str = "", selector: str =
 # Non-blocking alternative to breakpoints. Swizzles methods to log calls
 # without pausing. Good for understanding call patterns and frequencies.
 
-@mcp.tool(annotations=_tool_annotations("debug_trace_method"))
+@splicekit_tool("debug_trace_method")
 def debug_trace_method(action: str = "list", class_name: str = "", selector: str = "",
                        log_stack: bool = False, log_args: bool = True,
                        limit: int = 50, class_method: bool = False) -> str:
@@ -6880,7 +7031,7 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
 # Uses ObjC Key-Value Observing to fire events whenever a property changes.
 # Replaces hardware watchpoints -- works on any KVO-compliant property.
 
-@mcp.tool(annotations=_tool_annotations("debug_watch"))
+@splicekit_tool("debug_watch")
 def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
                 key_path: str = "", watch_key: str = "") -> str:
     """Watch ObjC property changes via KVO (Key-Value Observing).
@@ -6919,7 +7070,7 @@ def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
 # Catches NSExceptions and Unix signals before the process dies,
 # so you get a stack trace instead of a silent crash.
 
-@mcp.tool(annotations=_tool_annotations("debug_crash_handler"))
+@splicekit_tool("debug_crash_handler")
 def debug_crash_handler(action: str = "install") -> str:
     """Install or query the in-process crash handler.
 
@@ -6945,7 +7096,7 @@ def debug_crash_handler(action: str = "install") -> str:
 # ---------------------------------------------------------------------------
 # Lists all ~45 threads in FCP's process with CPU usage via Mach APIs.
 
-@mcp.tool(annotations=_tool_annotations("debug_threads"))
+@splicekit_tool("debug_threads")
 def debug_threads(detailed: bool = False) -> str:
     """List all threads in FCP's process with CPU usage and state.
 
@@ -6972,7 +7123,7 @@ def debug_threads(detailed: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Like lldb's `po` command. Walks ObjC property chains at runtime.
 
-@mcp.tool(annotations=_tool_annotations("debug_eval"))
+@splicekit_tool("debug_eval")
 def debug_eval(expression: str = "", chain: str = "", target: str = "",
                store_result: bool = False) -> str:
     """Evaluate ObjC property chains inside FCP's process.
@@ -7014,7 +7165,7 @@ def debug_eval(expression: str = "", chain: str = "", target: str = "",
 # ---------------------------------------------------------------------------
 # dlopen/dlclose for live-patching FCP without restarting.
 
-@mcp.tool(annotations=_tool_annotations("debug_load_plugin"))
+@splicekit_tool("debug_load_plugin")
 def debug_load_plugin(action: str = "list", path: str = "") -> str:
     """Dynamically load or unload code in FCP's running process.
 
@@ -7051,7 +7202,7 @@ def debug_load_plugin(action: str = "list", path: str = "") -> str:
 # Subscribe to NSNotificationCenter events. FCP posts 337+ named
 # notifications internally -- this lets you see them in real time.
 
-@mcp.tool(annotations=_tool_annotations("debug_observe_notification"))
+@splicekit_tool("debug_observe_notification")
 def debug_observe_notification(action: str = "list", name: str = "",
                                log_object: bool = False) -> str:
     """Subscribe to FCP's internal NSNotification events.
@@ -7096,7 +7247,7 @@ def debug_observe_notification(action: str = "list", name: str = "",
 # real parameters (rates, durations, flags, etc). More powerful but
 # requires knowing which parameters each action needs.
 
-@mcp.tool(annotations=_tool_annotations("direct_timeline_action"))
+@splicekit_tool("direct_timeline_action")
 def direct_timeline_action(action: str = "", selector: str = "",
                            rate: float = 0, ripple: bool = False,
                            allow_variable_speed: bool = True,
@@ -7260,7 +7411,7 @@ def direct_timeline_action(action: str = "", selector: str = "",
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_tool_annotations("browser_list_clips"))
+@splicekit_tool("browser_list_clips")
 def browser_list_clips(event: str = "") -> str:
     """List clips in the FCP browser (media library).
 
@@ -7279,7 +7430,7 @@ def browser_list_clips(event: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("browser_append_clip"))
+@splicekit_tool("browser_append_clip")
 def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> str:
     """Append a clip from the browser to the timeline.
 
@@ -7303,7 +7454,7 @@ def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> st
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("import_media"))
+@splicekit_tool("import_media")
 def import_media(paths: list[str] | None = None,
                  path: str = "",
                  event: str = "",
@@ -7343,7 +7494,7 @@ def import_media(paths: list[str] | None = None,
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("braw_probe"))
+@splicekit_tool("braw_probe")
 def braw_probe(path: str = "",
                handle: str = "",
                decode_frame_index: int = -1,
@@ -7390,7 +7541,7 @@ def braw_probe(path: str = "",
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("paste_fcpxml"))
+@splicekit_tool("paste_fcpxml")
 def paste_fcpxml(xml: str = "") -> str:
     """Import FCPXML content via the pasteboard (no file I/O, no dialogs).
 
@@ -7409,7 +7560,7 @@ def paste_fcpxml(xml: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("stabilize_subject"))
+@splicekit_tool("stabilize_subject")
 def stabilize_subject() -> str:
     """Stabilize the selected clip around a tracked subject.
 
@@ -7426,7 +7577,7 @@ def stabilize_subject() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("insert_title"))
+@splicekit_tool("insert_title")
 def insert_title(name: str = "", effect_id: str = "") -> str:
     """Insert a title or generator into the timeline.
 
@@ -7448,7 +7599,7 @@ def insert_title(name: str = "", effect_id: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_transcript_engine"))
+@splicekit_tool("set_transcript_engine")
 def set_transcript_engine(engine: str) -> str:
     """Set the speech recognition engine for transcript panel.
 
@@ -7472,7 +7623,7 @@ def set_transcript_engine(engine: str) -> str:
 # FCPXML title elements and imports via pasteboard.
 
 
-@mcp.tool(annotations=_tool_annotations("open_captions"))
+@splicekit_tool("open_captions")
 def open_captions(file_url: str = "", style: str = "") -> str:
     """Open the social captions panel and start transcribing the timeline.
 
@@ -7499,7 +7650,7 @@ def open_captions(file_url: str = "", style: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("close_captions"))
+@splicekit_tool("close_captions")
 def close_captions() -> str:
     """Close the social captions panel."""
     r = bridge.call("captions.close")
@@ -7508,7 +7659,7 @@ def close_captions() -> str:
     return "Captions panel closed."
 
 
-@mcp.tool(annotations=_tool_annotations("get_caption_state"))
+@splicekit_tool("get_caption_state")
 def get_caption_state() -> str:
     """Get the current caption panel state.
 
@@ -7542,7 +7693,7 @@ def get_caption_state() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("get_caption_styles"))
+@splicekit_tool("get_caption_styles")
 def get_caption_styles() -> str:
     """List all available caption style presets.
 
@@ -7564,7 +7715,7 @@ def get_caption_styles() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=_tool_annotations("set_caption_style"))
+@splicekit_tool("set_caption_style")
 def set_caption_style(preset_id: str = "", font: str = "", font_size: float = 0,
                       text_color: str = "", highlight_color: str = "",
                       outline_color: str = "", outline_width: float = -1,
@@ -7616,7 +7767,7 @@ def set_caption_style(preset_id: str = "", font: str = "", font_size: float = 0,
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_caption_grouping"))
+@splicekit_tool("set_caption_grouping")
 def set_caption_grouping(mode: str = "social", max_words: int = 3,
                          max_chars: int = 20, max_seconds: float = 3.0) -> str:
     """Configure how words are grouped into caption segments.
@@ -7637,7 +7788,7 @@ def set_caption_grouping(mode: str = "social", max_words: int = 3,
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("generate_captions"))
+@splicekit_tool("generate_captions")
 def generate_captions(style: str = "", position: str = "center",
                       animation: str = "pop", word_highlight: bool = True,
                       max_words: int = 3, all_caps: bool = True) -> str:
@@ -7684,7 +7835,7 @@ def generate_captions(style: str = "", position: str = "center",
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("export_captions_srt"))
+@splicekit_tool("export_captions_srt")
 def export_captions_srt(path: str) -> str:
     """Export the current captions as an SRT subtitle file.
 
@@ -7699,7 +7850,7 @@ def export_captions_srt(path: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("export_captions_txt"))
+@splicekit_tool("export_captions_txt")
 def export_captions_txt(path: str) -> str:
     """Export the current captions as plain text.
 
@@ -7712,7 +7863,7 @@ def export_captions_txt(path: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("set_caption_words"))
+@splicekit_tool("set_caption_words")
 def set_caption_words(words: str) -> str:
     """Manually set caption words with timing (bypasses transcription).
 
@@ -7740,7 +7891,7 @@ def set_caption_words(words: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("generate_native_captions"))
+@splicekit_tool("generate_native_captions")
 def generate_native_captions(grouping: str = "word", language: str = "en",
                               max_words: int = 1, max_seconds: float = 3.0,
                               format: str = "ITT") -> str:
@@ -7783,7 +7934,7 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("verify_native_captions"))
+@splicekit_tool("verify_native_captions")
 def verify_native_captions() -> str:
     """Verify native captions on the current timeline.
 
@@ -7800,7 +7951,7 @@ def verify_native_captions() -> str:
 # ── Lua Scripting ────────────────────────────────────────────────────────────
 
 
-@mcp.tool(annotations=_tool_annotations("lua_execute"))
+@splicekit_tool("lua_execute")
 def lua_execute(code: str) -> str:
     """Execute Lua code in SpliceKit's embedded Lua 5.4 VM running inside FCP.
 
@@ -7829,7 +7980,7 @@ def lua_execute(code: str) -> str:
     return "\n".join(parts) if parts else "ok"
 
 
-@mcp.tool(annotations=_tool_annotations("lua_execute_file"))
+@splicekit_tool("lua_execute_file")
 def lua_execute_file(path: str) -> str:
     """Execute a Lua script file in SpliceKit's VM.
 
@@ -7852,7 +8003,7 @@ def lua_execute_file(path: str) -> str:
     return "\n".join(parts) if parts else "ok"
 
 
-@mcp.tool(annotations=_tool_annotations("lua_reset"))
+@splicekit_tool("lua_reset")
 def lua_reset() -> str:
     """Reset the Lua VM. All state (variables, loaded modules) is cleared and the sk module is re-registered."""
     r = bridge.call("lua.reset")
@@ -7861,7 +8012,7 @@ def lua_reset() -> str:
     return "Lua VM reset"
 
 
-@mcp.tool(annotations=_tool_annotations("lua_watch"))
+@splicekit_tool("lua_watch")
 def lua_watch(action: str = "list", path: str = "") -> str:
     """Manage Lua file watching for live coding.
 
@@ -7879,7 +8030,7 @@ def lua_watch(action: str = "list", path: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("lua_state"))
+@splicekit_tool("lua_state")
 def lua_state() -> str:
     """Get Lua VM state: memory usage, user-defined globals, watched paths, scripts directory."""
     r = bridge.call("lua.getState")
@@ -7896,19 +8047,22 @@ def lua_state() -> str:
 # all registered plugin methods with metadata.
 
 
-@mcp.tool(annotations=_tool_annotations("plugin_list"))
+@splicekit_tool("plugin_list")
 def plugin_list() -> str:
     """List all loaded SpliceKit plugins with their manifests."""
     return _call_or_error("plugin.list")
 
 
-@mcp.tool(annotations=_tool_annotations("plugin_list_methods"))
+@splicekit_tool("plugin_list_methods")
 def plugin_list_methods() -> str:
     """List all registered plugin methods with descriptions and parameter schemas."""
     return _call_or_error("plugin.listMethods")
 
 
-def _register_plugin_tools():
+_registered_plugin_tools = set()
+
+
+def _register_plugin_tools(timeout: float = None):
     """Query SpliceKit for registered plugin methods and create MCP tools dynamically.
 
     Called at module load time. If FCP isn't running yet, this silently skips —
@@ -7916,7 +8070,10 @@ def _register_plugin_tools():
     reload_plugin_tools() to refresh after FCP launches or plugins change.
     """
     try:
-        r = bridge.call("plugin.listMethods")
+        # A short timeout: this runs at import, before the MCP handshake, and a Final
+        # Cut Pro that accepted the connection but is busy on its main thread must not
+        # delay the client's initialize by the full read timeout.
+        r = bridge.call("plugin.listMethods", timeout=timeout)
         if _err(r) or "methods" not in r:
             return 0
         count = 0
@@ -7927,6 +8084,8 @@ def _register_plugin_tools():
 
             # Build a safe tool name: com.example.plugin.greet -> com_example_plugin_greet
             tool_name = "plugin_" + method_name.replace(".", "_")
+            if tool_name in _registered_plugin_tools:
+                continue  # already registered by an earlier call; the SDK keeps the first
             description = m.get("description", f"Plugin method: {method_name}")
             plugin_name = m.get("pluginId", "")
             short_name = m.get("shortName", method_name)
@@ -7947,10 +8106,10 @@ def _register_plugin_tools():
                 handler.__doc__ = description
                 return handler
 
-            annotations = dict(READ_ONLY if read_only else LOCAL_WRITE)
             title = f"{plugin_name}: {short_name}" if plugin_name else short_name
-            annotations["title"] = title
-            mcp.tool(annotations=annotations)(make_handler(method_name))
+            annotations = ToolAnnotations(title=title, **(READ_ONLY if read_only else LOCAL_WRITE))
+            mcp.tool(annotations=annotations)(_guard_tool_errors(make_handler(method_name)))
+            _registered_plugin_tools.add(tool_name)
             count += 1
         return count
     except Exception:
@@ -7958,19 +8117,20 @@ def _register_plugin_tools():
 
 
 # Register plugin tools at startup (best-effort)
-_plugin_tool_count = _register_plugin_tools()
+_plugin_tool_count = _register_plugin_tools(timeout=2.0)
 
 
-@mcp.tool(annotations=_tool_annotations("reload_plugin_tools"))
+@splicekit_tool("reload_plugin_tools")
 def reload_plugin_tools() -> str:
     """Reload plugin tools from SpliceKit.
 
     Call this after FCP launches or after installing new plugins to make their
-    methods available as MCP tools. Note: tools registered in a previous call
-    remain available — this adds any newly registered plugin methods.
+    methods available as MCP tools. Tools registered earlier stay registered; only
+    new plugin methods are added. The client has to list tools again to see them:
+    this server sends no tools/list_changed notification.
     """
-    count = _register_plugin_tools()
-    return json.dumps({"registered": count, "status": "ok"})
+    added = _register_plugin_tools()
+    return json.dumps({"added": added, "total_plugin_tools": len(_registered_plugin_tools), "status": "ok"})
 
 
 # ============================================================
@@ -8442,7 +8602,7 @@ Task: Edit a documentary{f' about "{topic}"' if topic else ''}.
 # reducing round-trips for common bulk operations.
 
 
-@mcp.tool(annotations=_tool_annotations("batch_apply_effect"))
+@splicekit_tool("batch_apply_effect")
 def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) -> str:
     """Apply the same effect to multiple clips sequentially.
 
@@ -8452,7 +8612,9 @@ def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) 
     Args:
         name: Display name of the effect (e.g. "Gaussian Blur").
         effectID: The effect ID string (alternative to name).
-        clip_count: Number of clips to process (0 = all clips from playhead to end).
+        clip_count: Number of clips to process (0 = all clips from playhead to end,
+                    bounded at 1000 so a bridge that never reports the end cannot
+                    keep this running forever).
 
     Select the starting clip first, or position the playhead at the first clip.
     """
@@ -8469,7 +8631,8 @@ def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) 
     if _err(r):
         return f"Error selecting initial clip: {r.get('error', r)}"
 
-    while clip_count == 0 or i < clip_count:
+    limit = clip_count if clip_count > 0 else 1000
+    while i < limit:
         # Apply effect to current selection
         params = {}
         if effectID:
@@ -8502,7 +8665,7 @@ def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) 
     }, indent=2, default=str)
 
 
-@mcp.tool(annotations=_tool_annotations("batch_color_correct"))
+@splicekit_tool("batch_color_correct")
 def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) -> str:
     """Apply the same color correction to multiple clips sequentially.
 
@@ -8514,7 +8677,9 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
             "addColorBoard", "addColorWheels", "addColorCurves",
             "addColorAdjustment", "addHueSaturation",
             "addEnhanceLightAndColor", "balanceColor", "matchColor"
-        clip_count: Number of clips to process (0 = all clips from playhead to end).
+        clip_count: Number of clips to process (0 = all clips from playhead to end,
+                    bounded at 1000 so a bridge that never reports the end cannot
+                    keep this running forever).
     """
     valid_corrections = {
         "addColorBoard", "addColorWheels", "addColorCurves",
@@ -8533,7 +8698,8 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
     if _err(r):
         return f"Error selecting initial clip: {r.get('error', r)}"
 
-    while clip_count == 0 or i < clip_count:
+    limit = clip_count if clip_count > 0 else 1000
+    while i < limit:
         r = bridge.call("timeline.action", action=correction)
         if _err(r):
             errors += 1
@@ -8576,7 +8742,7 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
 #   6. visionpro_send_aime()               — push metadata to the headset
 #   7. (frames then stream; monitor with visionpro_status)
 
-@mcp.tool(annotations=_tool_annotations("visionpro_status"))
+@splicekit_tool("visionpro_status")
 @bridge_tool
 def visionpro_status() -> str:
     """Report Vision Pro session state.
@@ -8589,7 +8755,7 @@ def visionpro_status() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_open_panel"))
+@splicekit_tool("visionpro_open_panel")
 @bridge_tool
 def visionpro_open_panel() -> str:
     """Open the floating Vision Pro panel inside FCP."""
@@ -8597,7 +8763,7 @@ def visionpro_open_panel() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_close_panel"))
+@splicekit_tool("visionpro_close_panel")
 @bridge_tool
 def visionpro_close_panel() -> str:
     """Close the Vision Pro panel (same menu toggles visibility)."""
@@ -8605,7 +8771,7 @@ def visionpro_close_panel() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_start"))
+@splicekit_tool("visionpro_start")
 @bridge_tool
 def visionpro_start(display_name: str = "SpliceKit") -> str:
     """Start the Vision Pro discovery + preview session.
@@ -8620,7 +8786,7 @@ def visionpro_start(display_name: str = "SpliceKit") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_stop"))
+@splicekit_tool("visionpro_stop")
 @bridge_tool
 def visionpro_stop() -> str:
     """Stop the Vision Pro session and tear down Bonjour discovery."""
@@ -8628,7 +8794,7 @@ def visionpro_stop() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_list_clients"))
+@splicekit_tool("visionpro_list_clients")
 @bridge_tool
 def visionpro_list_clients() -> str:
     """List Bonjour-discovered Vision Pros and actively-connected peers."""
@@ -8636,7 +8802,7 @@ def visionpro_list_clients() -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_connect"))
+@splicekit_tool("visionpro_connect")
 @bridge_tool
 def visionpro_connect(host: str = "", ip: str = "") -> str:
     """Connect to a Vision Pro by host name (e.g. `Vision-Pro.local`) or IP address.
@@ -8655,7 +8821,7 @@ def visionpro_connect(host: str = "", ip: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_disconnect"))
+@splicekit_tool("visionpro_disconnect")
 @bridge_tool
 def visionpro_disconnect(host: str = "", ip: str = "") -> str:
     """Disconnect a connected Vision Pro by host name or IP."""
@@ -8670,7 +8836,7 @@ def visionpro_disconnect(host: str = "", ip: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_load_aime"))
+@splicekit_tool("visionpro_load_aime")
 @bridge_tool
 def visionpro_load_aime(path: str) -> str:
     """Load an Apple Immersive Metadata Envelope (.aime) into the IVTSession.
@@ -8682,7 +8848,7 @@ def visionpro_load_aime(path: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_send_aime"))
+@splicekit_tool("visionpro_send_aime")
 @bridge_tool
 def visionpro_send_aime(path: str = "") -> str:
     """Send the currently-loaded AIME (or a specified .aime path) to connected Vision Pros.
@@ -8696,7 +8862,7 @@ def visionpro_send_aime(path: str = "") -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_export_aime"))
+@splicekit_tool("visionpro_export_aime")
 @bridge_tool
 def visionpro_export_aime(path: str) -> str:
     """Export the current IVTSession static metadata to an .aime file on disk."""
@@ -8704,7 +8870,7 @@ def visionpro_export_aime(path: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_set_camera"))
+@splicekit_tool("visionpro_set_camera")
 @bridge_tool
 def visionpro_set_camera(camera_id: str) -> str:
     """Set the session's current camera id. Must match a camera defined in the loaded AIME."""
@@ -8712,7 +8878,7 @@ def visionpro_set_camera(camera_id: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_set_camera_calibration"))
+@splicekit_tool("visionpro_set_camera_calibration")
 @bridge_tool
 def visionpro_set_camera_calibration(
     camera_id: str,
@@ -8740,7 +8906,7 @@ def visionpro_set_camera_calibration(
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_remove_camera"))
+@splicekit_tool("visionpro_remove_camera")
 @bridge_tool
 def visionpro_remove_camera(camera_id: str) -> str:
     """Remove a camera entry from the IVTSession by id."""
@@ -8748,7 +8914,7 @@ def visionpro_remove_camera(camera_id: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_send_mask"))
+@splicekit_tool("visionpro_send_mask")
 @bridge_tool
 def visionpro_send_mask(path: str) -> str:
     """Send a camera mask (.usdz / .json) to connected Vision Pros."""
@@ -8756,7 +8922,7 @@ def visionpro_send_mask(path: str) -> str:
     return _fmt(r)
 
 
-@mcp.tool(annotations=_tool_annotations("visionpro_set_max_clients"))
+@splicekit_tool("visionpro_set_max_clients")
 @bridge_tool
 def visionpro_set_max_clients(max: int) -> str:
     """Set the maximum number of Vision Pro clients that can connect simultaneously."""
@@ -8764,6 +8930,8 @@ def visionpro_set_max_clients(max: int) -> str:
     return _fmt(r)
 
 
-# MCP servers communicate over stdio -- the AI tool framework handles the transport
+# MCP over stdio: the client (Claude Desktop, Claude Code, any MCP client) starts this
+# file as a subprocess and speaks JSON-RPC on its stdin/stdout. While serving, the SDK
+# points fd 1 at stderr so stray prints cannot corrupt the wire.
 if __name__ == "__main__":
     mcp.run(transport="stdio")

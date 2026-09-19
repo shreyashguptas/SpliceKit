@@ -933,6 +933,24 @@ highlight color, others get the base text color.
 and point size from the selected Motion title's CHChannelText channel. `verify_captions()`
 walks connected titles on the timeline and checks text/fontSize against the expected style.
 
+## MCP Server Internals (for contributors)
+
+`mcp/server.py` is one MCP server over stdio on the official MCP Python SDK 2.x
+(`mcp>=2.2,<3` in `mcp/requirements.txt`; `MCPServer` from `mcp.server.mcpserver`,
+protocol revision 2026-07-28, legacy `initialize` handshake still accepted). Every tool
+is registered with `@splicekit_tool("name")`, which attaches the tool's annotations
+(READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / IDEMPOTENT_LOCAL_WRITE_TOOLS) and turns unexpected
+exceptions into a `ToolError` whose text reaches the client. Tools return `-> str`
+(published as structured output `{"result": ...}`); the image tools carry no return
+annotation so they can return text + image content. The 2.x SDK runs sync tools in
+worker threads, so `BridgeConnection.call` holds a lock for each round trip.
+
+```
+make mcp-check         # every tool/resource/prompt over MCP against a fake bridge (no FCP)
+make mcp-check-live    # read from the running patched FCP through the MCP server
+python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_mcp_server_v2.py   # offline, no mcp package needed
+```
+
 ## Additional Documentation
 - `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
 - `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence

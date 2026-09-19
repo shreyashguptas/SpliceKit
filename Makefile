@@ -123,10 +123,12 @@ MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework Core
 MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor install install-check transcribers
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
-# copy of Final Cut Pro, and the MCP server wired into Claude. Safe to re-run.
+# copy of Final Cut Pro, the MCP server (proven over the wire with
+# tests/mcp_server_check.py before it is wired into Claude), and the patched
+# app opened and read from through that server. Safe to re-run.
 install:
 	@bash Scripts/install.sh
 
@@ -177,14 +179,31 @@ MCP_VENV ?= $(HOME)/.venvs/splicekit-mcp
 MCP_PYTHON = $(MCP_VENV)/bin/python
 MCP_REQUIREMENTS = mcp/requirements.txt
 
+# MCP_BOOTSTRAP_PYTHON: the interpreter to build the venv with (install.sh
+# passes the one it found). Otherwise PATH is searched, then Homebrew's opt/
+# directory, because a versioned python that is not Homebrew's current default
+# is keg-only: installed, but not linked into PATH.
+MCP_BOOTSTRAP_PYTHON ?=
 mcp-setup:
 	@PY=""; \
-	for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do \
+	if [ -n "$(MCP_BOOTSTRAP_PYTHON)" ] && "$(MCP_BOOTSTRAP_PYTHON)" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then \
+		PY="$(MCP_BOOTSTRAP_PYTHON)"; \
+	fi; \
+	if [ -z "$$PY" ]; then for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do \
 		p="$$(command -v $$c 2>/dev/null)" || continue; \
 		[ -n "$$p" ] || continue; \
 		"$$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null || continue; \
 		PY="$$p"; break; \
-	done; \
+	done; fi; \
+	if [ -z "$$PY" ]; then \
+		BREW_PREFIX="$$(brew --prefix 2>/dev/null || true)"; \
+		for prefix in $$BREW_PREFIX /opt/homebrew /usr/local; do \
+			for v in 3.14 3.13 3.12 3.11 3.10; do \
+				p="$$prefix/opt/python@$$v/bin/python$$v"; \
+				if [ -x "$$p" ]; then PY="$$p"; break 2; fi; \
+			done; \
+		done; \
+	fi; \
 	if [ -z "$$PY" ]; then \
 		echo "[mcp-setup] No Python 3.10+ found in PATH."; \
 		echo "[mcp-setup] The mcp package requires Python >= 3.10; macOS ships 3.9."; \
@@ -206,7 +225,20 @@ mcp-setup:
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet pip
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet -r $(MCP_REQUIREMENTS)
 	@echo "[mcp-setup] Installed:"; "$(MCP_PYTHON)" -m pip show mcp | awk '/^(Name|Version|Location):/'
-	@echo "[mcp-setup] Done. Point your MCP client `command` at: $(MCP_PYTHON)"
+	@echo "[mcp-setup] Done. Point your MCP client's 'command' at: $(MCP_PYTHON)"
+
+# Prove the server works over the real MCP wire. `mcp-check` needs no Final Cut
+# Pro: it starts mcp/server.py as a stdio subprocess (the way a client does),
+# talks to it with the official SDK and calls every tool against a fake bridge.
+# `mcp-check-live` does the same read-only against the bridge inside the running
+# patched Final Cut Pro. `make install` runs both.
+mcp-check:
+	@test -x "$(MCP_PYTHON)" || { echo "[mcp-check] No MCP virtualenv at $(MCP_PYTHON) — run 'make mcp-setup' first"; exit 1; }
+	@"$(MCP_PYTHON)" tests/mcp_server_check.py
+
+mcp-check-live:
+	@test -x "$(MCP_PYTHON)" || { echo "[mcp-check-live] No MCP virtualenv at $(MCP_PYTHON) — run 'make mcp-setup' first"; exit 1; }
+	@"$(MCP_PYTHON)" tests/mcp_server_check.py --live
 
 mcp-doctor:
 	@echo "== SpliceKit MCP doctor =="
@@ -215,7 +247,7 @@ mcp-doctor:
 	else \
 		echo "[FAIL] venv interpreter missing at $(MCP_PYTHON) — run 'make mcp-setup'"; \
 	fi
-	@if [ -x "$(MCP_PYTHON)" ] && "$(MCP_PYTHON)" -c "import mcp.server.fastmcp" >/dev/null 2>&1; then \
+	@if [ -x "$(MCP_PYTHON)" ] && "$(MCP_PYTHON)" -c "import mcp.server.mcpserver" >/dev/null 2>&1; then \
 		echo "[ok] mcp package:         $$($(MCP_PYTHON) -m pip show mcp | awk '/^Version:/{print $$2}')"; \
 	else \
 		echo "[FAIL] mcp package not importable in venv — run 'make mcp-setup'"; \
@@ -231,10 +263,11 @@ mcp-doctor:
 		echo "[warn] .mcp.json not found in repo root — run ./Scripts/setup-mcp.sh"; \
 	fi
 	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then \
-		echo "[ok] FCP bridge listening on 127.0.0.1:9876"; \
+		echo "[ok] FCP bridge listening on 127.0.0.1:9876 — run 'make mcp-check-live' to drive it through the MCP server"; \
 	else \
 		echo "[warn] No process listening on :9876 — launch the modded Final Cut Pro"; \
 	fi
+	@echo "[i] Full offline proof (every tool over MCP, no FCP needed): make mcp-check"
 
 url-import-tools:
 	@mkdir -p "$(TOOLS_DIR)"

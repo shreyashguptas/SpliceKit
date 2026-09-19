@@ -1123,6 +1123,24 @@ sk.eval("NSApp.delegate.className") -- ObjC runtime bridge
 See `docs/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
 and complete cookbook examples.
 
+## MCP Server Internals (for contributors)
+
+`mcp/server.py` is one MCP server over stdio on the official MCP Python SDK 2.x
+(`mcp>=2.2,<3` in `mcp/requirements.txt`; `MCPServer` from `mcp.server.mcpserver`,
+protocol revision 2026-07-28, legacy `initialize` handshake still accepted). Every tool
+is registered with `@splicekit_tool("name")`, which attaches the tool's annotations
+(READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / IDEMPOTENT_LOCAL_WRITE_TOOLS) and turns unexpected
+exceptions into a `ToolError` whose text reaches the client. Tools return `-> str`
+(published as structured output `{"result": ...}`); the image tools carry no return
+annotation so they can return text + image content. The 2.x SDK runs sync tools in
+worker threads, so `BridgeConnection.call` holds a lock for each round trip.
+
+```
+make mcp-check         # every tool/resource/prompt over MCP against a fake bridge (no FCP)
+make mcp-check-live    # read from the running patched FCP through the MCP server
+python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_mcp_server_v2.py   # offline, no mcp package needed
+```
+
 ## Additional Documentation
 - `docs/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
 - `docs/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)

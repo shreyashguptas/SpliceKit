@@ -127,7 +127,14 @@ usage() {
     --no-copy        Skip copying (use existing modded copy)
     --rebuild        Rebuild dylib only and redeploy
     --uninstall      Remove the modded copy
+    --yes            Answer yes to the confirmation prompts (low disk space,
+                     overwrite an existing unpatched copy)
     --help           Show this help
+
+  Environment:
+    SPLICEKIT_SKIP_MCP_CONFIG=1  Skip step 7 (writing .mcp.json). `make install`
+                                 sets this: it verifies the MCP server first and
+                                 writes the configs itself afterwards.
 
   What it does:
     1. Copies Final Cut Pro to a writable location
@@ -159,6 +166,7 @@ EOF
 NO_COPY=false
 REBUILD_ONLY=false
 UNINSTALL=false
+ASSUME_YES=false
 APP_NAME_OVERRIDE="${APP_NAME_OVERRIDE:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -169,6 +177,7 @@ while [[ $# -gt 0 ]]; do
         --no-copy)  NO_COPY=true; shift ;;
         --rebuild)  REBUILD_ONLY=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
+        --yes|-y)   ASSUME_YES=true; shift ;;
         --help|-h)  usage ;;
         *)          err "Unknown option: $1"; usage ;;
     esac
@@ -292,9 +301,13 @@ log "Final Cut Pro: v$FCP_VERSION at $SOURCE_APP"
 AVAIL_GB=$(df -g "$HOME" | tail -1 | awk '{print $4}')
 if [[ $AVAIL_GB -lt 8 ]]; then
     warn "Low disk space: ${AVAIL_GB}GB available (need ~7GB)"
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    if $ASSUME_YES; then
+        warn "--yes: continuing anyway"
+    else
+        read -p "Continue anyway? [y/N] " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    fi
 fi
 log "Disk space: ${AVAIL_GB}GB available"
 
@@ -306,8 +319,15 @@ if ! $NO_COPY && ! $REBUILD_ONLY; then
 
     if [[ -d "$MODDED_APP" ]]; then
         warn "Modded copy already exists at $MODDED_APP"
-        read -p "Overwrite? [y/N] " -n 1 -r
-        echo
+        if $ASSUME_YES; then
+            # An unpatched copy at the destination is what a failed earlier
+            # attempt leaves behind; a fresh copy is the reliable way forward.
+            REPLY=y
+            warn "--yes: replacing it with a fresh copy"
+        else
+            read -p "Overwrite? [y/N] " -n 1 -r
+            echo
+        fi
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             rm -rf "$MODDED_APP"
         else
@@ -633,7 +653,13 @@ MCP_SERVER="$REPO_DIR/mcp/server.py"
 # tell the user they are configured when they are not.
 MCP_STATUS_LINE="Not configured — run ./Scripts/setup-mcp.sh"
 
-if [[ -f "$MCP_SERVER" ]]; then
+if [[ "${SPLICEKIT_SKIP_MCP_CONFIG:-}" == "1" ]]; then
+    # `make install` runs the MCP server's full self-check and writes the configs
+    # itself after this script returns. Writing .mcp.json here would point a
+    # client at a server nothing has verified yet.
+    info "Left to make install (Scripts/setup-mcp.sh runs next)"
+    MCP_STATUS_LINE="Set up by the next step of make install"
+elif [[ -f "$MCP_SERVER" ]]; then
     # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
     # package, which makes the server fail to start with no obvious cause.
     # Honour the same MCP_VENV override the Makefile accepts, and require the
@@ -648,7 +674,7 @@ if [[ -f "$MCP_SERVER" ]]; then
     esac
 
     MCP_PYTHON="$MCP_VENV_DIR/bin/python"
-    if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
+    if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
         # Fall back to an absolute system python3: MCP clients are launched by
         # the OS and do not necessarily inherit this shell's PATH.
         MCP_FALLBACK="$(command -v python3 || true)"
@@ -671,7 +697,7 @@ if [[ -f "$MCP_SERVER" ]]; then
             MCP_FALLBACK="/usr/bin/python3"
         fi
 
-        if [[ -x "$MCP_FALLBACK" ]] && "$MCP_FALLBACK" -c "import mcp.server.fastmcp" 2>/dev/null; then
+        if [[ -x "$MCP_FALLBACK" ]] && "$MCP_FALLBACK" -c "import mcp.server.mcpserver" 2>/dev/null; then
             MCP_PYTHON="$MCP_FALLBACK"
             warn "No MCP virtualenv at $MCP_VENV_DIR — using $MCP_PYTHON"
         else

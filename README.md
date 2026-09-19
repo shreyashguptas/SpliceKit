@@ -43,7 +43,7 @@ Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing a
 
 *Claude (or any other LLM) can drive your editor — and teach it new tricks.*
 
-SpliceKit ships with an MCP server that exposes ~200 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
+SpliceKit ships with an MCP server (official MCP Python SDK 2.x) that exposes 228 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
 
 - *"cut this 40-minute interview down to its best moments"*
 - *"remove the silences from this podcast, add captions, and export"*
@@ -139,25 +139,53 @@ Drop Blackmagic RAW (`.braw`) and VP9/WebM files straight onto your timeline —
 
 ## Install
 
-One command, from a clean clone of this repo:
+You need a Mac with Final Cut Pro in `/Applications`. Quit Final Cut Pro and Claude
+Desktop first (the install writes Claude Desktop's config, and Claude Desktop overwrites
+that file while it runs). Then, from a clone of this repo:
 
 ```bash
+git clone https://github.com/shreyashguptas/SpliceKit.git
+cd SpliceKit
 make install
 ```
 
-That is the supported way to install this fork. It is idempotent — run it again any
-time, it only does the work that is still missing.
+That one command is the whole install. It is safe to re-run at any time: every step
+checks whether its work is already done, and a re-run after pulling new commits rebuilds
+the dylib into the app you already have (quit the patched Final Cut Pro before re-running;
+the script refuses to replace the framework of a running app).
 
-It does three things:
+What it does, in order, and what it verifies before it moves on:
 
-1. **Ensures a Python 3.10+ interpreter.** The `mcp` package requires 3.10 or newer and
-   macOS ships 3.9, so on a fresh Mac this installs `python@3.12` via Homebrew.
-2. **Patches Final Cut Pro.** Copies your install to `/Applications/Final Cut Pro Modified.app`, injects the SpliceKit dylib, and re-signs it.
-   **Your original Final Cut Pro is never touched**, and it keeps its own name so the two
-   are easy to tell apart.
-3. **Wires up the MCP server**, so Claude Desktop and Claude Code can drive the editor.
+1. **Xcode Command Line Tools** (`clang`, `codesign`, `otool`). Offers to install them
+   if they are missing.
+2. **Python 3.10+.** The `mcp` package needs it and macOS ships 3.9, so on a fresh Mac
+   this offers to install `python@3.12` through Homebrew (and Homebrew itself if needed).
+3. **A patched copy of Final Cut Pro** at `/Applications/Final Cut Pro Modified.app`:
+   your install is copied (about 7 GB), the SpliceKit dylib built from this checkout is
+   injected, the copy is re-signed, its entitlements are verified and its signature is
+   checked. **Your original Final Cut Pro is never touched.**
+4. **The MCP server** in its own virtualenv (`~/.venvs/splicekit-mcp`), on the official
+   MCP Python SDK 2.x (`mcp>=2.2,<3`). Before anything is wired into a client, the server
+   is started the way a client starts it (a subprocess speaking MCP over stdio) and driven
+   with the official SDK: the handshake in both the current and the legacy connect modes,
+   and **every tool, resource and prompt** against a stand-in bridge (every tool except
+   `deploy_and_restart`, which would relaunch Final Cut Pro). A server that fails this is
+   not configured anywhere.
+5. **Claude Desktop and Claude Code configs** pointing at that server (other servers in
+   those files are left alone; a backup of the Claude Desktop config is kept).
+6. **The patched Final Cut Pro is opened** (it asks first) and, once its bridge answers
+   on `127.0.0.1:9876`, read from through the MCP server with the same tools Claude uses
+   (nothing is edited: the bridge, the ObjC runtime, and the timeline as far as an open
+   project allows). The install reports "verified" only after this passes; with
+   `--no-launch`, or if you decline the launch, it reports the offline verification and
+   tells you to run `make mcp-check-live` once the app is open.
 
-Then open the app and press **Cmd+Shift+P** for the Command Palette.
+The prompts are just confirmations (arrow keys, Return). `./Scripts/install.sh --yes`
+answers them for you (including the patcher's own questions); `--no-launch` does
+everything except open Final Cut Pro.
+
+Then, inside the patched app, press **Cmd+Shift+P** for the Command Palette, and fully
+quit and reopen Claude Desktop so it reloads its config.
 
 To see what is and isn't set up without changing anything:
 
@@ -292,7 +320,7 @@ in Claude Desktop, then use the JSON shown further down.
 make mcp-setup
 ```
 
-That creates an isolated Python virtualenv at `~/.venvs/splicekit-mcp` and installs the pinned dependencies from `mcp/requirements.txt`.
+That creates an isolated Python virtualenv at `~/.venvs/splicekit-mcp` and installs the dependencies from `mcp/requirements.txt` (the official SDK, kept inside its 2.x major version so security and bug fixes arrive on the next `make install`, while the self-check below catches a release that would break anything).
 
 If you'd rather do it by hand:
 
@@ -301,19 +329,35 @@ python3 -m venv ~/.venvs/splicekit-mcp
 ~/.venvs/splicekit-mcp/bin/python -m pip install -r mcp/requirements.txt
 ```
 
+### Which MCP this is
+
+The server is built on the **official MCP Python SDK, major version 2** (`mcp>=2.2,<3`
+in `mcp/requirements.txt`; `MCPServer` from `mcp.server.mcpserver`), which implements the
+current stable protocol revision, **2026-07-28**. It also accepts the legacy `initialize` handshake, so clients
+still on the 2025 protocol revisions (which is most of them today) connect the same way;
+the check below proves both modes on every install. Every tool publishes the standard
+annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, a
+title), the screenshot and clip-frame tools return real MCP image content, and the
+server reports SpliceKit's version to the client. Nothing in it is Claude-specific.
+
 ### Verify everything is wired up
 
 ```bash
-make mcp-doctor
+make mcp-doctor        # is the venv there, does mcp import, does .mcp.json point at it, is the bridge up
+make mcp-check         # the full proof, no Final Cut Pro needed: every tool over MCP against a stand-in bridge
+make mcp-check-live    # with the patched Final Cut Pro running: read from it through the MCP server
 ```
 
-Checks that the venv exists, `mcp` imports cleanly, `.mcp.json` points at the venv, and the FCP bridge is listening on `127.0.0.1:9876`.
+`make install` runs the last two for you. `make mcp-check` starts `mcp/server.py` as a
+stdio subprocess, connects with the official SDK in both connect modes, lists the tools,
+resources and prompts, calls every tool (except `deploy_and_restart`), reads every
+resource and renders every prompt. It takes a few seconds and needs nothing but the
+virtualenv.
 
 ### Point your MCP client at the server
 
-Use the virtual environment's Python as the MCP `command`. The `args` path depends on how you installed SpliceKit:
-
-**From a repo checkout:**
+Use the virtual environment's Python as the MCP `command` and this checkout's server as
+the argument:
 
 ```json
 {
@@ -321,19 +365,6 @@ Use the virtual environment's Python as the MCP `command`. The `args` path depen
     "splicekit": {
       "command": "/Users/yourname/.venvs/splicekit-mcp/bin/python",
       "args": ["/absolute/path/to/SpliceKit/mcp/server.py"]
-    }
-  }
-}
-```
-
-**From the packaged installer:**
-
-```json
-{
-  "mcpServers": {
-    "splicekit": {
-      "command": "/Users/yourname/.venvs/splicekit-mcp/bin/python",
-      "args": ["/Applications/SpliceKit.app/Contents/Resources/mcp/server.py"]
     }
   }
 }
@@ -359,7 +390,7 @@ Short answers: **Yes, it's safe. Yes, it's legal. No, Apple won't ban you.**
 - **Fully reversible, any time.** SpliceKit never changes how FCP stores your projects, libraries, or media. Quit the patched copy whenever you want, open the exact same library in your vanilla App Store FCP, and keep editing with zero loss. Nothing is locked in, nothing is migrated.
 - **Same safety level as any FXPlug 4 plugin — with more headroom.** SpliceKit plugins run at the same level of trust as Apple's own FXPlug system, and the architecture gives us more tools than FXPlug does. Expensive work runs on background threads, hot paths are explicitly designed not to contend, and state changes are guarded so plugins don't step on FCP's internals. Where an FXPlug plugin has to hope FCP recovers from a performance spike, SpliceKit is built to prevent the spike from happening in the first place.
 - **SpliceKit actively fixes native FCP bugs.** A handful of long-standing issues in FCP are already patched in the modded copy, which means the patched build is measurably more stable than stock in those areas — [here's a video example](https://youtu.be/SNUpQvBef0k).
-- **Automatic crash reporting is built in** (via Sentry) for both the patcher and the injected runtime, so anything unexpected surfaces immediately and gets turned around fast. Sharing logs in the [Discord](https://discord.com/invite/HD3FPc4Azu) or on [GitHub Issues](https://github.com/elliotttate/SpliceKit/issues) is still useful for extra context.
+- **No telemetry.** This fork removed the Sentry crash reporter that upstream bundles; nothing is sent anywhere. The runtime writes its log to `~/Library/Logs/SpliceKit/splicekit.log`, which is what to share in the [Discord](https://discord.com/invite/HD3FPc4Azu) or on [GitHub Issues](https://github.com/elliotttate/SpliceKit/issues) when something goes wrong.
 
 The full plain-English version is in [docs/WHAT_IS_SPLICEKIT.md](docs/WHAT_IS_SPLICEKIT.md).
 

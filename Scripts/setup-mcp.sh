@@ -81,21 +81,49 @@ log "MCP server: $MCP_SERVER"
 step "Python environment"
 # ------------------------------------------------------------------
 # Probe the import the server actually performs (mcp/server.py imports
-# mcp.server.fastmcp). A bare `import mcp` can succeed against a partial install
+# mcp.server.mcpserver). A bare `import mcp` can succeed against a partial install
 # and leave us writing a config that fails at launch. Matches `make mcp-doctor`.
-if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
+if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
     log "Ready: $VENV_PYTHON ($("$VENV_PYTHON" --version 2>&1))"
 elif $CHECK_ONLY; then
     warn "Missing or incomplete — run without --check to create it"
 else
     warn "Creating virtualenv (this takes a few seconds)…"
-    # Pass the resolved path explicitly so make cannot pick a different one.
-    make -C "$REPO_DIR" MCP_VENV="$VENV_DIR" mcp-setup
-    if ! "$VENV_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
+    # Pass the resolved path explicitly so make cannot pick a different one, and
+    # the interpreter install.sh found (a Homebrew keg-only python is not on PATH).
+    make_args=(MCP_VENV="$VENV_DIR")
+    if [[ -n "${SPLICEKIT_BOOTSTRAP_PYTHON:-}" ]]; then
+        make_args+=(MCP_BOOTSTRAP_PYTHON="$SPLICEKIT_BOOTSTRAP_PYTHON")
+    fi
+    make -C "$REPO_DIR" "${make_args[@]}" mcp-setup
+    if ! "$VENV_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
         err "Virtualenv created but the mcp package failed to import."
         exit 1
     fi
     log "Ready: $VENV_PYTHON"
+fi
+
+# ------------------------------------------------------------------
+step "MCP server self-check"
+# ------------------------------------------------------------------
+# Start mcp/server.py the way a client does (a subprocess speaking MCP over
+# stdio) and drive it with the official SDK: the handshake in both connect
+# modes, the tool/resource/prompt listings and, in the full run, every tool,
+# resource and prompt against a fake bridge. Needs no Final Cut Pro. This is the
+# proof that the configs written below point at a server that actually works;
+# a server that fails here is not wired into anything.
+CHECK_SCRIPT="$REPO_DIR/tests/mcp_server_check.py"
+if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
+    if $CHECK_ONLY; then
+        "$VENV_PYTHON" "$CHECK_SCRIPT" --quick || warn "Self-check failed — run 'make mcp-check' for the full report"
+    elif ! "$VENV_PYTHON" "$CHECK_SCRIPT"; then
+        err "The MCP server failed its self-check (details above)."
+        err "Not writing client configs for a server that does not work. Fix the failure"
+        err "(or report it with the output above), then re-run: make install"
+        exit 1
+    fi
+else
+    warn "Skipping the self-check: no working MCP virtualenv"
 fi
 
 # ------------------------------------------------------------------
@@ -168,11 +196,13 @@ step "Claude Code user scope"
 if ! command -v claude >/dev/null 2>&1; then
     warn "The 'claude' CLI is not on PATH — skipping user-scope registration"
     warn "Claude Code will still work when run from $REPO_DIR"
-elif claude mcp get splicekit >/dev/null 2>&1; then
+elif claude mcp get splicekit 2>/dev/null | grep -q -F "$MCP_SERVER"; then
     log "Already registered at user scope (works from any directory)"
 elif $CHECK_ONLY; then
-    warn "Not registered at user scope — run without --check to add it"
+    warn "Not registered at user scope (or registered for another checkout) — run without --check to fix"
 else
+    # A stale entry (an older checkout or venv path) is replaced, not kept.
+    claude mcp remove --scope user splicekit >/dev/null 2>&1 || true
     if claude mcp add --scope user splicekit "$VENV_PYTHON" "$MCP_SERVER" >/dev/null 2>&1; then
         log "Registered at user scope — Claude Code can use it from any directory"
     else
@@ -244,18 +274,21 @@ fi
 step "Next steps"
 # ------------------------------------------------------------------
 cat <<EOF
-1. Quit Final Cut Pro if it's open. The patched copy and the App Store copy
-   share one app identity, so opening one while the other runs just switches
-   to the copy already running.
-2. Open the patched Final Cut Pro from /Applications and leave it
-   open — the MCP server talks to the bridge inside the running app.
-3. Fully quit Claude Desktop (Cmd+Q) and reopen it, so it reloads the config.
-4. Ask Claude to do something in Final Cut Pro. Re-run this script with
-   --check at any time to confirm the wiring.
+1. The patched Final Cut Pro must be the running copy (make install opens
+   it for you). The patched copy and the App Store copy share one app
+   identity, so opening one while the other runs just switches to the copy
+   already running — quit the original first.
+2. Fully quit Claude Desktop (Cmd+Q) and reopen it, so it reloads the config.
+3. Ask Claude to do something in Final Cut Pro. Re-run this script with
+   --check at any time to confirm the wiring, or 'make mcp-check-live' to
+   drive the running Final Cut Pro through the MCP server (read-only).
 EOF
 
 if $CLAUDE_DESKTOP_SKIPPED; then
     echo
     err "Claude Desktop was NOT configured — it was running. Quit it (Cmd+Q) and"
     err "re-run 'make install', or it will not see the splicekit server."
+    # Distinct exit code so make install can say so in its final banner
+    # instead of reporting a fully verified setup.
+    exit 3
 fi

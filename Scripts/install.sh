@@ -10,7 +10,11 @@
 #   2. Xcode Command Line Tools (clang, codesign, otool)
 #   3. a Python 3.10+ interpreter (the mcp package needs it; macOS ships 3.9)
 #   4. a patched, renamed copy of Final Cut Pro with the SpliceKit dylib injected
-#   5. the MCP server wired into Claude Desktop and Claude Code
+#   5. the MCP server (official MCP Python SDK 2.x) in its own virtualenv, proven
+#      over the real MCP wire: every tool, resource and prompt, before it is
+#      wired into Claude Desktop and Claude Code
+#   6. the patched Final Cut Pro opened and driven through that MCP server
+#      (read-only), so "it works" is verified, not assumed
 #
 # Safe to re-run: every step checks whether it already did its work.
 #
@@ -18,6 +22,7 @@
 #   make install                    # guided, asks before installing anything
 #   ./Scripts/install.sh --check    # report status, change nothing
 #   ./Scripts/install.sh --yes      # assume yes, never prompt (CI / scripting)
+#   ./Scripts/install.sh --no-launch  # do everything except open Final Cut Pro
 #
 set -euo pipefail
 
@@ -28,11 +33,26 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="${SPLICEKIT_APP_NAME:-Final Cut Pro Modified}"
 DEST_DIR="${SPLICEKIT_DEST_DIR:-/Applications}"
 SOURCE_APP="${SPLICEKIT_SOURCE_APP:-}"
-PYTHON_FORMULA="python@3.12"
+PYTHON_FORMULA="python@3.13"
 DISK_NEEDED_GB=10
 
 CHECK_ONLY=false
 ASSUME_YES=false
+NO_LAUNCH=false
+BRIDGE_PORT=9876
+LAUNCH_WAIT_SECONDS="${SPLICEKIT_LAUNCH_WAIT:-180}"
+LIVE_STATUS="skipped"          # verified | skipped | failed  (set by verify_live)
+CLAUDE_DESKTOP_SKIPPED=false   # set when setup-mcp.sh could not write its config
+
+# The MCP virtualenv, resolved the same way Scripts/setup-mcp.sh and the
+# Makefile resolve it, so every step agrees on which interpreter runs the server.
+VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
+case "$VENV_DIR" in
+    /*) ;;
+    *)  VENV_DIR="$REPO_DIR/$VENV_DIR" ;;
+esac
+VENV_PYTHON="$VENV_DIR/bin/python"
+CHECK_SCRIPT="$REPO_DIR/tests/mcp_server_check.py"
 
 RED=$'\033[0;31m';   GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m';  CYAN=$'\033[0;36m';  DIM=$'\033[2m'
@@ -51,7 +71,8 @@ while [[ $# -gt 0 ]]; do
         --source)   SOURCE_APP="$2"; shift 2 ;;
         --check)    CHECK_ONLY=true; shift ;;
         --yes|-y)   ASSUME_YES=true; shift ;;
-        -h|--help)  sed -n '2,22p' "$0" | sed 's/^#//;s/^ //'; exit 0 ;;
+        --no-launch) NO_LAUNCH=true; shift ;;
+        -h|--help)  awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
         *) err "Unknown option: $1"; exit 2 ;;
     esac
 done
@@ -100,13 +121,16 @@ choose() {
     }
 
     # Hide the cursor while the menu is live, and always put it back — including
-    # on Ctrl-C, or the user is left with an invisible cursor in their shell.
+    # on Ctrl-C, which aborts the whole script (a global trap that only restored
+    # the cursor would swallow Ctrl-C for the rest of the run). The traps are
+    # removed again on every way out of this function.
     printf '\033[?25l' >&2
-    trap 'printf "\033[?25h" >&2' RETURN INT TERM
+    trap 'printf "\033[?25h" >&2; exit 130' INT TERM
+    _leave() { printf '\033[?25h' >&2; trap - INT TERM; }
 
     _render
     while true; do
-        IFS= read -rsn1 key </dev/tty || { printf '\033[?25h' >&2; return 1; }
+        IFS= read -rsn1 key </dev/tty || { _leave; return 1; }
         case "$key" in
             $'\x1b')
                 # An arrow key arrives as ESC [ A/B. A lone ESC is the user
@@ -121,7 +145,7 @@ choose() {
                 # which failed the read and turned every arrow key into a
                 # cancel. Fractional timeouts need bash 4+.
                 if ! IFS= read -rsn1 -t 1 rest </dev/tty; then
-                    printf '\033[?25h' >&2
+                    _leave
                     return 1
                 fi
                 [[ "$rest" == '[' || "$rest" == 'O' ]] || continue
@@ -134,8 +158,8 @@ choose() {
                 ;;
             k) ((selected = (selected - 1 + count) % count)) ;;
             j) ((selected = (selected + 1) % count)) ;;
-            q) printf '\033[?25h' >&2; return 1 ;;
-            '') printf '\033[?25h' >&2; printf '\n' >&2; echo $((selected + 1)); return 0 ;;
+            q) _leave; return 1 ;;
+            '') _leave; printf '\n' >&2; echo $((selected + 1)); return 0 ;;
         esac
         # Redraw in place: one line per option plus the hint line.
         printf '\033[%dA' $((count + 1)) >&2
@@ -163,12 +187,22 @@ confirm_install() {
 have_brew()  { command -v brew >/dev/null 2>&1; }
 
 find_python310() {
-    local c p
+    local c p prefix v brew_prefix
     for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
         p="$(command -v "$c" 2>/dev/null)" || continue
         [[ -n "$p" ]] || continue
         "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null || continue
         printf '%s\n' "$p"; return 0
+    done
+    # A Homebrew python that is not the current default formula is keg-only:
+    # installed under opt/, but not linked into PATH.
+    brew_prefix="$(brew --prefix 2>/dev/null || true)"
+    for prefix in ${brew_prefix:+"$brew_prefix"} /opt/homebrew /usr/local; do
+        for v in 3.14 3.13 3.12 3.11 3.10; do
+            p="$prefix/opt/python@$v/bin/python$v"
+            [[ -x "$p" ]] || continue
+            printf '%s\n' "$p"; return 0
+        done
     done
     return 1
 }
@@ -187,6 +221,14 @@ is_patched() {
         otool -L "$MODDED_APP/Contents/MacOS/Final Cut Pro" 2>/dev/null | grep -q SpliceKit
 }
 
+bridge_listening() { nc -z 127.0.0.1 "$BRIDGE_PORT" >/dev/null 2>&1; }
+
+# The App Store copy and the patched copy share one bundle identity, so while the
+# original runs, opening the patched one only switches to the original.
+stock_fcp_running() {
+    pgrep -fl 'Contents/MacOS/Final Cut Pro$' 2>/dev/null | grep -v -F "$MODDED_APP" | grep -q .
+}
+
 # ============================================================
 # Step 0: macOS + Xcode Command Line Tools
 # ============================================================
@@ -198,17 +240,21 @@ ensure_toolchain() {
         exit 1
     fi
 
-    local missing=()
+    # /usr/bin/clang and /usr/bin/otool exist on every Mac as shims that only open
+    # the installer dialog, so finding them proves nothing: an active developer
+    # directory (xcode-select -p) is what says the tools are really installed.
+    local devdir="" missing=()
+    devdir="$(xcode-select -p 2>/dev/null || true)"
     for t in clang codesign otool; do
         command -v "$t" >/dev/null 2>&1 || missing+=("$t")
     done
 
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        log "Present: $(xcode-select -p 2>/dev/null || echo 'command line tools')"
+    if [[ -n "$devdir" && -d "$devdir" && ${#missing[@]} -eq 0 ]]; then
+        log "Present: $devdir"
         return 0
     fi
 
-    warn "Missing build tools: ${missing[*]}"
+    warn "Missing build tools: ${missing[*]:-Command Line Tools not selected (xcode-select -p failed)}"
     $CHECK_ONLY && { info "Would install with: xcode-select --install"; return 1; }
 
     if confirm_install "Xcode Command Line Tools" "xcode-select --install"; then
@@ -231,6 +277,7 @@ ensure_brew() {
     $CHECK_ONLY && { info "Would install from https://brew.sh"; return 1; }
 
     if confirm_install "Homebrew" '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'; then
+        if $ASSUME_YES || ! $INTERACTIVE; then export NONINTERACTIVE=1; fi
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
         # A fresh install is not on PATH in this shell yet.
         for p in /opt/homebrew/bin/brew /usr/local/bin/brew; do
@@ -252,6 +299,7 @@ ensure_python() {
     local py
     if py="$(find_python310)"; then
         log "Found: $py ($("$py" --version 2>&1))"
+        export SPLICEKIT_BOOTSTRAP_PYTHON="$py"   # setup-mcp.sh / make mcp-setup build the venv with it
         return 0
     fi
 
@@ -269,14 +317,15 @@ ensure_python() {
         }
     fi
 
-    if confirm_install "Python 3.12" "brew install $PYTHON_FORMULA"; then
+    if confirm_install "Python 3.13" "brew install $PYTHON_FORMULA"; then
         brew install "$PYTHON_FORMULA"
         if py="$(find_python310)"; then
             log "Installed: $py ($("$py" --version 2>&1))"
+            export SPLICEKIT_BOOTSTRAP_PYTHON="$py"
             return 0
         fi
-        err "Installed $PYTHON_FORMULA but no Python 3.10+ is on PATH."
-        err "Check 'brew doctor' and that $(brew --prefix 2>/dev/null)/bin is on your PATH."
+        err "Installed $PYTHON_FORMULA but found no Python 3.10+ on PATH or under $(brew --prefix 2>/dev/null)/opt."
+        err "Check 'brew doctor', then re-run: make install"
         exit 1
     fi
 
@@ -312,7 +361,7 @@ ensure_patched_app() {
         fi
 
         info "Rebuilding the dylib from current source and redeploying..."
-        "$REPO_DIR/patcher/patch_fcp.sh" --dest "$DEST_DIR" --app-name "$APP_NAME" --rebuild
+        SPLICEKIT_SKIP_MCP_CONFIG=1 "$REPO_DIR/patcher/patch_fcp.sh" --dest "$DEST_DIR" --app-name "$APP_NAME" --rebuild ${PATCHER_YES[@]+"${PATCHER_YES[@]}"}
         return 0
     fi
 
@@ -349,20 +398,102 @@ ensure_patched_app() {
         [[ "$pick" == "1" ]] || { warn "Skipped patching."; return 0; }
     fi
 
-    local args=(--dest "$DEST_DIR" --app-name "$APP_NAME" --source "$src")
-    "$REPO_DIR/patcher/patch_fcp.sh" "${args[@]}"
+    local args=(--dest "$DEST_DIR" --app-name "$APP_NAME" --source "$src" ${PATCHER_YES[@]+"${PATCHER_YES[@]}"})
+    # The MCP config is written by ensure_mcp, after the server passed its self-check.
+    SPLICEKIT_SKIP_MCP_CONFIG=1 "$REPO_DIR/patcher/patch_fcp.sh" "${args[@]}"
 }
 
 # ============================================================
 # Step 4: MCP server
 # ============================================================
+# setup-mcp.sh creates the virtualenv (mcp 2.x, pinned in mcp/requirements.txt),
+# runs tests/mcp_server_check.py — the server as a stdio subprocess, driven by
+# the official SDK, every tool/resource/prompt against a fake bridge — and only
+# then writes the Claude Desktop / Claude Code configs.
 ensure_mcp() {
     step "MCP server"
     if $CHECK_ONLY; then
         "$REPO_DIR/Scripts/setup-mcp.sh" --check
-    else
-        "$REPO_DIR/Scripts/setup-mcp.sh"
+        return 0
     fi
+    local rc=0
+    "$REPO_DIR/Scripts/setup-mcp.sh" || rc=$?
+    case $rc in
+        0) ;;
+        3) CLAUDE_DESKTOP_SKIPPED=true ;;   # everything else done; Claude Desktop was running
+        *) err "MCP setup failed (exit $rc). Nothing was wired up."; exit "$rc" ;;
+    esac
+}
+
+# ============================================================
+# Step 5: Drive the patched Final Cut Pro through the MCP server
+# ============================================================
+# The offline check proves the server; this proves the whole chain on this Mac:
+# the patched app launches, its bridge answers on 127.0.0.1:9876, and the MCP
+# server can read from it (read-only tools only, nothing is edited). Returns 0
+# when verified, 1 when it could not be verified (the caller decides how loud).
+verify_live() {
+    step "Final Cut Pro through the MCP server"
+
+    if [[ ! -x "$VENV_PYTHON" ]]; then
+        warn "No MCP virtualenv at $VENV_PYTHON — nothing to drive the app with"
+        LIVE_STATUS="skipped"; return 1
+    fi
+    if ! is_patched; then
+        warn "No patched Final Cut Pro at $MODDED_APP — nothing to verify against"
+        LIVE_STATUS="skipped"; return 1
+    fi
+
+    if ! bridge_listening; then
+        if $CHECK_ONLY || $NO_LAUNCH; then
+            warn "The patched Final Cut Pro is not running (nothing on 127.0.0.1:$BRIDGE_PORT)."
+            info "Open it, then run:  make mcp-check-live"
+            LIVE_STATUS="skipped"; return 1
+        fi
+        if stock_fcp_running; then
+            err "The original Final Cut Pro is running. It shares an app identity with the"
+            err "patched copy, so opening the patched copy would only switch to the original."
+            err "Quit it (Cmd+Q), then run:  make mcp-check-live"
+            LIVE_STATUS="failed"; return 1
+        fi
+        if ! $ASSUME_YES && $INTERACTIVE; then
+            local pick
+            pick="$(choose "Open \"$APP_NAME\" now and verify it through the MCP server? (read-only; leave it open afterwards)" \
+                "Yes — open it and verify" \
+                "No — skip; I will run 'make mcp-check-live' later")" || { LIVE_STATUS="skipped"; return 1; }
+            [[ "$pick" == "1" ]] || { warn "Live check skipped."; LIVE_STATUS="skipped"; return 1; }
+        fi
+        info "Opening \"$APP_NAME\" (the first launch can take a while; answer any dialog it shows)…"
+        if ! open "$MODDED_APP"; then
+            err "macOS refused to open $MODDED_APP"
+            LIVE_STATUS="failed"; return 1
+        fi
+        local waited=0
+        printf '  waiting for the bridge on 127.0.0.1:%s (up to %ss) ' "$BRIDGE_PORT" "$LAUNCH_WAIT_SECONDS"
+        while ! bridge_listening; do
+            sleep 2
+            waited=$((waited + 2))
+            if (( waited % 10 == 0 )); then printf '.'; fi
+            if (( waited >= LAUNCH_WAIT_SECONDS )); then
+                printf '\n'
+                err "No bridge on 127.0.0.1:$BRIDGE_PORT after ${waited}s."
+                err "If Final Cut Pro is showing a dialog, answer it and leave the app open, then run:"
+                err "  make mcp-check-live        (SPLICEKIT_LAUNCH_WAIT=300 make install waits longer)"
+                LIVE_STATUS="failed"; return 1
+            fi
+        done
+        printf '\n'
+        log "Bridge answered after ${waited}s"
+    else
+        log "Bridge already live on 127.0.0.1:$BRIDGE_PORT"
+    fi
+
+    # The check itself keeps retrying bridge_status for a while: the port opens
+    # when the app finishes launching, but the main thread can still be busy.
+    if "$VENV_PYTHON" "$CHECK_SCRIPT" --live; then
+        LIVE_STATUS="verified"; return 0
+    fi
+    LIVE_STATUS="failed"; return 1
 }
 
 # ============================================================
@@ -377,30 +508,87 @@ if $CHECK_ONLY; then
     ensure_python      || true
     ensure_patched_app || true
     ensure_mcp         || true
+    verify_live        || true
     printf '\n'; info "Check complete — nothing was changed."
     exit 0
 fi
+
+# The patcher asks its own yes/no questions (low disk space, an unpatched copy
+# left behind by an earlier attempt); forward the no-prompt choice to it.
+# (Expanded as ${PATCHER_YES[@]+"${PATCHER_YES[@]}"}: macOS bash 3.2 treats an
+# empty array under set -u as an unbound variable.)
+PATCHER_YES=()
+if $ASSUME_YES || ! $INTERACTIVE; then PATCHER_YES=(--yes); fi
 
 ensure_toolchain
 ensure_python
 ensure_patched_app
 ensure_mcp
+verify_live || true
 
 step "Done"
+EXIT_CODE=0
+case "$LIVE_STATUS" in
+    verified)
 cat <<EOF
 
-Open the patched app:
-  open "$MODDED_APP"
+Verified on this Mac:
+  - "$APP_NAME" is patched, running, and its bridge answers on 127.0.0.1:9876
+  - the MCP server (official MCP SDK 2.x) passed its full self-check: every
+    tool, resource and prompt over MCP against a stand-in bridge
+  - the same server read from the running Final Cut Pro (bridge, ObjC runtime,
+    and the timeline as far as an open project allowed — see the check above)
 
-Inside it, press Cmd+Shift+P for the Command Palette.
+Leave "$APP_NAME" open. Inside it, press Cmd+Shift+P for the Command Palette.
+EOF
+        ;;
+    skipped)
+cat <<EOF
+
+Installed and verified offline: "$APP_NAME" is patched, and the MCP server
+passed its full self-check (every tool, resource and prompt over MCP).
+The live step — reading from the running Final Cut Pro — was skipped, so run
+it once the app is open:
+
+  open "$MODDED_APP"        # leave it open
+  make mcp-check-live       # read-only proof through the MCP server
+EOF
+        ;;
+    *)
+cat <<EOF
+
+Installed and verified offline, but the last step — reading from the running
+Final Cut Pro through the MCP server — failed (see above). Quit any original
+Final Cut Pro, then:
+
+  open "$MODDED_APP"        # leave it open; answer any dialog it shows
+  make mcp-check-live       # read-only proof through the MCP server
+EOF
+        EXIT_CODE=1
+        ;;
+esac
+
+if $CLAUDE_DESKTOP_SKIPPED; then
+cat <<EOF
+
+Claude Desktop was NOT configured: it was running while the config had to be
+written. Quit it completely (Cmd+Q) and re-run:  make install
+EOF
+    EXIT_CODE=1
+else
+cat <<EOF
 
 For Claude to drive Final Cut Pro:
-  1. Leave the patched Final Cut Pro running — the MCP server talks to the
-     bridge inside it on 127.0.0.1:9876.
-  2. Fully quit Claude Desktop (Cmd+Q) and reopen it so it reloads the config.
-  3. Ask Claude to do something in Final Cut Pro.
+  1. Fully quit Claude Desktop (Cmd+Q) and reopen it so it reloads the config.
+  2. Ask Claude to do something in Final Cut Pro.
+EOF
+fi
+cat <<EOF
 
 Check the wiring any time:
-  make install-check
+  make install-check        # status of every piece, changes nothing
+  make mcp-check            # every tool over MCP against a stand-in bridge (no FCP needed)
+  make mcp-check-live       # read from the running Final Cut Pro through MCP (read-only)
 
 EOF
+exit "$EXIT_CODE"
