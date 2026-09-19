@@ -4656,9 +4656,9 @@ def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
                  anything (a SpliceKit preview; FCP has no dry run). Try it first.
 
     Sub-frame requests are a no-op; a trim that would leave the clip shorter
-    than one frame is refused; transitions and storyline containers are not
-    accepted (a compound clip is trimmed like any clip). Undo with
-    timeline_action("undo").
+    than one frame is refused; transitions and connected storylines (trim the
+    clips inside them) are not accepted; a compound clip is trimmed like any
+    clip. Undo with timeline_action("undo").
     """
     edge_l = (edge or "").strip().lower()
     if edge_l not in ("start", "end"):

@@ -507,7 +507,7 @@ if command -v swiftc >/dev/null 2>&1; then
             else
                 warn "Could not build $helper with $(command -v swiftc) ($(swiftc --version 2>&1 | head -1))."
                 warn "  Compiler output (also in $BUILD_DIR/$helper-build.log):"
-                sed 's/^/    /' "$BUILD_DIR/$helper-build.log" | head -20
+                head -20 "$BUILD_DIR/$helper-build.log" | sed 's/^/    /'
                 warn "  get_audio_levels / the silence remover will report $helper as missing until this builds."
                 continue
             fi

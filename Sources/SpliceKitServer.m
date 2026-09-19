@@ -7261,18 +7261,22 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             }
 
             // Only clips (and gaps) go into FCP's trim operation: not a transition, and
-            // not a storyline container (its clips are trimmed one by one). The class
-            // name is no test for that: FCP wraps every clip that carries both video and
-            // audio in an FFAnchoredCollection, and a compound clip is trimmed like any
-            // clip, so the storyline flag is asked instead.
+            // not a storyline (primary or connected; its clips are trimmed one by one).
+            // The class name is no test for that: FCP wraps every clip that carries both
+            // video and audio in an FFAnchoredCollection, and a compound clip is trimmed
+            // like any clip, so the connected-storyline flag is asked instead.
             NSString *itemClass = NSStringFromClass([item class]) ?: @"";
             BOOL itemIsTransition = [itemClass containsString:@"Transition"];
-            BOOL itemIsStoryline = (item == primaryObj) || SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+            BOOL itemIsPrimary = (item == primaryObj);
+            BOOL itemIsStoryline = itemIsPrimary || SpliceKit_boolForSelector(item, @"isConnectedStoryline");
             if (itemIsTransition || itemIsStoryline) {
+                NSString *what = itemIsTransition ? @"transition"
+                    : itemIsPrimary ? @"the primary storyline itself (trim the clips inside it)"
+                    : @"connected storyline (trim the clips inside it)";
                 result = @{
                     @"error": [NSString stringWithFormat:
-                        @"trim_clip supports clips (and gaps) only; %@ is a %@", itemClass,
-                        itemIsTransition ? @"transition" : @"storyline container (trim the clips inside it)"],
+                        @"trim_clip supports clips (and gaps) only; %@ is %@%@", itemClass,
+                        itemIsPrimary ? @"" : @"a ", what],
                     @"handle": handle, @"itemClass": itemClass, @"trimCommand": @"ripple",
                 };
                 return;

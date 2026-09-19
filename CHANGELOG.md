@@ -76,8 +76,8 @@ that this fork has removed.
   `get_timeline_clips` flagged them `isCompound`. FCP's own `isCompoundClip` flag is asked
   now (FCP 12.3's FFAnchoredCollection answers it: false for those clips, per the QA run on
   a Mac); a multicam flag, when one answers, gives `kind: multicam clip`, skipped by
-  `get_audio_levels` the same way. `trim_clip` refuses transitions and storyline containers
-  only.
+  `get_audio_levels` the same way. `trim_clip` refuses transitions and storylines (primary
+  or connected) only.
 - **`tools/audio-levels.swift` did not compile with Swift 6.4** (`as? CMFormatDescription`
   is an error there: "conditional downcast to CoreFoundation type will always succeed"), so
   `make install` produced a patched app without the helper and `get_audio_levels` always
@@ -87,7 +87,8 @@ that this fork has removed.
 - **`make install` hid that failure behind "Verified on this Mac".** It now checks the
   patched framework for `audio-levels` and `silence-detector`, names any missing one in the
   final banner and exits non-zero; patcher step 3c prints the compiler output. `make
-  install-check` reports the helpers and exits non-zero when something needs attention; it
+  install-check` reports the helpers and exits non-zero when the app is not patched, a
+  helper is missing, the MCP virtualenv is missing or stale, or the live read fails; it
   used to run the live check against a stale virtualenv, print a traceback and exit 0.
 - **`add_clip_to_timeline` by `name` or `index` never found a clip** ("Clip not found"):
   the lookup asked events for `ownedClips`, which FCP 12.3 does not answer as an array. It

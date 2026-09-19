@@ -536,9 +536,16 @@ if $CHECK_ONLY; then
         fi
     fi
     ensure_mcp         || CHECK_OK=false
-    # A live check that could not run (app not open, no venv) is reported above but
-    # is not a failure of the install; one that ran and failed is.
-    verify_live        || { [[ "$LIVE_STATUS" == "failed" ]] && CHECK_OK=false; }
+    # setup-mcp.sh --check only warns about a missing or stale virtualenv (mcp 1.x
+    # imports `mcp` but not the 2.x server module); that is the state the QA run
+    # found, so it counts as needing attention here.
+    if [[ ! -x "$VENV_PYTHON" ]] || ! "$VENV_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
+        warn "MCP virtualenv missing or stale at $VENV_DIR — re-run: make install"
+        CHECK_OK=false
+    fi
+    # A live check that could not run (app not open) is reported above but is not a
+    # failure of the install; one that ran and failed is.
+    if ! verify_live && [[ "$LIVE_STATUS" == "failed" ]]; then CHECK_OK=false; fi
     printf '\n'
     if $CHECK_OK; then
         info "Check complete — nothing was changed."
@@ -616,11 +623,11 @@ esac
 if [[ -n "$HELPERS_MISSING" ]]; then
 cat <<EOF
 
-NOT installed: the audio helper(s) $HELPERS_MISSING did not build (patcher step 3c),
-so get_audio_levels (and the silence remover, for silence-detector) will report the
-helper as missing. The compiler output is above and in:
-  $REPO_DIR/build/<helper>-build.log
-Fix the build (swiftc from the Command Line Tools), then re-run:  make install
+NOT installed: the audio helper(s) $HELPERS_MISSING did not build (patcher step 3c:
+the compiler output is above and in $REPO_DIR/build/<helper>-build.log, or swiftc
+was not found), so get_audio_levels (and the silence remover, for silence-detector)
+will report the helper as missing. Fix the build (swiftc comes with the Command Line
+Tools: xcode-select --install), then re-run:  make install
 EOF
     EXIT_CODE=1
 fi
