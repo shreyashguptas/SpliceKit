@@ -141,6 +141,18 @@ static NSString *SpliceKit_handlePointerKey(id object) {
     return [NSString stringWithFormat:@"%p", (__bridge void *)object];
 }
 
+// When this dylib was loaded into the process (injected at launch, so effectively the
+// process start); bridge_status reports the seconds since as process_uptime_seconds.
+static CFAbsoluteTime sSpliceKitLoadedAt = 0;
+__attribute__((constructor)) static void SpliceKit_recordLoadTime(void) {
+    sSpliceKitLoadedAt = CFAbsoluteTimeGetCurrent();
+}
+static double SpliceKit_secondsSinceLoad(void) {
+    if (sSpliceKitLoadedAt <= 0) return 0.0;
+    double d = CFAbsoluteTimeGetCurrent() - sSpliceKitLoadedAt;
+    return d > 0 ? d : 0.0;
+}
+
 // Incremented every time the handle table is cleared (see SPLICEKIT_MAX_HANDLES below).
 // Callers that compare handles across two reads check it to know the comparison is valid.
 static uint64_t sHandleGeneration = 0;
@@ -681,9 +693,10 @@ static NSDictionary *SpliceKit_handleSystemVersion(NSDictionary *params) {
         @"swizzles": SpliceKit_getSwizzleResults(),
     } mutableCopy];
 
-    // Add uptime
-    NSTimeInterval uptime = [[NSProcessInfo processInfo] systemUptime];
-    result[@"process_uptime_seconds"] = @((int)uptime);
+    // Uptime of this Final Cut Pro process: seconds since SpliceKit loaded into it,
+    // which happens at launch (LC_LOAD_DYLIB, before main). -[NSProcessInfo
+    // systemUptime], used before, is the Mac's time since boot.
+    result[@"process_uptime_seconds"] = @((int)SpliceKit_secondsSinceLoad());
 
     // Add signing info
     SecStaticCodeRef staticCode = NULL;
@@ -1202,6 +1215,31 @@ static BOOL SpliceKit_tryReadBoolSelector(id obj, NSString *name, BOOL *out) {
         *out = ((BOOL (*)(id, SEL))objc_msgSend)(obj, sel);
         return YES;
     } @catch (NSException *e) {}
+    return NO;
+}
+
+// Is `item` a compound clip? Final Cut Pro answers itself: -isCompoundClip on
+// FFAnchoredCollection (FCP 12.3), called only when its type encoding really returns
+// BOOL. The class name is no test -- an ordinary clip that carries both video and
+// audio is an FFAnchoredCollection too, with its media components inside it, which
+// is what the earlier class-name check got wrong (every camera clip came back as a
+// compound clip). When no flag answers, the item is not called compound.
+static BOOL SpliceKit_itemIsCompoundClip(id item) {
+    if (!item) return NO;
+    BOOL flag = NO;
+    if (SpliceKit_tryReadBoolSelector(item, @"isCompoundClip", &flag)) return flag;
+    return NO;
+}
+
+// Same for a multicam clip (FCP: Multicam Clip). Selector names unverified on a
+// live build; a name FCP does not answer with a BOOL is skipped, so a wrong guess
+// changes nothing.
+static BOOL SpliceKit_itemIsMulticamClip(id item) {
+    if (!item) return NO;
+    for (NSString *name in @[@"isMulticamClip", @"isMultiCamClip", @"isMulticam"]) {
+        BOOL flag = NO;
+        if (SpliceKit_tryReadBoolSelector(item, name, &flag)) return flag;
+    }
     return NO;
 }
 
@@ -1848,11 +1886,12 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                             }
                         }
 
-                        // Detect compound clips (FFAnchoredCollection) and expose nested contents
-                        NSString *cls = NSStringFromClass([item class]);
-                        BOOL isCompound = [cls containsString:@"Collection"] || [cls containsString:@"AnchoredClip"];
+                        // Compound clips: FCP's own -isCompoundClip flag. An ordinary clip
+                        // with video and audio is an FFAnchoredCollection too, so the class
+                        // name is no test. Nested contents are exposed when the flag says yes.
+                        BOOL isCompound = SpliceKit_itemIsCompoundClip(item);
+                        if (isCompound) info[@"isCompound"] = @YES;
                         if (isCompound && [item respondsToSelector:@selector(primaryObject)]) {
-                            info[@"isCompound"] = @YES;
                             id innerPrimary = ((id (*)(id, SEL))objc_msgSend)(item, @selector(primaryObject));
                             if (innerPrimary && [innerPrimary respondsToSelector:@selector(containedItems)]) {
                                 id innerItems = ((id (*)(id, SEL))objc_msgSend)(innerPrimary, @selector(containedItems));
@@ -7221,14 +7260,19 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 return;
             }
 
-            // Only clips (and gaps) go into FCP's trim operation -- the shipped call
-            // sites never hand it transitions, storylines or compound containers.
+            // Only clips (and gaps) go into FCP's trim operation: not a transition, and
+            // not a storyline container (its clips are trimmed one by one). The class
+            // name is no test for that: FCP wraps every clip that carries both video and
+            // audio in an FFAnchoredCollection, and a compound clip is trimmed like any
+            // clip, so the storyline flag is asked instead.
             NSString *itemClass = NSStringFromClass([item class]) ?: @"";
-            if ([itemClass containsString:@"Transition"] || [itemClass containsString:@"Collection"] ||
-                [itemClass containsString:@"Sequence"]) {
+            BOOL itemIsTransition = [itemClass containsString:@"Transition"];
+            BOOL itemIsStoryline = (item == primaryObj) || SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+            if (itemIsTransition || itemIsStoryline) {
                 result = @{
                     @"error": [NSString stringWithFormat:
-                        @"trim_clip supports clips (and gaps) only; %@ is a transition, storyline or compound container", itemClass],
+                        @"trim_clip supports clips (and gaps) only; %@ is a %@", itemClass,
+                        itemIsTransition ? @"transition" : @"storyline container (trim the clips inside it)"],
                     @"handle": handle, @"itemClass": itemClass, @"trimCommand": @"ripple",
                 };
                 return;
@@ -7877,8 +7921,10 @@ static NSData *SpliceKit_clipInfoJPEGFromCGImage(CGImageRef image, int maxSide, 
 // clip, FFAnchoredTransition -> transition, FFAnchoredCaption -> caption,
 // FFAnchoredGeneratorComponent -> generator (FCP's titles are generator components
 // with a title effect; the caller upgrades a generator with text channels to
-// "title"), FFAnchoredCollection -> connected storyline / compound clip, media
-// components by their video/audio flags.
+// "title"); then FCP's own flags: isConnectedStoryline -> connected storyline,
+// isCompoundClip -> compound clip, a multicam flag -> multicam clip; everything else
+// (a media component, or the FFAnchoredCollection FCP wraps a clip with both video
+// and audio in) by its video/audio flags.
 static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasAudio) {
     NSString *cls = item ? (NSStringFromClass([item class]) ?: @"") : @"";
     if ([cls containsString:@"Gap"]) return @"gap clip";
@@ -7893,10 +7939,11 @@ static NSString *SpliceKit_clipInfoKindForItem(id item, BOOL hasVideo, BOOL hasA
         }
         return @"generator";
     }
-    if ([cls containsString:@"Collection"] || [cls containsString:@"Sequence"]) {
-        if (SpliceKit_boolForSelector(item, @"isConnectedStoryline")) return @"connected storyline";
-        return @"compound clip";
-    }
+    if (SpliceKit_boolForSelector(item, @"isConnectedStoryline")) return @"connected storyline";
+    if (SpliceKit_itemIsCompoundClip(item)) return @"compound clip";
+    if (SpliceKit_itemIsMulticamClip(item)) return @"multicam clip";
+    // An FFAnchoredCollection that is none of those is an ordinary clip: FCP wraps a
+    // clip that carries both video and audio in a collection of media components.
     if (hasVideo) return @"video clip";
     if (hasAudio) return @"audio clip";
     return @"clip";
@@ -15969,6 +16016,25 @@ static NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params)
 //
 
 // List clips available in the event browser
+// The clips of one event as the browser shows them: displayOwnedClips (browser-visible)
+// first, then ownedClips, childItems, items; a set becomes an array. Every walk over
+// browser clips (browser.listClips, browser.placeClip by index or name, the timeline
+// overview) goes through this, so an index from one listing names the same clip in
+// the others. browser.placeClip used to ask ownedClips only, which FCP 12.3's
+// FFEventRecord does not answer as an array, so name and index never resolved.
+static NSArray *SpliceKit_browserClipsOfEvent(id event) {
+    if (!event) return @[];
+    for (NSString *name in @[@"displayOwnedClips", @"ownedClips", @"childItems", @"items"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (![event respondsToSelector:sel]) continue;
+        id clips = nil;
+        @try { clips = ((id (*)(id, SEL))objc_msgSend)(event, sel); } @catch (NSException *e) { clips = nil; }
+        NSArray *arr = SpliceKit_mixerArrayFromContainer(clips);
+        if (arr) return arr;
+    }
+    return @[];
+}
+
 static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
     NSString *eventFilter = [params[@"event"] isKindOfClass:[NSString class]] ? params[@"event"] : nil;
     __block NSDictionary *result = nil;
@@ -16009,31 +16075,10 @@ static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                     continue;
                 }
 
-                // Events are FFFolder objects. Get their child items which are event clips.
-                // Try multiple approaches: childItems, items, ownedClips, containedItems
-                id clips = nil;
-                SEL childItemsSel = NSSelectorFromString(@"childItems");
-                SEL ownedClipsSel = NSSelectorFromString(@"ownedClips");
-                SEL itemsSel = NSSelectorFromString(@"items");
-
-                // Try displayOwnedClips first (browser-visible clips), then ownedClips
-                SEL displayClipsSel = NSSelectorFromString(@"displayOwnedClips");
-                if ([event respondsToSelector:displayClipsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, displayClipsSel);
-                } else if ([event respondsToSelector:ownedClipsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, ownedClipsSel);
-                } else if ([event respondsToSelector:childItemsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, childItemsSel);
-                } else if ([event respondsToSelector:itemsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, itemsSel);
-                }
-
-                // Convert NSSet to NSArray if needed
-                if (clips && [clips isKindOfClass:[NSSet class]]) {
-                    clips = [(NSSet *)clips allObjects];
-                }
-
-                NSUInteger clipCount = [clips isKindOfClass:[NSArray class]] ? [(NSArray *)clips count] : 0;
+                // The event's clips as the browser shows them (shared walk, see
+                // SpliceKit_browserClipsOfEvent).
+                NSArray *clips = SpliceKit_browserClipsOfEvent(event);
+                NSUInteger clipCount = clips.count;
                 SpliceKit_log(@"[Browser] Event '%@' class=%@ clips=%@ count=%lu",
                     eventName, NSStringFromClass([event class]),
                     clips ? NSStringFromClass([clips class]) : @"nil",
@@ -16653,6 +16698,34 @@ static NSDictionary *SpliceKit_browserPlacedEntry(NSDictionary *entry) {
 // it landed where asked (positionVerified), both within two frames (at least 50 ms).
 // Other objects the edit created (the far half of a split clip, a gap) are listed
 // under alsoNew. Error answers after state changed carry stateChanged.
+// browser.placeClip's index / name lookup: the walk browser.listClips makes with no
+// event filter, so `index` is that listing's index and `name` its first
+// case-insensitive substring match (index wins when both are given). outListed
+// receives how many clips were walked, for the error text.
+static id SpliceKit_browserFindClip(NSNumber *indexNum, NSString *name, NSInteger *outListed) {
+    if (outListed) *outListed = 0;
+    id libs = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("FFLibraryDocument"), @selector(copyActiveLibraries));
+    if (![libs isKindOfClass:[NSArray class]] || [(NSArray *)libs count] == 0) return nil;
+    id library = [(NSArray *)libs firstObject];
+    SEL eventsSel = NSSelectorFromString(@"events");
+    if (![library respondsToSelector:eventsSel]) return nil;
+    id events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
+    if (![events isKindOfClass:[NSArray class]]) return nil;
+    NSInteger targetIdx = indexNum ? [indexNum integerValue] : -1;
+    NSString *lowerName = name.length > 0 ? [name lowercaseString] : nil;
+    NSInteger currentIdx = 0;
+    id found = nil;
+    for (id event in (NSArray *)events) {
+        for (id c in SpliceKit_browserClipsOfEvent(event)) {
+            if (!found && currentIdx == targetIdx) found = c;
+            if (!found && lowerName && [[SpliceKit_browserClipName(c) lowercaseString] containsString:lowerName]) found = c;
+            currentIdx++;
+        }
+    }
+    if (outListed) *outListed = currentIdx;
+    return found;
+}
+
 static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                                                       NSString *selectorName,
                                                       NSString *actionName) {
@@ -16715,44 +16788,31 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                 clip = SpliceKit_resolveHandle(handle);
             }
 
+            NSInteger listedCount = 0;
             if (!clip && (indexNum || name)) {
-                // Get all clips and find by index or name
-                id libs = ((id (*)(id, SEL))objc_msgSend)(
-                    objc_getClass("FFLibraryDocument"), @selector(copyActiveLibraries));
-                if ([libs isKindOfClass:[NSArray class]] && [(NSArray *)libs count] > 0) {
-                    id library = [(NSArray *)libs firstObject];
-                    SEL eventsSel = NSSelectorFromString(@"events");
-                    if ([library respondsToSelector:eventsSel]) {
-                        id events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
-                        NSInteger targetIdx = indexNum ? [indexNum integerValue] : -1;
-                        NSString *lowerName = [name lowercaseString];
-                        NSInteger currentIdx = 0;
-
-                        for (id event in (NSArray *)events) {
-                            SEL clipsSel = NSSelectorFromString(@"ownedClips");
-                            if (![event respondsToSelector:clipsSel]) continue;
-                            id clips = ((id (*)(id, SEL))objc_msgSend)(event, clipsSel);
-                            if (![clips isKindOfClass:[NSArray class]]) continue;
-
-                            for (id c in (NSArray *)clips) {
-                                if (currentIdx == targetIdx) { clip = c; break; }
-                                if (name && [c respondsToSelector:@selector(displayName)]) {
-                                    NSString *dn = ((id (*)(id, SEL))objc_msgSend)(c, @selector(displayName));
-                                    if (dn && [[dn lowercaseString] containsString:lowerName]) {
-                                        clip = c;
-                                        break;
-                                    }
-                                }
-                                currentIdx++;
-                            }
-                            if (clip) break;
-                        }
-                    }
-                }
+                clip = SpliceKit_browserFindClip(indexNum, name, &listedCount);
             }
 
             if (!clip) {
-                result = @{@"error": @"Clip not found. Provide handle, index, or name."};
+                NSString *message;
+                if (handle && !indexNum && !name) {
+                    message = [NSString stringWithFormat:
+                        @"handle %@ does not resolve to an object (handles expire when the handle table is cleared; browser_list_clips() gives fresh ones)", handle];
+                } else if (indexNum && !name) {
+                    message = [NSString stringWithFormat:
+                        @"no browser clip at index %ld (browser_list_clips() lists %ld clip%@%@)",
+                        (long)[indexNum integerValue], (long)listedCount, listedCount == 1 ? @"" : @"s",
+                        listedCount > 0 ? [NSString stringWithFormat:@", indices 0-%ld", (long)(listedCount - 1)] : @""];
+                } else if (name && !indexNum) {
+                    message = [NSString stringWithFormat:
+                        @"no browser clip whose name contains \"%@\" (%ld clip%@ listed; browser_list_clips() shows their names)",
+                        name, (long)listedCount, listedCount == 1 ? @"" : @"s"];
+                } else {
+                    message = [NSString stringWithFormat:
+                        @"no browser clip at index %ld or named like \"%@\" (%ld clip%@ listed)",
+                        (long)[indexNum integerValue], name ?: @"", (long)listedCount, listedCount == 1 ? @"" : @"s"];
+                }
+                result = @{@"error": message};
                 return;
             }
 
@@ -16760,6 +16820,24 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             if (!timelineModule) {
                 result = @{@"error": @"No active timeline module. Is a project open?"};
                 return;
+            }
+
+            // A handle from get_timeline_clips names an item already on the timeline; this
+            // edit places source clips from the browser. Checked by object identity against
+            // the same walk the result diff uses, so it cannot be fooled by a reused handle.
+            if (handle) {
+                NSDictionary *onTimeline = SpliceKit_browserTimelineEntries();
+                NSString *clipKey = SpliceKit_handlePointerKey(clip);
+                NSDictionary *timelineEntry = clipKey.length > 0 ? onTimeline[clipKey] : nil;
+                if (timelineEntry) {
+                    NSString *entryName = [timelineEntry[@"name"] isKindOfClass:[NSString class]] ? timelineEntry[@"name"] : @"";
+                    result = @{@"error": [NSString stringWithFormat:
+                        @"handle %@ is a clip on the current timeline (\"%@\"), not a source clip in the browser; "
+                        @"add_clip_to_timeline places browser clips (handles from browser_list_clips()). To repeat a "
+                        @"timeline clip use FCP's copy and paste: select_clips([...]), then timeline_action(\"copy\") and "
+                        @"\"paste\" or \"pasteAsConnected\" at the playhead.", handle, entryName]};
+                    return;
+                }
             }
 
             // The clip's own range. Its first frame is not necessarily time 0 (clippedRange
@@ -17127,9 +17205,15 @@ static id SpliceKit_resolveMediaImportEvent(NSString *libraryName, NSString *eve
 
         for (id eventRecord in (NSArray *)events) {
             if (evtLower) {
+                // FFEventRecord answers displayName (the name the browser shows, and the one
+                // browser.listClips and this handler's own answer report), not name.
                 NSString *ename = nil;
-                if ([eventRecord respondsToSelector:@selector(name)]) {
-                    ename = ((id (*)(id, SEL))objc_msgSend)(eventRecord, @selector(name));
+                for (NSString *selName in @[@"displayName", @"name"]) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if (![eventRecord respondsToSelector:sel]) continue;
+                    id v = nil;
+                    @try { v = ((id (*)(id, SEL))objc_msgSend)(eventRecord, sel); } @catch (NSException *e) { v = nil; }
+                    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) { ename = v; break; }
                 }
                 if (!ename || ![[ename lowercaseString] containsString:evtLower]) continue;
             }
@@ -17185,7 +17269,16 @@ static NSDictionary *SpliceKit_handleMediaImportFile(NSDictionary *params) {
         @try {
             id project = SpliceKit_resolveMediaImportEvent(libHint, eventHint);
             if (!project) {
-                result = @{@"error": @"No event found. Make sure a library with at least one event is open."};
+                NSString *message;
+                if (eventHint.length > 0 || libHint.length > 0) {
+                    message = [NSString stringWithFormat:
+                        @"No event matching%@%@ in the open libraries (names as the browser shows them; browser_list_clips() lists each clip's event). Leave event out to import into the first event.",
+                        eventHint.length > 0 ? [NSString stringWithFormat:@" \"%@\"", eventHint] : @"",
+                        libHint.length > 0 ? [NSString stringWithFormat:@" in a library matching \"%@\"", libHint] : @""];
+                } else {
+                    message = @"No event found. Make sure a library with at least one event is open.";
+                }
+                result = @{@"error": message};
                 return;
             }
             NSString *eventName = nil;
@@ -22300,117 +22393,93 @@ static NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *para
                 return;
             }
 
-            // Collect spine items + their anchored items
-            NSMutableArray *candidates = [NSMutableArray array];
-
-            id spineItems = nil;
-            if ([primaryObj respondsToSelector:@selector(containedItems)]) {
-                spineItems = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
+            // Candidates come from the same walk get_timeline_clips reports (spine items on
+            // lane 0; connected clips, nested ones included, with their lane relative to the
+            // primary storyline and their absolute range), so this tool and that one agree
+            // about the same timeline. The earlier direct scan read anchoredItems as an
+            // NSArray, which FCP does not hand back for every clip, and found nothing.
+            double playheadSec = playhead.timescale > 0 ? (double)playhead.value / (double)playhead.timescale : 0.0;
+            NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @100000,
+                                                                             @"connected_limit": @100000,
+                                                                             @"include_markers": @NO,
+                                                                             @"include_nested": @NO});
+            if (![state isKindOfClass:[NSDictionary class]] || state[@"error"]) {
+                result = @{@"error": [NSString stringWithFormat:@"could not read the timeline: %@",
+                                      state[@"error"] ?: @"no state"]};
+                return;
             }
-
-            SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
-            BOOL canGetRange = [primaryObj respondsToSelector:erSel];
-
-            if (spineItems && [spineItems isKindOfClass:[NSArray class]]) {
-                for (id item in (NSArray *)spineItems) {
-                    // Check this spine item's anchored (connected) items
-                    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
-                    if ([item respondsToSelector:anchoredSel]) {
-                        id anchored = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
-                        if (anchored && [anchored isKindOfClass:[NSArray class]]) {
-                            for (id connected in (NSArray *)anchored) {
-                                long long lane = 0;
-                                if ([connected respondsToSelector:@selector(anchoredLane)]) {
-                                    lane = ((long long (*)(id, SEL))objc_msgSend)(
-                                        connected, @selector(anchoredLane));
-                                }
-                                if (lane == targetLane) {
-                                    [candidates addObject:connected];
-                                }
-                            }
-                        }
-                    }
-
-                    // Also check spine items themselves (lane 0)
-                    if (targetLane == 0) {
-                        [candidates addObject:item];
-                    }
+            id listAny = targetLane == 0 ? state[@"items"] : state[@"connectedItems"];
+            NSArray *list = [listAny isKindOfClass:[NSArray class]] ? listAny : @[];
+            NSUInteger candidateCount = 0;
+            NSDictionary *bestEntry = nil;          // first clip under the playhead in that lane
+            NSDictionary *containerEntry = nil;     // a connected storyline container there
+            for (id entryAny in list) {
+                if (![entryAny isKindOfClass:[NSDictionary class]]) continue;
+                NSDictionary *entry = entryAny;
+                if (targetLane != 0) {
+                    id laneNum = entry[@"effectiveLane"] ?: entry[@"lane"];
+                    if (![laneNum respondsToSelector:@selector(longLongValue)] ||
+                        [laneNum longLongValue] != targetLane) continue;
                 }
+                candidateCount++;
+                double startSec = SpliceKit_browserEntrySeconds(entry, @"startTime");
+                double endSec = SpliceKit_browserEntrySeconds(entry, @"endTime");
+                if (isnan(startSec) || isnan(endSec)) continue;
+                if (playheadSec < startSec - 0.001 || playheadSec > endSec + 0.001) continue;
+                // A connected storyline is a container; the clip inside it (listed with the
+                // same lane) is what a click there selects, so prefer that.
+                if ([entry[@"isConnectedStoryline"] boolValue]) {
+                    if (!containerEntry) containerEntry = entry;
+                    continue;
+                }
+                bestEntry = entry;
+                break;
             }
-
-            // Find candidate under playhead
+            if (!bestEntry) bestEntry = containerEntry;
             id bestMatch = nil;
-            for (id item in candidates) {
-                // Try to get time range of item
-                if (canGetRange) {
-                    @try {
-                        SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
-                            primaryObj, erSel, item);
-                        double startSec = (double)range.start.value / range.start.timescale;
-                        double durSec = (double)range.duration.value / range.duration.timescale;
-                        double endSec = startSec + durSec;
-                        double playheadSec = (double)playhead.value / playhead.timescale;
-
-                        if (playheadSec >= startSec - 0.001 && playheadSec <= endSec + 0.001) {
-                            bestMatch = item;
-                            break;
-                        }
-                    } @catch (NSException *e) {
-                        continue;
-                    }
-                }
-
-                // Fallback: check anchoredOffset for connected clips
-                SEL offsetSel = NSSelectorFromString(@"anchoredOffset");
-                if (!bestMatch && [item respondsToSelector:offsetSel]) {
-                    SpliceKit_CMTime offset = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, offsetSel);
-                    SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-                    double startSec = (double)offset.value / offset.timescale;
-                    double durSec = (double)dur.value / dur.timescale;
-                    double endSec = startSec + durSec;
-                    double playheadSec = (double)playhead.value / playhead.timescale;
-
-                    if (playheadSec >= startSec - 0.001 && playheadSec <= endSec + 0.001) {
-                        bestMatch = item;
-                        break;
-                    }
-                }
+            if (bestEntry) {
+                NSString *bestHandle = [bestEntry[@"handle"] isKindOfClass:[NSString class]] ? bestEntry[@"handle"] : nil;
+                bestMatch = bestHandle.length > 0 ? SpliceKit_resolveHandle(bestHandle) : nil;
             }
 
             if (!bestMatch) {
                 result = @{@"error": [NSString stringWithFormat:
-                    @"No clip found at playhead in lane %lld. Found %lu candidates in that lane.",
-                    targetLane, (unsigned long)candidates.count]};
+                    @"No clip found at playhead (%.3fs) in lane %lld. %lu clip%@ in that lane (get_timeline_clips lists them with their times).",
+                    playheadSec, targetLane, (unsigned long)candidateCount, candidateCount == 1 ? @"" : @"s"]};
                 return;
             }
 
-            // Select using setSelectedItems: on the timeline module
-            NSArray *selArray = @[bestMatch];
-            SEL setSelSel = NSSelectorFromString(@"setSelectedItems:");
-            if ([timeline respondsToSelector:setSelSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(timeline, setSelSel, selArray);
-            } else {
-                // Fallback: try selectItems:
-                SEL selectSel = NSSelectorFromString(@"selectItems:");
-                if ([timeline respondsToSelector:selectSel]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(timeline, selectSel, selArray);
-                }
+            // Select through the same path select_clips uses (setSelectedItems: and its
+            // fallbacks), and read the selection back.
+            NSString *usedSelector = nil;
+            if (!SpliceKit_handleSelectionApply(timeline, @[bestMatch], &usedSelector)) {
+                result = @{@"error": @"Timeline module responds to none of setSelectedItems:, _setSelectedItems:, selectItems:"};
+                return;
             }
+            NSArray *readback = SpliceKit_handleSelectionCurrentItems(timeline);
+            BOOL selectedNow = NO;
+            for (id sel in readback) { if (sel == bestMatch) { selectedNow = YES; break; } }
 
-            NSString *clipName = @"";
-            if ([bestMatch respondsToSelector:@selector(displayName)]) {
-                clipName = ((id (*)(id, SEL))objc_msgSend)(bestMatch, @selector(displayName)) ?: @"";
-            }
-
+            NSString *clipName = SpliceKit_displayNameForItem(bestMatch) ?: @"";
             NSString *handle = SpliceKit_storeHandle(bestMatch);
 
-            result = @{
+            NSMutableDictionary *out = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"status": @"ok",
                 @"lane": @(targetLane),
                 @"clip": clipName,
                 @"class": NSStringFromClass([bestMatch class]),
                 @"handle": handle,
-            };
+                @"playheadSeconds": @(playheadSec),
+                @"selected": @(selectedNow),
+                @"selector": usedSelector ?: @"",
+                @"candidatesInLane": @(candidateCount),
+            }];
+            double bs = SpliceKit_browserEntrySeconds(bestEntry, @"startTime");
+            double be = SpliceKit_browserEntrySeconds(bestEntry, @"endTime");
+            if (!isnan(bs)) out[@"startSeconds"] = @(bs);
+            if (!isnan(be)) out[@"endSeconds"] = @(be);
+            if ([bestEntry[@"isConnectedStoryline"] boolValue]) out[@"isConnectedStoryline"] = @YES;
+            result = out;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -27045,27 +27114,9 @@ NSDictionary *SpliceKit_handleMontageAnalyze(NSDictionary *params) {
                     continue;
                 }
 
-                // Get clips from event (same logic as browser.listClips)
-                id clips = nil;
-                SEL displayClipsSel = NSSelectorFromString(@"displayOwnedClips");
-                SEL ownedClipsSel = NSSelectorFromString(@"ownedClips");
-                SEL childItemsSel = NSSelectorFromString(@"childItems");
-                SEL itemsSel = NSSelectorFromString(@"items");
-
-                if ([event respondsToSelector:displayClipsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, displayClipsSel);
-                } else if ([event respondsToSelector:ownedClipsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, ownedClipsSel);
-                } else if ([event respondsToSelector:childItemsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, childItemsSel);
-                } else if ([event respondsToSelector:itemsSel]) {
-                    clips = ((id (*)(id, SEL))objc_msgSend)(event, itemsSel);
-                }
-
-                if (clips && [clips isKindOfClass:[NSSet class]]) {
-                    clips = [(NSSet *)clips allObjects];
-                }
-                if (![clips isKindOfClass:[NSArray class]]) continue;
+                // Get clips from event (the same walk as browser.listClips)
+                NSArray *clips = SpliceKit_browserClipsOfEvent(event);
+                if (clips.count == 0) continue;
 
                 for (id clip in (NSArray *)clips) {
                     @autoreleasepool {

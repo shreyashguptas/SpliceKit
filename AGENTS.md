@@ -243,8 +243,8 @@ SpliceKit's `audio-levels` helper (`tools/audio-levels.swift`, built by `make in
 volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied, the same way
 `get_clip_info`'s frame is the raw footage. The mapping assumes normal speed (100%); `retimed` is
 true/false when a retime flag is found on FCP's clip object and "unknown" otherwise. Transitions,
-gap clips, titles and generators have no audio of their own; a compound clip has no single source
-file; both are listed as skipped. A harsh audio cut: read the outgoing clip's end and the jump
+gap clips, titles and generators have no audio of their own; a compound or multicam clip has no
+single source file; both are listed as skipped. A harsh audio cut: read the outgoing clip's end and the jump
 (a single handle brings its neighbours along), then `trim_clip`, a fade
 (`direct_timeline_action("applyAudioFadesDirect")` on the selected clip) or `changeAudioVolume`, and
 read again. `slice`, `edge window`, `jump` and the sparkline are SpliceKit bookkeeping, not FCP

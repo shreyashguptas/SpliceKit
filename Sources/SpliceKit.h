@@ -15,7 +15,7 @@
 #import <objc/message.h>
 
 #ifndef SPLICEKIT_VERSION
-#define SPLICEKIT_VERSION "3.1.148"
+#define SPLICEKIT_VERSION "unversioned"   // the build passes -DSPLICEKIT_VERSION from patcher/SpliceKit/Configuration/Version.xcconfig
 #endif
 
 // We keep strong refs to ObjC objects the caller might need later.

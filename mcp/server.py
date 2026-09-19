@@ -4656,8 +4656,9 @@ def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
                  anything (a SpliceKit preview; FCP has no dry run). Try it first.
 
     Sub-frame requests are a no-op; a trim that would leave the clip shorter
-    than one frame is refused; transitions, storylines and compound clips are
-    not accepted. Undo with timeline_action("undo").
+    than one frame is refused; transitions and storyline containers are not
+    accepted (a compound clip is trimmed like any clip). Undo with
+    timeline_action("undo").
     """
     edge_l = (edge or "").strip().lower()
     if edge_l not in ("start", "end"):
@@ -4887,8 +4888,9 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
         frame_max_width: longest side of the returned frame in pixels (64-1920, default 640).
 
     `kind` (video clip, audio clip, title, generator, gap clip, transition, compound
-    clip, connected storyline, caption), handles and `timings` are SpliceKit's own
-    bookkeeping, spelled with FCP's words. Titles, generators and gap clips have no
+    clip, multicam clip, connected storyline, caption), handles and `timings` are
+    SpliceKit's own bookkeeping, spelled with FCP's words; compound and multicam come
+    from FCP's own flags on the clip, not from its class name. Titles, generators and gap clips have no
     source media file and report that instead of a frame. A marker is not a clip;
     use list_markers().
     """
@@ -5359,8 +5361,9 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     primary storyline and connected clips, at most the first 100 in timeline order (the
     answer says when it stopped; narrow with a range or handles). A whole timeline can
     take minutes: each clip's range is decoded by a helper process. Transitions, gap
-    clips, titles and generators have no audio of their own, a compound clip has no single
-    source media file, and a connected storyline container is analyzed through its clips;
+    clips, titles and generators have no audio of their own, a compound or multicam clip
+    has no single source media file, and a connected storyline container is analyzed
+    through its clips;
     all are listed as skipped with the reason.
 
     Per clip: the source media file and where the clip lies in it, the sample rate and the

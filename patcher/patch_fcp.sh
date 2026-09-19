@@ -396,11 +396,25 @@ if [ -d "$LUA_DIR" ]; then
     log "Built: $LUA_LIB"
 fi
 
-info "Compiling ${#SOURCES[@]} source files..."
+# The version string bridge_status and the log report, from the same file the
+# Makefile and the Xcode project read. Without the define the header's fallback
+# ("unversioned") is compiled in, which is how installs used to report a stale
+# number.
+SPLICEKIT_VERSION="$(awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $2); print $2; exit }' \
+    "$REPO_DIR/patcher/SpliceKit/Configuration/Version.xcconfig" 2>/dev/null || true)"
+VERSION_FLAGS=()
+if [ -n "$SPLICEKIT_VERSION" ]; then
+    VERSION_FLAGS=("-DSPLICEKIT_VERSION=\"$SPLICEKIT_VERSION\"")
+    info "Compiling ${#SOURCES[@]} source files (SpliceKit $SPLICEKIT_VERSION)..."
+else
+    warn "Version.xcconfig not readable; the dylib will report its version as 'unversioned'"
+    info "Compiling ${#SOURCES[@]} source files..."
+fi
 clang -arch arm64 -arch x86_64 \
     -mmacosx-version-min=14.0 \
     -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices \
     -fobjc-arc -fmodules -Wno-deprecated-declarations \
+    ${VERSION_FLAGS[@]+"${VERSION_FLAGS[@]}"} \
     -undefined dynamic_lookup -dynamiclib \
     -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit \
     -I "$REPO_DIR/Sources" \
@@ -472,7 +486,10 @@ fi
 # palette's silence remover shell out to small Swift CLIs, because decoding
 # audio with AVFoundation inside Final Cut Pro's process deadlocks. The dylib
 # looks for them in the framework's Resources first. Built with the swiftc
-# that ships with the Command Line Tools; cached in build/. Never fatal.
+# that ships with the Command Line Tools; cached in build/. Never fatal here
+# (Final Cut Pro works without them), but install.sh checks the framework for
+# them afterwards, names any that are missing in its final banner and exits
+# non-zero, so a failed helper build is not hidden behind "Verified".
 # ============================================================
 step "Step 3c: Installing audio helpers"
 
@@ -488,7 +505,10 @@ if command -v swiftc >/dev/null 2>&1; then
                 codesign --force --sign - "$out" >/dev/null 2>&1 || true
                 log "Built: $out"
             else
-                warn "Could not build $helper (see $BUILD_DIR/$helper-build.log); its features will report it as missing."
+                warn "Could not build $helper with $(command -v swiftc) ($(swiftc --version 2>&1 | head -1))."
+                warn "  Compiler output (also in $BUILD_DIR/$helper-build.log):"
+                sed 's/^/    /' "$BUILD_DIR/$helper-build.log" | head -20
+                warn "  get_audio_levels / the silence remover will report $helper as missing until this builds."
                 continue
             fi
         fi

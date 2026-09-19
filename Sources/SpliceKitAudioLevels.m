@@ -251,9 +251,10 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
 
     NSString *helper = SpliceKit_findAudioLevelsHelper();
     if (!helper) {
-        return @{@"error": @"audio-levels helper not found. `make install` builds it (step 3c) into the patched "
-                           @"app's SpliceKit.framework/Resources; by hand: swiftc -O -o build/audio-levels "
-                           @"tools/audio-levels.swift, then copy it there or to ~/Applications/SpliceKit/tools/."};
+        return @{@"error": @"audio-levels helper not found. `make install` builds it (step 3c, swiftc from the "
+                           @"Command Line Tools) into the patched app's SpliceKit.framework/Versions/A/Resources and "
+                           @"says so in its final banner when that failed (log: build/audio-levels-build.log). By hand: "
+                           @"`make tools`, then copy build/audio-levels there or to ~/Applications/SpliceKit/tools/."};
     }
 
     NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @1000,
@@ -414,6 +415,11 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             // otherwise hand back the first clip inside it under the container's name.
             if ([kind isEqualToString:@"compound clip"]) {
                 entry[@"skipped"] = @"compound clip: no single source media file (open it to analyse the clips inside)";
+                [clips addObject:entry];
+                continue;
+            }
+            if ([kind isEqualToString:@"multicam clip"]) {
+                entry[@"skipped"] = @"multicam clip: no single source media file (its angles are clips inside it)";
                 [clips addObject:entry];
                 continue;
             }

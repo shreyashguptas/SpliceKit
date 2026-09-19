@@ -68,6 +68,54 @@ that this fork has removed.
   an unfinished install, and no longer swallows Ctrl-C after a menu.
 
 ### Fixed
+- **Ordinary clips were classified as compound clips.** Final Cut Pro wraps every clip
+  that carries both video and audio in an `FFAnchoredCollection`, and SpliceKit read that
+  class name as "compound clip": `get_clip_info` said `kind: compound clip` for camera
+  footage, `get_audio_levels` skipped every such clip ("no single source media file") and
+  analysed nothing on an ordinary timeline, `trim_clip` refused them, and
+  `get_timeline_clips` flagged them `isCompound`. FCP's own `isCompoundClip` flag is asked
+  now (FCP 12.3's FFAnchoredCollection answers it: false for those clips, per the QA run on
+  a Mac); a multicam flag, when one answers, gives `kind: multicam clip`, skipped by
+  `get_audio_levels` the same way. `trim_clip` refuses transitions and storyline containers
+  only.
+- **`tools/audio-levels.swift` did not compile with Swift 6.4** (`as? CMFormatDescription`
+  is an error there: "conditional downcast to CoreFoundation type will always succeed"), so
+  `make install` produced a patched app without the helper and `get_audio_levels` always
+  reported it missing. The cast compares the CF type ID now; that form was compiled and run
+  under Swift 6.4 on macOS 27 in the QA session (192 kHz mono, stereo per channel, a 186 s
+  file in 0.18 s at 23 MB).
+- **`make install` hid that failure behind "Verified on this Mac".** It now checks the
+  patched framework for `audio-levels` and `silence-detector`, names any missing one in the
+  final banner and exits non-zero; patcher step 3c prints the compiler output. `make
+  install-check` reports the helpers and exits non-zero when something needs attention; it
+  used to run the live check against a stale virtualenv, print a traceback and exit 0.
+- **`add_clip_to_timeline` by `name` or `index` never found a clip** ("Clip not found"):
+  the lookup asked events for `ownedClips`, which FCP 12.3 does not answer as an array. It
+  now walks the same `displayOwnedClips` listing `browser_list_clips` shows, so `index` is
+  that listing's index, and the error says what was searched. It also accepted the handle
+  of a clip already on the timeline and appended a copy of it; such handles are refused,
+  with FCP's copy and paste named as the way to repeat a timeline clip.
+- **`select_clip_in_lane` found no connected clips** ("0 candidates in that lane"): it read
+  each spine clip's `anchoredItems` as an NSArray, which FCP does not hand back for every
+  clip. Candidates now come from the same walk `get_timeline_clips` reports (lane relative
+  to the primary storyline, absolute range, nested clips included), the selection goes
+  through the path `select_clips` uses, and the answer carries the clip's range and whether
+  it is selected.
+- **`import_media(event=...)` failed for every event name** ("No event found"): the lookup
+  asked `FFEventRecord` for `name`; it answers `displayName`, the name the browser shows.
+  The error now names the event that was asked for.
+- **`bridge_status` reported the Mac's uptime as `process_uptime_seconds`** (it read
+  `systemUptime`) and a stale version, 3.1.148: the patcher's own clang compile passed no
+  `-DSPLICEKIT_VERSION`, so the header's fallback won. Uptime now counts from SpliceKit's
+  load into the process (at launch), the patcher passes the version from
+  `Version.xcconfig`, and the header fallback reads "unversioned" instead of a number.
+- **`tests/live_timeline_reads_check.py` misread refusals**: a JSON-RPC error object was
+  tested as if it were a string, so `--place-check` failed on a correct refusal and
+  `--audio-check` could not recognise "helper not found". Errors are reduced to their
+  message before the checks see them.
+- **`Scripts/launch.sh` looked for the patched app under `~/Applications/SpliceKit`**, where
+  older patchers put it; `make install` installs "Final Cut Pro Modified.app" in
+  `/Applications`, which it checks first now.
 - **Bridge round trips are serialized.** The 2.x SDK runs synchronous tools in
   worker threads, so two tool calls can overlap; the shared socket to the bridge
   is now guarded by a lock so responses cannot be mixed up between them.

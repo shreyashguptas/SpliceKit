@@ -79,6 +79,17 @@ done
 
 MODDED_APP="$DEST_DIR/${APP_NAME%.app}.app"
 
+# The audio helpers the patcher's step 3c builds (swiftc) into the framework:
+# audio-levels (get_audio_levels) and silence-detector (the silence remover).
+# Prints the names of the ones that are not in the patched app, one per line;
+# prints nothing when both are installed.
+missing_audio_helpers() {
+    local resources="$MODDED_APP/Contents/Frameworks/SpliceKit.framework/Versions/A/Resources" h
+    for h in audio-levels silence-detector; do
+        [[ -x "$resources/$h" ]] || printf '%s\n' "$h"
+    done
+}
+
 # A TTY on both stdin and stdout is required to draw a menu and read arrow keys.
 # Without one (CI, a pipe, make with output captured) fall back to --yes so the
 # run still completes instead of blocking forever on a prompt nobody can see.
@@ -414,7 +425,7 @@ ensure_mcp() {
     step "MCP server"
     if $CHECK_ONLY; then
         "$REPO_DIR/Scripts/setup-mcp.sh" --check
-        return 0
+        return $?
     fi
     local rc=0
     "$REPO_DIR/Scripts/setup-mcp.sh" || rc=$?
@@ -437,6 +448,13 @@ verify_live() {
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
         warn "No MCP virtualenv at $VENV_PYTHON — nothing to drive the app with"
+        LIVE_STATUS="skipped"; return 1
+    fi
+    # The same probe setup-mcp.sh uses: an older venv (mcp 1.x) imports `mcp` but
+    # not the 2.x server module the check script needs, and would only print a
+    # traceback here.
+    if ! "$VENV_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
+        warn "The MCP virtualenv at $VENV_DIR has no working mcp 2.x package — run: make install (or make mcp-setup)"
         LIVE_STATUS="skipped"; return 1
     fi
     if ! is_patched; then
@@ -504,13 +522,30 @@ printf '  target: %s\n' "$MODDED_APP"
 $INTERACTIVE || printf '  %snon-interactive: assuming yes to prompts%s\n' "$DIM" "$NC"
 
 if $CHECK_ONLY; then
-    ensure_toolchain   || true
-    ensure_python      || true
-    ensure_patched_app || true
-    ensure_mcp         || true
-    verify_live        || true
-    printf '\n'; info "Check complete — nothing was changed."
-    exit 0
+    CHECK_OK=true
+    ensure_toolchain   || CHECK_OK=false
+    ensure_python      || CHECK_OK=false
+    ensure_patched_app || CHECK_OK=false
+    if is_patched; then
+        missing="$(missing_audio_helpers | tr '\n' ' ')"
+        if [[ -n "${missing// /}" ]]; then
+            warn "Audio helper(s) missing from the patched app: ${missing% } — get_audio_levels will report the helper as missing (re-run: make install)"
+            CHECK_OK=false
+        else
+            log "Audio helpers installed: audio-levels, silence-detector"
+        fi
+    fi
+    ensure_mcp         || CHECK_OK=false
+    # A live check that could not run (app not open, no venv) is reported above but
+    # is not a failure of the install; one that ran and failed is.
+    verify_live        || { [[ "$LIVE_STATUS" == "failed" ]] && CHECK_OK=false; }
+    printf '\n'
+    if $CHECK_OK; then
+        info "Check complete — nothing was changed."
+        exit 0
+    fi
+    warn "Check complete — something above needs attention (nothing was changed)."
+    exit 1
 fi
 
 # The patcher asks its own yes/no questions (low disk space, an unpatched copy
@@ -528,12 +563,22 @@ verify_live || true
 
 step "Done"
 EXIT_CODE=0
+HELPERS_MISSING=""
+if is_patched; then
+    HELPERS_MISSING="$(missing_audio_helpers | tr '\n' ' ')"
+    HELPERS_MISSING="${HELPERS_MISSING% }"
+fi
+HELPERS_LINE="  - the audio helpers (audio-levels, silence-detector) are in the patched app"
+if [[ -n "$HELPERS_MISSING" ]]; then
+    HELPERS_LINE="  - NOT installed: audio helper(s) $HELPERS_MISSING (see below)"
+fi
 case "$LIVE_STATUS" in
     verified)
 cat <<EOF
 
 Verified on this Mac:
   - "$APP_NAME" is patched, running, and its bridge answers on 127.0.0.1:9876
+$HELPERS_LINE
   - the MCP server (official MCP SDK 2.x) passed its full self-check: every
     tool, resource and prompt over MCP against a stand-in bridge
   - the same server read from the running Final Cut Pro (bridge, ObjC runtime,
@@ -567,6 +612,18 @@ EOF
         EXIT_CODE=1
         ;;
 esac
+
+if [[ -n "$HELPERS_MISSING" ]]; then
+cat <<EOF
+
+NOT installed: the audio helper(s) $HELPERS_MISSING did not build (patcher step 3c),
+so get_audio_levels (and the silence remover, for silence-detector) will report the
+helper as missing. The compiler output is above and in:
+  $REPO_DIR/build/<helper>-build.log
+Fix the build (swiftc from the Command Line Tools), then re-run:  make install
+EOF
+    EXIT_CODE=1
+fi
 
 if $CLAUDE_DESKTOP_SKIPPED; then
 cat <<EOF

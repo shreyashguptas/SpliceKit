@@ -99,7 +99,16 @@ def rpc(method, params=None, timeout=20):
         data += chunk
     s.close()
     resp = json.loads(data.decode().strip())
-    res = resp.get("result", resp)
+    if "result" in resp:
+        res = resp["result"]
+    else:
+        # A refused call comes back as a JSON-RPC error object ({"message", "code"}); hand it
+        # on as {"error": "<message>"} so every check can test the text the same way.
+        err = resp.get("error")
+        if isinstance(err, dict):
+            res = {"error": err.get("message") or json.dumps(err), "code": err.get("code")}
+        else:
+            res = resp
     RAW.setdefault(method, []).append({"params": params, "result": res})
     return res
 

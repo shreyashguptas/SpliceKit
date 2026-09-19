@@ -154,10 +154,15 @@ if rangeDuration / sliceSeconds > Double(maxSlices) {
     sliceSeconds = rangeDuration / Double(maxSlices)
 }
 
-// The first track's natural format: sample rate and channel count.
+// The first track's natural format: sample rate and channel count. formatDescriptions
+// is [Any] holding CMFormatDescription CF objects; Swift 6.4 rejects `as?` to a CF type
+// ("conditional downcast ... will always succeed" is an error there), so the CF type ID
+// is compared and the reference bit-cast.
 var nativeRate: Double = 48000
 var nativeChannels: Int = 1
-if let fd = audioTracks[0].formatDescriptions.first, let desc = fd as? CMFormatDescription {
+if let fd = audioTracks[0].formatDescriptions.first,
+   CFGetTypeID(fd as CFTypeRef) == CMFormatDescriptionGetTypeID() {
+    let desc = unsafeBitCast(fd as AnyObject, to: CMFormatDescription.self)
     if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
         if asbd.mSampleRate > 0 { nativeRate = asbd.mSampleRate }
         if asbd.mChannelsPerFrame > 0 { nativeChannels = Int(asbd.mChannelsPerFrame) }
