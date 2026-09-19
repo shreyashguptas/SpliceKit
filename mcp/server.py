@@ -47,7 +47,8 @@ All operations are fully programmatic - no AppleScript, no UI automation.
 ## Standard Workflow
 1. bridge_status() -- verify FCP is running and connected
 2. open_project("My Project") -- load a project by name
-3. get_timeline_clips() -- see what's in the timeline (items, handles, durations)
+3. get_timeline_clips() -- see what's in the timeline: spine items, connected clips (titles, B-roll, music on lanes != 0) and markers, with handles
+   list_markers() -- markers only (time, kind, name, completion, handle), optional kind filter
 4. Perform actions using timeline_action() and playback_action()
 5. verify_action() -- confirm the edit took effect by comparing state snapshots
 6. capture_timeline() -- screenshot the timeline to visually verify clip layout
@@ -205,6 +206,7 @@ READ_ONLY_TOOLS = {
     "background_render_status",
     "dual_timeline_status",
     "get_timeline_clips",
+    "list_markers",
     "get_selected_clips",
     "verify_action",
     "get_object_property",
@@ -377,6 +379,7 @@ CUSTOM_TOOL_TITLES = {
     "background_render_status": "Background Render Status",
     "background_render_control": "Background Render Control",
     "get_timeline_clips": "Get Timeline Clips",
+    "list_markers": "List Markers",
     "get_selected_clips": "Get Selected Clips",
     "set_timeline_range": "Set Timeline Range",
     "batch_export": "Batch Export Clips",
@@ -1168,14 +1171,122 @@ def seek_to_time(seconds: float) -> str:
 # Read the timeline's current contents as structured data.
 # This is how the AI "sees" what's in the project.
 
+def _time_seconds(container, key):
+    """Read container[key]["seconds"] from a bridge CMTime dict, or None if absent."""
+    if not isinstance(container, dict):
+        return None
+    t = container.get(key)
+    if isinstance(t, dict) and isinstance(t.get("seconds"), (int, float)):
+        return float(t["seconds"])
+    return None
+
+
+def _fmt_secs(value, width=8):
+    """Right-aligned seconds column ('   1.50s') or '?' when unknown."""
+    if value is None:
+        return f"{'?':>{width}}"
+    return f"{value:>{width - 1}.2f}s"
+
+
+def _connected_lane(c):
+    """Lane relative to the spine. The bridge reports `effectiveLane` (nested anchors
+    have lanes relative to their parent); fall back to the raw `lane`."""
+    lane = c.get("effectiveLane")
+    if lane is None:
+        lane = c.get("lane", 0)
+    return lane or 0
+
+
+def _connected_table_lines(connected):
+    """Render connectedItems from timeline.getDetailedState as a table,
+    sorted by start time then lane."""
+    if not connected:
+        return []
+    ordered = sorted(
+        connected,
+        key=lambda c: (
+            _time_seconds(c, "startTime") is None,
+            _time_seconds(c, "startTime") or 0.0,
+            _connected_lane(c),
+        ),
+    )
+    lines = [
+        f"{'Lane':>4} {'Class':<30} {'Name':<20} {'Start':>8} {'End':>8} {'Duration':>10} {'Parent':>6} {'Sel':>4} {'Handle'}",
+        "-" * 118,
+    ]
+    for c in ordered:
+        dur_s = _time_seconds(c, "duration")
+        lines.append(
+            f"{_connected_lane(c):>4} "
+            f"{str(c.get('class', '?')):<30} "
+            f"{str(c.get('name', ''))[:20]:<20} "
+            f"{_fmt_secs(_time_seconds(c, 'startTime'))} "
+            f"{_fmt_secs(_time_seconds(c, 'endTime'))} "
+            f"{(dur_s if dur_s is not None else 0.0):>9.3f}s "
+            f"{c.get('parentIndex', '?'):>6} "
+            f"{'*' if c.get('selected') else ' ':>4} "
+            f"{c.get('handle', '')}"
+        )
+    return lines
+
+
+def _marker_table_lines(markers):
+    """Render marker dicts (timeline.getDetailedState / timeline.getMarkers) as a table
+    sorted by time. The Done column only appears when some marker reports `completed`."""
+    if not markers:
+        return []
+    ordered = sorted(
+        markers,
+        key=lambda m: (_time_seconds(m, "time") is None, _time_seconds(m, "time") or 0.0),
+    )
+    has_done = any("completed" in m for m in markers)
+    header = f"{'Time':>9} {'Kind':<9} {'Name':<30}"
+    if has_done:
+        header += f" {'Done':<5}"
+    header += " Handle"
+    lines = [header, "-" * (len(header) + 8)]
+    for m in ordered:
+        secs = _time_seconds(m, "time")
+        time_str = f"{secs:>8.3f}s" if secs is not None else f"{'?':>9}"
+        row = f"{time_str} {str(m.get('kind', '?')):<9} {str(m.get('name', ''))[:30]:<30}"
+        if has_done:
+            done = m.get("completed")
+            done_str = "" if done is None else ("yes" if done else "no")
+            row += f" {done_str:<5}"
+        row += f" {m.get('handle', '')}"
+        lines.append(row)
+    return lines
+
+
 @mcp.tool(annotations=_tool_annotations("get_timeline_clips"))
-def get_timeline_clips(limit: int = 100) -> str:
-    """Get structured list of all clips in the current timeline.
-    Returns: sequence name, playhead time, duration, and for each item:
-    index, class, name, duration (seconds), lane, mediaType, selected, handle.
+def get_timeline_clips(limit: int = 100, include_connected: bool = True,
+                       include_markers: bool = True) -> str:
+    """Get a structured view of everything in the current timeline.
+
+    Returns sequence name, playhead time, duration, then three sections:
+
+    1. Primary storyline (spine) items: index, class, name, start/end, duration,
+       lane, selected, handle.
+    2. Connected clips -- everything anchored to spine clips: titles, B-roll,
+       captions-as-titles, music/SFX on negative lanes, and the contents of
+       connected storylines. Columns: lane (relative to the spine; positive is
+       above, negative below), class, name, start, end, duration, parent (spine
+       index the clip is anchored to), selected, handle.
+    3. Markers: time, kind (standard/todo/chapter/keyword/analysis), name,
+       done (to-do completion, when readable), handle. Marker handles work with
+       timeline.directAction changeMarkerName / markMarkerCompleted / removeMarker.
+
+    Args:
+        limit: max spine items to list (connected clips/markers cover ALL spine items)
+        include_connected: walk anchoredItems for connected clips (default True)
+        include_markers: query markers via markersInTimeRange + anchored walk (default True)
+
     Handles can be used with get_object_property() for deeper inspection.
+    Use list_markers() for a markers-only view with a kind filter.
     """
-    r = bridge.call("timeline.getDetailedState", limit=limit)
+    r = bridge.call("timeline.getDetailedState", limit=limit,
+                    include_connected=include_connected,
+                    include_markers=include_markers)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
@@ -1188,6 +1299,14 @@ def get_timeline_clips(limit: int = 100) -> str:
     lines.append(f"Duration: {dur.get('seconds', 0):.3f}s")
     lines.append(f"Items: {r.get('itemCount', 0)}")
     lines.append(f"Selected: {r.get('selectedCount', 0)}")
+    if include_connected:
+        lines.append(f"Connected: {r.get('connectedCount', 0)}")
+    if include_markers:
+        lines.append(f"Markers: {r.get('markerCount', 0)}")
+    if r.get("connectedItemsError"):
+        lines.append(f"WARNING connected clips: {r['connectedItemsError']}")
+    if r.get("markersError"):
+        lines.append(f"WARNING markers: {r['markersError']}")
 
     items = r.get("items", [])
     if items:
@@ -1225,16 +1344,87 @@ def get_timeline_clips(limit: int = 100) -> str:
                     f"{item.get('handle', '')}"
                 )
 
+    if include_connected:
+        connected = r.get("connectedItems", []) or []
+        if connected:
+            lines.append("\nConnected clips (anchored to spine items):")
+            lines.extend(_connected_table_lines(connected))
+            if r.get("connectedTruncated"):
+                lines.append("(connected list truncated -- raise connected_limit on timeline.getDetailedState)")
+
+    if include_markers:
+        markers = r.get("markers", []) or []
+        if markers:
+            lines.append("\nMarkers:")
+            lines.extend(_marker_table_lines(markers))
+            if r.get("markersTruncated"):
+                lines.append(f"(showing {len(markers)} of {r.get('markerTotal', '?')} markers)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_tool_annotations("list_markers"))
+def list_markers(kind: str = "") -> str:
+    """List all markers on the current timeline with time, kind, name, completion, handle.
+
+    Markers are gathered two ways and merged: the sequence's markersInTimeRange:
+    query over the whole timeline, plus markers found anchored to spine and
+    connected clips. Each marker's `timeSource` in the raw RPC says which path
+    resolved its time.
+
+    Args:
+        kind: optional filter -- "standard", "todo", "chapter", "keyword" or "analysis"
+
+    Marker handles can be passed to timeline.directAction actions
+    changeMarkerName / markMarkerCompleted / removeMarker (via the `marker` param).
+    """
+    params = {}
+    if kind:
+        params["kind"] = kind
+    r = bridge.call("timeline.getMarkers", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+
+    lines = [f"Sequence: {r.get('sequenceName', '?')}"]
+    count = r.get("markerCount", 0)
+    lines.append(f"Markers: {count}" + (f" (kind={kind})" if kind else ""))
+    if r.get("markersError"):
+        lines.append(f"WARNING markers: {r['markersError']}")
+
+    sources = r.get("markerSources") or {}
+    markers = r.get("markers", []) or []
+    if markers:
+        lines.append("")
+        lines.extend(_marker_table_lines(markers))
+        if r.get("markersTruncated"):
+            lines.append(f"(showing {len(markers)} of {r.get('markerTotal', '?')} markers)")
+    else:
+        if sources and not sources.get("sequenceRespondsToMarkersInTimeRange", True) \
+                and not sources.get("anchoredWalk", 0):
+            lines.append("No markers found: the sequence does not respond to markersInTimeRange: "
+                         "and no markers were found on anchored items.")
+        elif kind:
+            lines.append(f"No markers of kind '{kind}'.")
+        else:
+            lines.append("No markers found.")
+    if sources:
+        lines.append(
+            f"Sources: markersInTimeRange={sources.get('markersInTimeRange', 0)}, "
+            f"anchoredWalk={sources.get('anchoredWalk', 0)}"
+        )
     return "\n".join(lines)
 
 
 @mcp.tool(annotations=_tool_annotations("get_selected_clips"))
 def get_selected_clips() -> str:
-    """Get only the currently selected clips in the timeline."""
+    """Get only the currently selected clips in the timeline.
+    Includes selected connected clips (titles, B-roll, music), marked with "connected": true.
+    """
     r = bridge.call("timeline.getDetailedState")
     if _err(r):
         return f"Error: {r.get('error', r)}"
     items = [i for i in r.get("items", []) if i.get("selected")]
+    items += [dict(i, connected=True) for i in (r.get("connectedItems", []) or []) if i.get("selected")]
     if not items:
         return "No clips selected"
     return _fmt({"selectedCount": len(items), "items": items})
@@ -1304,6 +1494,8 @@ def verify_action(description: str = "") -> str:
         "playhead_seconds": r.get("playheadTime", {}).get("seconds", 0),
         "item_count": r.get("itemCount", 0),
         "selected_count": r.get("selectedCount", 0),
+        "connected_count": r.get("connectedCount", 0),
+        "marker_count": r.get("markerCount", 0),
         "sequence_name": r.get("sequenceName", ""),
         "description": description,
         "timestamp": time.time()

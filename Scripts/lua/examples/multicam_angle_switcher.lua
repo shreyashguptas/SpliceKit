@@ -123,19 +123,18 @@ end
 -- Mode: Markers (switch at each marker position)
 -----------------------------------------------------------
 local function run_markers()
-    -- Get timeline state which includes marker info
+    -- timeline.getDetailedState returns top-level `markers` (merged from the
+    -- sequence's markersInTimeRange: query and markers anchored to clips).
+    -- Each marker's time is a CMTime table; .seconds is absolute timeline time,
+    -- the same time base sk.seek() uses.
     local state = sk.rpc("timeline.getDetailedState", {})
-    local items = state.items or {}
+    local markers = state.markers or {}
 
     -- Collect marker positions
     local marker_times = {}
-    for _, item in ipairs(items) do
-        if item.markers then
-            for _, marker in ipairs(item.markers) do
-                if marker.time then
-                    table.insert(marker_times, marker.time)
-                end
-            end
+    for _, marker in ipairs(markers) do
+        if marker.time and marker.time.seconds then
+            table.insert(marker_times, marker.time.seconds)
         end
     end
 

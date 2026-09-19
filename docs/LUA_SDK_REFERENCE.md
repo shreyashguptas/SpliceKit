@@ -644,6 +644,34 @@ sk.rpc("timeline.addMarkers", {
 })
 ```
 
+### Read Markers
+
+```lua
+-- All markers on the active timeline, sorted by time.
+-- Each entry: handle, class, name, kind (standard|todo|chapter|keyword|analysis),
+-- time/endTime/duration (CMTime tables with .seconds), timeSource, and -- when
+-- readable -- completed (to-do markers), note, parentHandle (clip it is anchored to).
+local r = sk.rpc("timeline.getMarkers", {})
+for _, m in ipairs(r.markers or {}) do
+    local secs = m.time and m.time.seconds or -1
+    sk.log(string.format("%8.2fs  %-8s  %s  [%s]", secs, m.kind, m.name, m.handle))
+end
+
+-- Filter by kind
+local chapters = sk.rpc("timeline.getMarkers", {kind = "chapter"})
+
+-- Marker handles feed the direct marker actions
+sk.rpc("timeline.directAction", {action = "changeMarkerName", name = "Intro", marker = r.markers[1].handle})
+
+-- timeline.getDetailedState now also returns connected clips and markers:
+--   state.connectedItems  -- titles, B-roll, music on lanes ~= 0, connected storyline
+--                         -- contents; each has lane, startTime/endTime, parentIndex
+--                         -- (spine index), parentHandle, depth, hasVideo/hasAudio
+--   state.markers         -- same marker entries as timeline.getMarkers
+local state = sk.rpc("timeline.getDetailedState", {})
+sk.log(#(state.connectedItems or {}) .. " connected clips, " .. #(state.markers or {}) .. " markers")
+```
+
 ### Direct Marker Manipulation
 
 ```lua

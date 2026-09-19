@@ -91,6 +91,12 @@ static NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack,
 static NSArray *SpliceKit_mixerArrayFromContainer(id value);
 static BOOL SpliceKit_mixerIsCollectionLike(id item);
 static BOOL SpliceKit_mixerIsSkippableItem(id item);
+// Used by timeline.getDetailedState's connected-clip/marker walk; defined later in the file.
+// (The CMTime-typed helpers it also needs are forward-declared after the CMTime typedefs below.)
+static BOOL SpliceKit_boolForSelector(id item, NSString *selectorName);
+static NSInteger SpliceKit_laneForItem(id item);
+static NSString *SpliceKit_displayNameForItem(id item);
+static NSString *SpliceKit_readClipRole(id clip);
 static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey);
 static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey);
 static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSString *scopeKey, NSArray<NSDictionary *> *busTargets);
@@ -215,6 +221,9 @@ static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBro
                                                                     SpliceKit_CMTimeRange clipRange,
                                                                     BOOL preferAudio);
 static id SpliceKit_normalizeSourceObjectForInsertion(id sourceObject);
+// Defined after timeline.getDetailedState (which uses them for the connected-clip walk).
+static double SpliceKit_secondsFromTime(SpliceKit_CMTime t);
+static BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, SpliceKit_CMTimeRange *outRange);
 
 static NSDictionary *SpliceKit_serializeCMTime(SpliceKit_CMTime t) {
     double seconds = (t.timescale > 0) ? (double)t.value / t.timescale : 0;
@@ -1099,11 +1108,526 @@ static NSDictionary *SpliceKit_handleSetProperty(NSDictionary *params) {
 // FCP's data model: sequence -> primaryObject (FFAnchoredCollection) -> containedItems.
 // Each item is an FFAnchoredMediaComponent (clip), FFAnchoredTransition, or gap.
 //
+// Connected clips (titles, B-roll, music on negative lanes, connected storylines)
+// live in each spine item's `anchoredItems`, and markers are FFAnchoredObjects
+// anchored to clips as well. The helpers below walk that graph defensively so
+// the snapshot also reports `connectedItems` and `markers`.
+//
+
+// ---------------------------------------------------------------------------
+// Return-type guards. Before calling an unverified private selector that we
+// expect to return a struct or BOOL, check the method signature so we never
+// invoke it with the wrong return convention (which would corrupt the stack
+// on x86_64 or misread registers on arm64).
+// ---------------------------------------------------------------------------
+
+static const char *SpliceKit_skipTypeQualifiers(const char *type) {
+    if (!type) return "";
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
+           *type == 'O' || *type == 'R' || *type == 'V') {
+        type++;
+    }
+    return type;
+}
+
+static NSString *SpliceKit_returnEncodingForSelector(id obj, SEL sel) {
+    if (!obj || !sel) return nil;
+    NSMethodSignature *sig = nil;
+    @try {
+        sig = [obj methodSignatureForSelector:sel];
+    } @catch (NSException *e) {
+        sig = nil;
+    }
+    if (!sig) return nil;
+    const char *retType = SpliceKit_skipTypeQualifiers([sig methodReturnType]);
+    if (!retType || retType[0] == '\0') return nil;
+    return [NSString stringWithUTF8String:retType];
+}
+
+// CMTime encodes as {?=qiIq}; CMTimeRange as {?={?=qiIq}{?=qiIq}}.
+static NSUInteger SpliceKit_countCMTimeFieldsInEncoding(NSString *encoding) {
+    if (encoding.length == 0) return 0;
+    NSArray *parts = [encoding componentsSeparatedByString:@"qiIq"];
+    return parts.count > 0 ? parts.count - 1 : 0;
+}
+
+static BOOL SpliceKit_selectorReturnsCMTime(id obj, SEL sel) {
+    NSString *encoding = SpliceKit_returnEncodingForSelector(obj, sel);
+    if (encoding.length == 0 || ![encoding hasPrefix:@"{"]) return NO;
+    return SpliceKit_countCMTimeFieldsInEncoding(encoding) == 1;
+}
+
+static BOOL SpliceKit_selectorReturnsCMTimeRange(id obj, SEL sel) {
+    NSString *encoding = SpliceKit_returnEncodingForSelector(obj, sel);
+    if (encoding.length == 0 || ![encoding hasPrefix:@"{"]) return NO;
+    return SpliceKit_countCMTimeFieldsInEncoding(encoding) == 2;
+}
+
+static BOOL SpliceKit_selectorReturnsBOOL(id obj, SEL sel) {
+    NSString *encoding = SpliceKit_returnEncodingForSelector(obj, sel);
+    if (encoding.length == 0) return NO;
+    unichar c = [encoding characterAtIndex:0];
+    return c == 'B' || c == 'c';
+}
+
+static BOOL SpliceKit_selectorReturnsObject(id obj, SEL sel) {
+    NSString *encoding = SpliceKit_returnEncodingForSelector(obj, sel);
+    return encoding.length > 0 && [encoding characterAtIndex:0] == '@';
+}
+
+// ---------------------------------------------------------------------------
+// Guarded probes: respondsToSelector + return-type check + @try.
+// ---------------------------------------------------------------------------
+
+static BOOL SpliceKit_tryReadBoolSelector(id obj, NSString *name, BOOL *out) {
+    if (!obj || name.length == 0 || !out) return NO;
+    SEL sel = NSSelectorFromString(name);
+    if (![obj respondsToSelector:sel]) return NO;
+    if (!SpliceKit_selectorReturnsBOOL(obj, sel)) return NO;
+    @try {
+        *out = ((BOOL (*)(id, SEL))objc_msgSend)(obj, sel);
+        return YES;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, SpliceKit_CMTime *out) {
+    if (!obj || name.length == 0 || !out) return NO;
+    SEL sel = NSSelectorFromString(name);
+    if (![obj respondsToSelector:sel]) return NO;
+    if (!SpliceKit_selectorReturnsCMTime(obj, sel)) return NO;
+    @try {
+        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(obj, sel);
+        if (t.timescale > 0) {
+            *out = t;
+            return YES;
+        }
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static BOOL SpliceKit_tryReadCMTimeRangeSelector(id obj, NSString *name, SpliceKit_CMTimeRange *out) {
+    if (!obj || name.length == 0 || !out) return NO;
+    SEL sel = NSSelectorFromString(name);
+    if (![obj respondsToSelector:sel]) return NO;
+    if (!SpliceKit_selectorReturnsCMTimeRange(obj, sel)) return NO;
+    @try {
+        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(obj, sel);
+        if (r.start.timescale > 0 && r.duration.timescale > 0) {
+            *out = r;
+            return YES;
+        }
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static NSString *SpliceKit_tryReadStringSelector(id obj, NSString *name) {
+    if (!obj || name.length == 0) return nil;
+    SEL sel = NSSelectorFromString(name);
+    if (![obj respondsToSelector:sel]) return nil;
+    if (!SpliceKit_selectorReturnsObject(obj, sel)) return nil;
+    @try {
+        id value = ((id (*)(id, SEL))objc_msgSend)(obj, sel);
+        if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// end = start + duration, normalised to start's timescale (same math the spine loop uses).
+static SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
+    SpliceKit_CMTime endTime = range.start;
+    if (range.duration.timescale == range.start.timescale) {
+        endTime.value = range.start.value + range.duration.value;
+    } else if (range.duration.timescale > 0 && range.start.timescale > 0) {
+        endTime.value = range.start.value +
+            (range.duration.value * range.start.timescale / range.duration.timescale);
+    }
+    return endTime;
+}
+
+static SpliceKit_CMTime SpliceKit_timeFromSeconds(double seconds, int32_t timescale) {
+    int32_t ts = timescale > 0 ? timescale : 600;
+    SpliceKit_CMTime t = {(int64_t)round(seconds * ts), ts, 1, 0};
+    return t;
+}
+
+// ---------------------------------------------------------------------------
+// Markers
+// ---------------------------------------------------------------------------
+
+static BOOL SpliceKit_isMarkerLikeItem(id item) {
+    if (!item) return NO;
+    NSString *cls = NSStringFromClass([item class]) ?: @"";
+    return [cls containsString:@"Marker"];
+}
+
+// Marker kind from class name first (FFAnchoredChapterMarker, FFAnchoredKeywordMarker, ...),
+// then from BOOL probes on the marker object. Probed selectors (unverified, all guarded):
+//   chapter: isChapter, isChapterMarker
+//   todo:    isToDo, isTodo, isToDoMarker, isIncomplete, isCompleted (a completed to-do is still a to-do)
+static NSString *SpliceKit_markerKindForItem(id marker) {
+    if (!marker) return @"standard";
+    NSString *cls = NSStringFromClass([marker class]) ?: @"";
+    if ([cls containsString:@"Keyword"]) return @"keyword";
+    if ([cls containsString:@"Analysis"]) return @"analysis";
+    if ([cls containsString:@"Chapter"]) return @"chapter";
+
+    BOOL flag = NO;
+    NSArray<NSString *> *chapterSelectors = @[@"isChapter", @"isChapterMarker"];
+    for (NSString *name in chapterSelectors) {
+        flag = NO;
+        if (SpliceKit_tryReadBoolSelector(marker, name, &flag) && flag) return @"chapter";
+    }
+    NSArray<NSString *> *todoSelectors = @[@"isToDo", @"isTodo", @"isToDoMarker", @"isIncomplete", @"isCompleted"];
+    for (NSString *name in todoSelectors) {
+        flag = NO;
+        if (SpliceKit_tryReadBoolSelector(marker, name, &flag) && flag) return @"todo";
+    }
+    return @"standard";
+}
+
+// Serialises one marker. Time resolution order:
+//   1. effectiveRangeOfObject: on the spine (absolute timeline position). Only
+//      attempted when the marker is an FFAnchoredObject, the same base class as
+//      the clips that method is known to accept.
+//   2. CMTimeRange selectors on the marker: timeRange, range, anchoredRange
+//   3. CMTime selectors on the marker: anchoredOffset (+ parent start when known),
+//      startTime, time, offset (start only)
+// `timeSource` records which path produced `time` so a live tester can see what fired.
+static NSDictionary *SpliceKit_describeMarker(id marker, id primaryObj, NSString *parentHandle,
+                                              BOOL haveParentStart, double parentStartSeconds) {
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    if (!marker) return info;
+
+    info[@"handle"] = SpliceKit_storeHandle(marker) ?: @"";
+    info[@"class"] = NSStringFromClass([marker class]) ?: @"";
+
+    NSString *name = SpliceKit_displayNameForItem(marker);
+    if (name.length == 0) {
+        name = SpliceKit_tryReadStringSelector(marker, @"name");
+    }
+    info[@"name"] = name ?: @"";
+    info[@"kind"] = SpliceKit_markerKindForItem(marker);
+
+    // Completion (to-do markers). Only emitted when a probe actually succeeded.
+    NSArray<NSString *> *completedSelectors = @[@"isCompleted", @"completed", @"isDone"];
+    for (NSString *selName in completedSelectors) {
+        BOOL completed = NO;
+        if (SpliceKit_tryReadBoolSelector(marker, selName, &completed)) {
+            info[@"completed"] = @(completed);
+            info[@"completedSource"] = selName;
+            break;
+        }
+    }
+
+    // Note text. Only emitted when non-empty.
+    NSArray<NSString *> *noteSelectors = @[@"note", @"notes", @"comment"];
+    for (NSString *selName in noteSelectors) {
+        NSString *note = SpliceKit_tryReadStringSelector(marker, selName);
+        if (note.length > 0) {
+            info[@"note"] = note;
+            break;
+        }
+    }
+
+    if (parentHandle.length > 0) info[@"parentHandle"] = parentHandle;
+
+    SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    BOOL haveRange = NO;
+    NSString *timeSource = @"unknown";
+
+    Class anchoredObjectClass = objc_getClass("FFAnchoredObject");
+    BOOL isAnchoredObject = anchoredObjectClass && [marker isKindOfClass:anchoredObjectClass];
+    if (isAnchoredObject && SpliceKit_tryReadTimelineRange(primaryObj, marker, &range)) {
+        haveRange = YES;
+        timeSource = @"effectiveRange";
+    } else {
+        NSArray<NSString *> *rangeSelectors = @[@"timeRange", @"range", @"anchoredRange"];
+        for (NSString *selName in rangeSelectors) {
+            if (SpliceKit_tryReadCMTimeRangeSelector(marker, selName, &range)) {
+                haveRange = YES;
+                timeSource = [NSString stringWithFormat:@"rangeSelector:%@", selName];
+                break;
+            }
+        }
+    }
+
+    if (haveRange) {
+        info[@"time"] = SpliceKit_serializeCMTime(range.start);
+        info[@"duration"] = SpliceKit_serializeCMTime(range.duration);
+        info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
+    } else {
+        NSArray<NSString *> *timeSelectors = @[@"anchoredOffset", @"startTime", @"time", @"offset"];
+        for (NSString *selName in timeSelectors) {
+            SpliceKit_CMTime t = {0, 0, 0, 0};
+            if (SpliceKit_tryReadCMTimeSelector(marker, selName, &t)) {
+                if ([selName isEqualToString:@"anchoredOffset"] && haveParentStart) {
+                    // anchoredOffset is relative to the parent clip; make it absolute
+                    // the same way the connected-clip fallback does.
+                    double absSeconds = parentStartSeconds + SpliceKit_secondsFromTime(t);
+                    info[@"time"] = SpliceKit_serializeCMTime(SpliceKit_timeFromSeconds(absSeconds, t.timescale));
+                    timeSource = @"anchoredOffset+parentStart";
+                } else {
+                    info[@"time"] = SpliceKit_serializeCMTime(t);
+                    timeSource = [NSString stringWithFormat:@"timeSelector:%@", selName];
+                }
+                break;
+            }
+        }
+    }
+    info[@"timeSource"] = timeSource;
+    return info;
+}
+
+// ---------------------------------------------------------------------------
+// Connected-clip walk
+// ---------------------------------------------------------------------------
+//
+// Enumerates `item`'s anchoredItems (always) and its containedItems (only when
+// `item` is a connected storyline or a non-video collection -- compound clips
+// are left to include_nested). Marker-like children go to outMarkers; every
+// other child is described with the same keys the spine items use plus
+// parentHandle / parentIndex / depth / relation / timeSource, then recursed into.
+//
+//   primaryObj             spine collection; effectiveRangeOfObject: gives absolute ranges
+//   container              collection to ask for a *relative* range when the spine fails
+//   containerStartSeconds /
+//   haveContainerStart     absolute start of `container` (0 / YES for the spine itself)
+//   haveParentStart /
+//   parentStartSeconds     absolute start of `item`, for the anchoredOffset fallback
+//   parentEffectiveLane    `item`'s lane relative to the spine (0 for spine items);
+//                          nested anchors report lanes relative to their parent, so
+//                          each child's `effectiveLane` = parentEffectiveLane + lane,
+//                          and items contained in a connected storyline inherit its lane
+//
+// `visited` holds "walk:<ptr>" for items already expanded and "<ptr>" for
+// children already emitted (items or markers), so the same object is never
+// reported twice even if the graph has shared references.
+
+static void SpliceKit_collectConnectedItems(id item,
+                                            id primaryObj,
+                                            id container,
+                                            double containerStartSeconds,
+                                            BOOL haveContainerStart,
+                                            BOOL haveParentStart,
+                                            double parentStartSeconds,
+                                            NSString *parentHandle,
+                                            NSInteger rootIndex,
+                                            NSInteger depth,
+                                            NSInteger parentEffectiveLane,
+                                            NSSet *selectedSet,
+                                            BOOL includeRoles,
+                                            NSMutableArray *outItems,
+                                            NSMutableArray *outMarkers,
+                                            NSMutableSet *visited,
+                                            NSInteger maxItems,
+                                            NSInteger maxDepth) {
+    if (!item || !outItems || !outMarkers || !visited) return;
+    if (depth > maxDepth) return;
+    if ((NSInteger)outItems.count >= maxItems) return;
+
+    NSString *pointerKey = SpliceKit_handlePointerKey(item);
+    if (pointerKey.length == 0) return;
+    NSString *walkKey = [@"walk:" stringByAppendingString:pointerKey];
+    if ([visited containsObject:walkKey]) return;
+    [visited addObject:walkKey];
+
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    NSArray *anchored = nil;
+    if ([item respondsToSelector:anchoredSel]) {
+        @try {
+            anchored = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, anchoredSel));
+        } @catch (NSException *e) {
+            anchored = nil;
+        }
+    }
+
+    // Descend into containedItems only for connected storylines / non-video collections.
+    BOOL itemIsConnectedStoryline = SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+    BOOL itemHasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+    BOOL walkContained = itemIsConnectedStoryline || (!itemHasVideo && SpliceKit_mixerIsCollectionLike(item));
+    NSArray *contained = nil;
+    SEL containedSel = NSSelectorFromString(@"containedItems");
+    if (walkContained && [item respondsToSelector:containedSel]) {
+        @try {
+            contained = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel));
+        } @catch (NSException *e) {
+            contained = nil;
+        }
+    }
+
+    SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
+
+    for (NSInteger pass = 0; pass < 2; pass++) {
+        BOOL isContainedPass = (pass == 1);
+        NSArray *children = isContainedPass ? contained : anchored;
+        if (children.count == 0) continue;
+
+        // Anchored children resolve relative to the same container as `item`;
+        // contained children resolve relative to `item` itself.
+        id childContainer = isContainedPass ? item : container;
+        double childContainerStart = isContainedPass ? parentStartSeconds : containerStartSeconds;
+        BOOL haveChildContainerStart = isContainedPass ? haveParentStart : haveContainerStart;
+        BOOL childContainerCanRange = childContainer && (childContainer != primaryObj) &&
+                                      haveChildContainerStart &&
+                                      [childContainer respondsToSelector:erSel];
+
+        for (id child in children) {
+            if ((NSInteger)outItems.count >= maxItems) return;
+            if (!child) continue;
+            NSString *childKey = SpliceKit_handlePointerKey(child);
+            if (childKey.length == 0 || [visited containsObject:childKey]) continue;
+
+            if (SpliceKit_isMarkerLikeItem(child)) {
+                [visited addObject:childKey];
+                [outMarkers addObject:SpliceKit_describeMarker(child, primaryObj, parentHandle,
+                                                               haveParentStart, parentStartSeconds)];
+                continue;
+            }
+            [visited addObject:childKey];
+
+            NSMutableDictionary *info = [NSMutableDictionary dictionary];
+            NSString *cls = NSStringFromClass([child class]) ?: @"";
+            info[@"class"] = cls;
+            info[@"name"] = SpliceKit_displayNameForItem(child);
+
+            SpliceKit_CMTime childDuration = {0, 0, 0, 0};
+            BOOL haveDuration = NO;
+            if ([child respondsToSelector:@selector(duration)]) {
+                @try {
+                    childDuration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(child, @selector(duration));
+                    haveDuration = childDuration.timescale > 0;
+                    info[@"duration"] = SpliceKit_serializeCMTime(childDuration);
+                } @catch (NSException *e) {}
+            }
+
+            NSInteger ownLane = SpliceKit_laneForItem(child);
+            info[@"lane"] = @(ownLane);
+            NSInteger effectiveLane = isContainedPass ? parentEffectiveLane : (parentEffectiveLane + ownLane);
+            info[@"effectiveLane"] = @(effectiveLane);
+
+            if ([child respondsToSelector:@selector(mediaType)]) {
+                @try {
+                    long long mt = ((long long (*)(id, SEL))objc_msgSend)(child, @selector(mediaType));
+                    info[@"mediaType"] = @(mt);
+                } @catch (NSException *e) {}
+            }
+
+            info[@"selected"] = @(selectedSet && [selectedSet containsObject:child]);
+
+            NSString *childHandle = SpliceKit_storeHandle(child);
+            info[@"handle"] = childHandle ?: @"";
+
+            SEL trimOffSel = NSSelectorFromString(@"trimmedOffset");
+            if ([child respondsToSelector:trimOffSel]) {
+                @try {
+                    SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(child, trimOffSel);
+                    info[@"trimmedOffset"] = SpliceKit_serializeCMTime(t);
+                } @catch (NSException *e) {}
+            }
+
+            if (parentHandle.length > 0) info[@"parentHandle"] = parentHandle;
+            info[@"parentIndex"] = @(rootIndex);
+            info[@"depth"] = @(depth);
+            info[@"relation"] = isContainedPass ? @"contained" : @"anchored";
+
+            BOOL hasVideo = SpliceKit_boolForSelector(child, @"hasVideo");
+            BOOL hasAudio = SpliceKit_boolForSelector(child, @"hasAudio");
+            BOOL isConnectedStoryline = SpliceKit_boolForSelector(child, @"isConnectedStoryline");
+            info[@"hasVideo"] = @(hasVideo);
+            info[@"hasAudio"] = @(hasAudio);
+            info[@"isConnectedStoryline"] = @(isConnectedStoryline);
+            info[@"isGap"] = @([cls containsString:@"Gap"]);
+            info[@"isTransition"] = @([cls containsString:@"Transition"]);
+
+            BOOL enabledFlag = NO;
+            if (SpliceKit_tryReadBoolSelector(child, @"isEnabled", &enabledFlag) ||
+                SpliceKit_tryReadBoolSelector(child, @"enabled", &enabledFlag)) {
+                info[@"enabled"] = @(enabledFlag);
+            }
+            if (includeRoles) {
+                NSString *role = SpliceKit_readClipRole(child);
+                if (role.length > 0) info[@"audioRole"] = role;
+            }
+
+            // Absolute timing: spine effectiveRange -> container-relative range -> anchoredOffset.
+            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            BOOL haveStart = NO;
+            double childStartSeconds = 0.0;
+            NSString *timeSource = @"unknown";
+
+            if (SpliceKit_tryReadTimelineRange(primaryObj, child, &range)) {
+                haveStart = YES;
+                childStartSeconds = SpliceKit_secondsFromTime(range.start);
+                timeSource = @"effectiveRange";
+                info[@"startTime"] = SpliceKit_serializeCMTime(range.start);
+                info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
+            } else if (childContainerCanRange && SpliceKit_tryReadTimelineRange(childContainer, child, &range)) {
+                haveStart = YES;
+                childStartSeconds = childContainerStart + SpliceKit_secondsFromTime(range.start);
+                timeSource = @"containerRange+containerStart";
+                SpliceKit_CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, range.start.timescale);
+                SpliceKit_CMTimeRange absRange = {absStart, range.duration};
+                info[@"startTime"] = SpliceKit_serializeCMTime(absStart);
+                info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(absRange));
+            } else {
+                SpliceKit_CMTime offset = {0, 0, 0, 0};
+                if (haveParentStart && SpliceKit_tryReadCMTimeSelector(child, @"anchoredOffset", &offset)) {
+                    haveStart = YES;
+                    childStartSeconds = parentStartSeconds + SpliceKit_secondsFromTime(offset);
+                    timeSource = @"anchoredOffset+parentStart";
+                    SpliceKit_CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, offset.timescale);
+                    info[@"startTime"] = SpliceKit_serializeCMTime(absStart);
+                    if (haveDuration) {
+                        SpliceKit_CMTimeRange absRange = {absStart, childDuration};
+                        info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(absRange));
+                    }
+                }
+            }
+            info[@"timeSource"] = timeSource;
+
+            [outItems addObject:info];
+
+            // Recurse: the child's own anchored items (and contained items when it qualifies).
+            SpliceKit_collectConnectedItems(child,
+                                            primaryObj,
+                                            childContainer,
+                                            childContainerStart,
+                                            haveChildContainerStart,
+                                            haveStart,
+                                            childStartSeconds,
+                                            childHandle,
+                                            rootIndex,
+                                            depth + 1,
+                                            effectiveLane,
+                                            selectedSet,
+                                            includeRoles,
+                                            outItems,
+                                            outMarkers,
+                                            visited,
+                                            maxItems,
+                                            maxDepth);
+        }
+    }
+}
 
 NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
     SpliceKit_installEffectDragSwizzlesNow();
     NSInteger limit = [params[@"limit"] integerValue] ?: 200;
     BOOL includeNested = [params[@"include_nested"] boolValue];
+    // Connected clips + markers are on by default (backward compatible: the
+    // existing `items` array is unchanged, these are additional keys).
+    BOOL includeConnected = [params[@"include_connected"] respondsToSelector:@selector(boolValue)]
+        ? [params[@"include_connected"] boolValue] : YES;
+    BOOL includeMarkers = [params[@"include_markers"] respondsToSelector:@selector(boolValue)]
+        ? [params[@"include_markers"] boolValue] : YES;
+    BOOL includeRoles = [params[@"include_roles"] respondsToSelector:@selector(boolValue)]
+        ? [params[@"include_roles"] boolValue] : NO;
+    NSInteger connectedLimit = [params[@"connected_limit"] integerValue] ?: 500;
+    NSInteger markerLimit = [params[@"marker_limit"] integerValue] ?: 1000;
+    if (connectedLimit < 1) connectedLimit = 500;
+    if (markerLimit < 1) markerLimit = 1000;
+    const NSInteger connectedMaxDepth = 8;
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -1203,10 +1727,15 @@ NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
                 itemsSource = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(containedItems));
             }
 
+            // Kept for the connected-clip / marker walk below, which covers ALL spine
+            // items (not just the first `limit`).
+            NSArray *spineArray = nil;
+
             if (itemsSource) {
                 id items = itemsSource;
                 if ([items isKindOfClass:[NSArray class]]) {
                     NSArray *arr = (NSArray *)items;
+                    spineArray = arr;
                     state[@"itemCount"] = @(arr.count);
                     NSMutableArray *itemList = [NSMutableArray array];
                     NSInteger count = MIN((NSInteger)arr.count, limit);
@@ -1243,6 +1772,21 @@ NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
                         // Store handle for the item
                         NSString *h = SpliceKit_storeHandle(item);
                         info[@"handle"] = h;
+
+                        // Media flags / enabled state / optional audio role (additive keys)
+                        info[@"hasVideo"] = @(SpliceKit_boolForSelector(item, @"hasVideo"));
+                        info[@"hasAudio"] = @(SpliceKit_boolForSelector(item, @"hasAudio"));
+                        {
+                            BOOL enabledFlag = NO;
+                            if (SpliceKit_tryReadBoolSelector(item, @"isEnabled", &enabledFlag) ||
+                                SpliceKit_tryReadBoolSelector(item, @"enabled", &enabledFlag)) {
+                                info[@"enabled"] = @(enabledFlag);
+                            }
+                        }
+                        if (includeRoles) {
+                            NSString *role = SpliceKit_readClipRole(item);
+                            if (role.length > 0) info[@"audioRole"] = role;
+                        }
 
                         // Trimmed offset (in-point in source media)
                         SEL trimOffSel = NSSelectorFromString(@"trimmedOffset");
@@ -1329,12 +1873,234 @@ NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
                 }
             }
 
+            // ------------------------------------------------------------------
+            // Spine bounds (absolute seconds) — used for the marker query window
+            // and as the parent start for the connected-clip walk.
+            // ------------------------------------------------------------------
+            double firstSpineStart = 0.0;
+            double lastSpineEnd = 0.0;
+            BOOL haveSpineBounds = NO;
+            if (spineArray && primaryObj) {
+                for (id spineItem in spineArray) {
+                    SpliceKit_CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                    if (!SpliceKit_tryReadTimelineRange(primaryObj, spineItem, &sr)) continue;
+                    double s = SpliceKit_secondsFromTime(sr.start);
+                    double e = s + SpliceKit_secondsFromTime(sr.duration);
+                    if (!isfinite(s) || !isfinite(e)) continue;
+                    if (!haveSpineBounds) {
+                        firstSpineStart = s;
+                        lastSpineEnd = e;
+                        haveSpineBounds = YES;
+                    } else {
+                        if (s < firstSpineStart) firstSpineStart = s;
+                        if (e > lastSpineEnd) lastSpineEnd = e;
+                    }
+                }
+            }
+
+            // Markers discovered while walking anchoredItems (also feeds the marker list).
+            NSMutableArray *walkMarkers = [NSMutableArray array];
+            NSMutableSet *walkVisited = [NSMutableSet set];
+
+            // ------------------------------------------------------------------
+            // Connected clips: titles, B-roll, music on negative lanes, connected
+            // storylines. Walks anchoredItems of EVERY spine item.
+            // ------------------------------------------------------------------
+            if (includeConnected) {
+                state[@"connectedItems"] = @[];
+                state[@"connectedCount"] = @0;
+                @try {
+                    NSMutableArray *connectedItems = [NSMutableArray array];
+                    if (spineArray && primaryObj) {
+                        NSInteger spineIndex = 0;
+                        for (id spineItem in spineArray) {
+                            if ((NSInteger)connectedItems.count >= connectedLimit) break;
+                            SpliceKit_CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                            BOOL haveSpineStart = SpliceKit_tryReadTimelineRange(primaryObj, spineItem, &sr);
+                            double spineStart = haveSpineStart ? SpliceKit_secondsFromTime(sr.start) : 0.0;
+                            NSString *spineHandle = SpliceKit_storeHandle(spineItem);
+                            SpliceKit_collectConnectedItems(spineItem,
+                                                            primaryObj,
+                                                            primaryObj,
+                                                            0.0,
+                                                            YES,
+                                                            haveSpineStart,
+                                                            spineStart,
+                                                            spineHandle,
+                                                            spineIndex,
+                                                            0,
+                                                            0,
+                                                            selectedSet,
+                                                            includeRoles,
+                                                            connectedItems,
+                                                            walkMarkers,
+                                                            walkVisited,
+                                                            connectedLimit,
+                                                            connectedMaxDepth);
+                            spineIndex++;
+                        }
+                    }
+                    state[@"connectedItems"] = connectedItems;
+                    state[@"connectedCount"] = @(connectedItems.count);
+                    if ((NSInteger)connectedItems.count >= connectedLimit) {
+                        state[@"connectedTruncated"] = @YES;
+                    }
+                } @catch (NSException *e) {
+                    state[@"connectedItemsError"] = e.reason ?: @"unknown exception";
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // Markers: sequence markersInTimeRange: over a wide window, merged with
+            // the markers found on anchoredItems during the connected walk.
+            // ------------------------------------------------------------------
+            if (includeMarkers) {
+                state[@"markers"] = @[];
+                state[@"markerCount"] = @0;
+                @try {
+                    NSMutableArray *markerList = [NSMutableArray array];
+                    NSMutableSet *markerHandles = [NSMutableSet set];
+                    NSUInteger fromWalk = walkMarkers.count;
+                    NSUInteger fromQuery = 0;
+
+                    for (NSDictionary *wm in walkMarkers) {
+                        NSString *h = wm[@"handle"];
+                        if ([h isKindOfClass:[NSString class]] && h.length > 0) [markerHandles addObject:h];
+                        [markerList addObject:wm];
+                    }
+
+                    SEL markersSel = NSSelectorFromString(@"markersInTimeRange:");
+                    BOOL sequenceHasMarkersQuery = [sequence respondsToSelector:markersSel];
+                    if (sequenceHasMarkersQuery) {
+                        double seqDurationSeconds = 0.0;
+                        id durationInfo = state[@"duration"];
+                        if ([durationInfo isKindOfClass:[NSDictionary class]]) {
+                            seqDurationSeconds = [((NSDictionary *)durationInfo)[@"seconds"] doubleValue];
+                        }
+                        double boundsStart = haveSpineBounds ? firstSpineStart : 0.0;
+                        double boundsEnd = haveSpineBounds ? lastSpineEnd : seqDurationSeconds;
+                        // Start at 0 (or earlier if the spine somehow starts before 0) and
+                        // pad the end generously; a negative start is never needed and is
+                        // not something FCP's marker query has been seen to accept.
+                        double queryStart = MIN(0.0, boundsStart);
+                        double queryDuration = (boundsEnd - queryStart) + 7200.0;
+                        if (!isfinite(queryStart) || !isfinite(queryDuration) || queryDuration <= 0.0) {
+                            queryStart = 0.0;
+                            queryDuration = 86400.0;
+                        }
+                        int32_t queryTs = 600;
+                        id fdInfo = state[@"frameDuration"];
+                        if ([fdInfo isKindOfClass:[NSDictionary class]]) {
+                            int32_t fdTs = (int32_t)[((NSDictionary *)fdInfo)[@"timescale"] intValue];
+                            if (fdTs > 0) queryTs = fdTs;
+                        }
+                        SpliceKit_CMTimeRange queryRange = {
+                            SpliceKit_timeFromSeconds(queryStart, queryTs),
+                            SpliceKit_timeFromSeconds(queryDuration, queryTs)
+                        };
+                        id found = ((id (*)(id, SEL, SpliceKit_CMTimeRange))objc_msgSend)(sequence, markersSel, queryRange);
+                        NSArray *foundArray = SpliceKit_mixerArrayFromContainer(found);
+                        fromQuery = foundArray.count;
+                        for (id m in foundArray) {
+                            if (!m) continue;
+                            NSString *pk = SpliceKit_handlePointerKey(m);
+                            if (pk.length > 0 && [walkVisited containsObject:pk]) continue;  // already described by the walk
+                            NSDictionary *desc = SpliceKit_describeMarker(m, primaryObj, nil, NO, 0.0);
+                            NSString *h = desc[@"handle"];
+                            if ([h isKindOfClass:[NSString class]] && h.length > 0) {
+                                if ([markerHandles containsObject:h]) continue;
+                                [markerHandles addObject:h];
+                            }
+                            [markerList addObject:desc];
+                        }
+                    }
+
+                    // Sort by time ascending; entries without a resolved time go last.
+                    [markerList sortUsingComparator:^NSComparisonResult(id a, id b) {
+                        id ta = [a isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)a)[@"time"] : nil;
+                        id tb = [b isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)b)[@"time"] : nil;
+                        NSNumber *sa = [ta isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)ta)[@"seconds"] : nil;
+                        NSNumber *sb = [tb isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)tb)[@"seconds"] : nil;
+                        if (sa && sb) return [sa compare:sb];
+                        if (sa) return NSOrderedAscending;
+                        if (sb) return NSOrderedDescending;
+                        return NSOrderedSame;
+                    }];
+
+                    NSUInteger markerTotal = markerList.count;
+                    if ((NSInteger)markerList.count > markerLimit) {
+                        markerList = [[markerList subarrayWithRange:NSMakeRange(0, (NSUInteger)markerLimit)] mutableCopy];
+                        state[@"markersTruncated"] = @YES;
+                    }
+                    state[@"markers"] = markerList;
+                    state[@"markerCount"] = @(markerList.count);
+                    state[@"markerTotal"] = @(markerTotal);
+                    state[@"markerSources"] = @{
+                        @"markersInTimeRange": @(fromQuery),
+                        @"anchoredWalk": @(fromWalk),
+                        @"sequenceRespondsToMarkersInTimeRange": @(sequenceHasMarkersQuery),
+                        @"connectedWalkRan": @(includeConnected),
+                    };
+                } @catch (NSException *e) {
+                    state[@"markersError"] = e.reason ?: @"unknown exception";
+                }
+            }
+
             result = state;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
     });
     return result;
+}
+
+#pragma mark - timeline.getMarkers
+//
+// Marker-only view of timeline.getDetailedState. Forces the connected walk on
+// (markers anchored to connected clips are only reachable that way), asks for
+// a single spine item to keep the response small, and returns just the marker
+// fields. Optional `kind` filters by marker kind (standard/todo/chapter/keyword/analysis).
+//
+
+NSDictionary *SpliceKit_handleTimelineGetMarkers(NSDictionary *params) {
+    NSMutableDictionary *merged = [NSMutableDictionary dictionaryWithDictionary:params ?: @{}];
+    merged[@"include_connected"] = @YES;
+    merged[@"include_markers"] = @YES;
+    merged[@"limit"] = @1;
+
+    NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(merged);
+    if (![state isKindOfClass:[NSDictionary class]]) {
+        return @{@"error": @"timeline.getDetailedState returned no result"};
+    }
+    if (state[@"error"]) {
+        return @{@"error": state[@"error"]};
+    }
+
+    NSString *kindFilter = [params[@"kind"] isKindOfClass:[NSString class]] ? params[@"kind"] : nil;
+    NSArray *markers = [state[@"markers"] isKindOfClass:[NSArray class]] ? state[@"markers"] : @[];
+    if (kindFilter.length > 0) {
+        NSMutableArray *filtered = [NSMutableArray array];
+        for (id m in markers) {
+            if (![m isKindOfClass:[NSDictionary class]]) continue;
+            id kind = ((NSDictionary *)m)[@"kind"];
+            if ([kind isKindOfClass:[NSString class]] &&
+                [(NSString *)kind caseInsensitiveCompare:kindFilter] == NSOrderedSame) {
+                [filtered addObject:m];
+            }
+        }
+        markers = filtered;
+    }
+
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    NSArray<NSString *> *passthroughKeys = @[@"sequenceName", @"playheadTime", @"duration", @"frameRate",
+                                             @"markerSources", @"markerTotal", @"markersTruncated", @"markersError"];
+    for (NSString *key in passthroughKeys) {
+        if (state[key]) out[key] = state[key];
+    }
+    out[@"markers"] = markers;
+    out[@"markerCount"] = @(markers.count);
+    if (kindFilter.length > 0) out[@"kind"] = kindFilter;
+    return out;
 }
 
 #pragma mark - Spine Manipulation (spine.*)
@@ -27702,6 +28468,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleTimelineGetState(params);
     } else if ([method isEqualToString:@"timeline.getDetailedState"]) {
         result = SpliceKit_handleTimelineGetDetailedState(params);
+    } else if ([method isEqualToString:@"timeline.getMarkers"]) {
+        result = SpliceKit_handleTimelineGetMarkers(params);
     } else if ([method isEqualToString:@"timeline.setRange"]) {
         result = SpliceKit_handleSetRange(params);
     } else if ([method isEqualToString:@"timeline.addMarkers"]) {

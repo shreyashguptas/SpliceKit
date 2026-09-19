@@ -28,7 +28,7 @@ rather than simulating the keyboard shortcut.
 ```
 1. bridge_status()                    -- verify connection
 2. open_project("My Project")         -- open a project by name
-3. get_timeline_clips()               -- see timeline contents
+3. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
 4. timeline_action("blade")           -- edit
 5. verify_action("after blade")       -- confirm state changed
 6. capture_timeline()                 -- visually verify the timeline
@@ -379,9 +379,14 @@ The command palette opens as a floating window inside FCP:
 ## Playhead & Selection
 ```
 get_playhead_position()              # current time, duration, frame rate, playing state
-get_selected_clips()                 # get only selected clips in timeline
+get_selected_clips()                 # selected clips in timeline (spine + connected, marked "connected": true)
+list_markers()                       # all markers: time, kind, name, completion, handle
+list_markers(kind="chapter")         # filter by kind: standard, todo, chapter, keyword, analysis
 seek_to_time(3.5)                    # jump to 3.5 seconds instantly (faster than stepping)
 ```
+`get_timeline_clips()` also lists connected clips (titles, B-roll, music on lanes != 0, with
+the spine index they are anchored to) and markers; raw RPC: `timeline.getDetailedState` returns
+`connectedItems` + `markers`, `timeline.getMarkers` returns markers only.
 
 ## Screenshots & Visual Verification
 

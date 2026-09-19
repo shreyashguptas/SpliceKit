@@ -160,7 +160,15 @@ def test_timeline():
     if "error" in str(r) and "No active" in str(r):
         skip("getDetailedState", "no project open")
     else:
-        ok("getDetailedState", r)
+        # connected clips + markers are on by default and always present as keys
+        ok("getDetailedState", r,
+           lambda r: "connectedItems" in _res(r) and "markers" in _res(r))
+    r = rpc("timeline.getMarkers")
+    if "error" in str(r) and "No active" in str(r):
+        skip("getMarkers", "no project open")
+    else:
+        ok("getMarkers", r,
+           lambda r: "markers" in _res(r) and "markerCount" in _res(r))
 
 
 def test_timeline_direct():
