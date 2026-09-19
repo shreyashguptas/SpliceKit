@@ -29,7 +29,7 @@ make -C "$REPO_DIR" all tools braw-prototype
 # Copy artifacts to Xcode's expected location
 cp "$REPO_DIR/build/SpliceKit" "$BUILD_OUT/SpliceKit"
 
-for tool in silence-detector structure-analyzer SpliceKitMixer; do
+for tool in silence-detector structure-analyzer audio-levels SpliceKitMixer; do
     if [ -f "$REPO_DIR/build/$tool" ]; then
         cp "$REPO_DIR/build/$tool" "$BUILD_OUT/$tool"
     fi

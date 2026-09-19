@@ -271,6 +271,11 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: silenceBin) {
             shell("cp \(shellQuote(silenceBin)) \(shellQuote(toolsDir + "/silence-detector"))")
         }
+        // The audio-levels helper (get_audio_levels) is built next to the silence detector.
+        let audioLevelsBin = (silenceBin as NSString).deletingLastPathComponent + "/audio-levels"
+        if FileManager.default.fileExists(atPath: audioLevelsBin) {
+            shell("cp \(shellQuote(audioLevelsBin)) \(shellQuote(toolsDir + "/audio-levels"))")
+        }
         if FileManager.default.fileExists(atPath: parakeetBin) {
             shell("cp \(shellQuote(parakeetBin)) \(shellQuote(toolsDir + "/parakeet-transcriber"))")
         }
@@ -741,6 +746,10 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: bundledSilence) {
             shell("cp '\(bundledSilence)' '\(silenceBin)'")
         }
+        let bundledAudioLevels = (Bundle.main.resourcePath ?? "") + "/tools/audio-levels"
+        if FileManager.default.fileExists(atPath: bundledAudioLevels) {
+            shell("cp '\(bundledAudioLevels)' '\(buildDir)/audio-levels'")
+        }
 
         let parakeetBin = buildDir + "/parakeet-transcriber"
         let bundledParakeet = (Bundle.main.resourcePath ?? "") + "/tools/parakeet-transcriber"
@@ -1016,6 +1025,10 @@ class PatcherModel: ObservableObject {
         let bundledSilence = (Bundle.main.resourcePath ?? "") + "/tools/silence-detector"
         if FileManager.default.fileExists(atPath: bundledSilence) {
             shell("cp '\(bundledSilence)' '\(silenceBin)'")
+        }
+        let bundledAudioLevels = (Bundle.main.resourcePath ?? "") + "/tools/audio-levels"
+        if FileManager.default.fileExists(atPath: bundledAudioLevels) {
+            shell("cp '\(bundledAudioLevels)' '\(buildDir)/audio-levels'")
         }
 
         let parakeetBin = buildDir + "/parakeet-transcriber"

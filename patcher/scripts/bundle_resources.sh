@@ -29,7 +29,7 @@ fi
 
 # Copy tools
 mkdir -p "$APP_RESOURCES/tools"
-for tool in silence-detector structure-analyzer SpliceKitMixer; do
+for tool in silence-detector structure-analyzer audio-levels SpliceKitMixer; do
     if [ -f "$PREBUILT/$tool" ]; then
         cp "$PREBUILT/$tool" "$APP_RESOURCES/tools/$tool"
         echo "Bundled $tool"

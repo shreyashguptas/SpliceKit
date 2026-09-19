@@ -56,6 +56,7 @@ import json
 import re
 import socket
 import sys
+import time
 
 HOST = "127.0.0.1"
 PORT = 9876
@@ -608,6 +609,94 @@ def _write_frame(frame, path):
     return True
 
 
+def audio_check(st):
+    section("timeline.getAudioLevels (levels of the first spine clip with audio, then the whole timeline)")
+    spine = [c for c in _spine_clips(st) if c.get("hasAudio") and not c.get("isCompound")]
+    if not spine:
+        print("SKIP  no primary-storyline clip with audio (compound clips are skipped: no single source file)")
+        return 0, 0
+    c0 = spine[0]
+    start, end = secs(c0, "startTime"), secs(c0, "endTime")
+    fails = 0
+    t0 = time.time()
+    one = rpc("timeline.getAudioLevels", {"handle": c0["handle"], "sliceSeconds": 0.05}, timeout=180)
+    took = time.time() - t0
+    if "error" in one:
+        print(f"FAIL  {one['error']}")
+        if "helper not found" in one["error"]:
+            print("      the audio-levels helper is missing: re-run `make install` (step 3c builds it) or "
+                  "`swiftc -O -o build/audio-levels tools/audio-levels.swift`")
+        return 1, 1
+    clips = one.get("clips") or []
+    entry = clips[0] if clips else {}
+    stats = entry.get("stats") or {}
+    slices = entry.get("slices") or {}
+    print(f"clip {c0.get('name')!r} handle={c0['handle']} [{start:.3f} .. {end:.3f}] -> "
+          f"{json.dumps({k: v for k, v in entry.items() if k not in ('slices',)})[:700]}")
+    print(f"took {took:.2f}s; helper {one.get('helper')}")
+    if entry.get("error") or entry.get("skipped"):
+        fails += 1
+        print(f"FAIL  clip not analysed: {entry.get('error') or entry.get('skipped')}")
+        return fails, 1
+    n = slices.get("count") or 0
+    peak = slices.get("peakDb") or []
+    rms = slices.get("rmsDb") or []
+    if n == 0 or len(peak) != n or len(rms) != n:
+        fails += 1
+        print(f"FAIL  slice arrays: count={n} peak={len(peak)} rms={len(rms)}")
+    else:
+        print(f"OK    {n} slices of {slices.get('sliceSeconds')}s starting at {slices.get('startSeconds')}s")
+    if any(not (-100.0 <= v <= 6.0) for v in peak + rms):
+        fails += 1
+        print("FAIL  a level is outside -100..+6 dBFS")
+    if any(r > p + 0.11 for p, r in zip(peak, rms)):
+        fails += 1
+        print("FAIL  an RMS value exceeds its slice's peak (impossible for a real signal)")
+    frame = _frame_seconds(st)
+    s0 = slices.get("startSeconds")
+    slice_s = slices.get("sliceSeconds") or 0.05
+    if isinstance(s0, (int, float)) and abs(s0 - start) > max(frame, slice_s):
+        fails += 1
+        print(f"FAIL  slices start at {s0:.3f}s but the clip starts at {start:.3f}s")
+    covered = slice_s * n
+    if abs(covered - (end - start)) > 0.25 + 2 * slice_s:
+        fails += 1
+        print(f"FAIL  slices cover {covered:.3f}s but the clip lasts {end - start:.3f}s")
+    else:
+        print(f"OK    slices cover {covered:.3f}s of a {end - start:.3f}s clip; peak max {stats.get('maxPeakDb')} dB "
+              f"at {stats.get('maxPeakAtSeconds')}s; head silence {stats.get('headSilenceSeconds')}s, "
+              f"tail silence {stats.get('tailSilenceSeconds')}s; clipped {stats.get('clippedSlices')}")
+    if entry.get("retimed") not in (True, False, "unknown"):
+        fails += 1
+        print(f"FAIL  retimed flag has an unexpected value: {entry.get('retimed')!r}")
+    else:
+        print(f"note  retimed={entry.get('retimed')!r} (selector {entry.get('retimeSelector', 'none')})")
+
+    # The whole timeline, summary only: every clip with audio, plus the cuts.
+    t0 = time.time()
+    allc = rpc("timeline.getAudioLevels", {"includeSlices": False}, timeout=600)
+    took = time.time() - t0
+    if "error" in allc:
+        fails += 1
+        print(f"FAIL  whole timeline: {allc['error']}")
+        return fails, 1
+    analysed = allc.get("analyzedCount", 0)
+    errors = [c for c in (allc.get("clips") or []) if c.get("error")]
+    print(f"whole timeline in {took:.2f}s: considered {allc.get('clipCount')}, analysed {analysed}, "
+          f"skipped {len(allc.get('skipped') or [])}, clip errors {len(errors)}, cuts {len(allc.get('cuts') or [])}")
+    for c in errors[:5]:
+        print(f"      error on {c.get('handle')} {c.get('name')!r}: {c.get('error')}")
+    for cut in (allc.get("cuts") or [])[:8]:
+        print(f"      cut {cut.get('atSeconds')}s: {json.dumps({k: v for k, v in cut.items() if k != 'atSeconds'})[:220]}")
+    if analysed < 1:
+        fails += 1
+        print("FAIL  no clip analysed on the whole timeline")
+    if errors:
+        fails += 1
+        print(f"FAIL  {len(errors)} clip(s) failed to analyse")
+    return fails, 1
+
+
 def clip_info_check(st):
     section("timeline.getClipInfo (read-only: never moves the playhead or selection)")
     c = _first_media_clip(st)
@@ -764,6 +853,8 @@ def main():
                     help="CHANGES STATE (reverted): browser.placeClip dry runs for append/insert/connect, an "
                          "out-of-range refusal, then a real connect edit of a 1 s range of the first browser "
                          "clip at the playhead, verified (placed, rangeHonored, positionVerified), then undo")
+    ap.add_argument("--audio-check", action="store_true",
+                    help="timeline.getAudioLevels on the first spine clip with audio, then the whole timeline (read-only)")
     ap.add_argument("--clip-info-check", action="store_true",
                     help="READ-ONLY: timeline.getClipInfo on the first video/audio spine clip; prints source "
                          "media, source start / media origin / file time, effects, title text, transcript, "
@@ -797,6 +888,9 @@ def main():
         if args.place_check:
             fails, ran = place_check(st)
             verdict.append(f"place-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
+        if args.audio_check:
+            fails, ran = audio_check(st)
+            verdict.append(f"audio-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
         if args.clip_info_check:
             fails, ran, ci_warns = clip_info_check(st)
             verdict.append(f"clip-info-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}"

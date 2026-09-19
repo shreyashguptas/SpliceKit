@@ -20,6 +20,12 @@ lists every remaining outbound path and who starts it.
 
 ## Build time
 
+The small audio helpers (`tools/audio-levels.swift` for `get_audio_levels`,
+`tools/silence-detector.swift` for the silence remover) are single files compiled
+with the `swiftc` that ships with the Command Line Tools; they use only Apple's
+AVFoundation and Accelerate frameworks and fetch nothing. The rest of this section
+is about the transcription helpers.
+
 Fetched by SwiftPM when `Scripts/build-transcribers.sh` compiles the helper
 CLIs. Pinned to exact revisions in each package's `Package.resolved`, so the
 versions do not drift between machines or over time.

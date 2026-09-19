@@ -466,6 +466,43 @@ if ! "$REPO_DIR/Scripts/build-transcribers.sh" --framework "$FW_DIR"; then
 fi
 
 # ============================================================
+# Step 3c: Audio helper binaries
+#
+# timeline.getAudioLevels (the MCP tool get_audio_levels) and the command
+# palette's silence remover shell out to small Swift CLIs, because decoding
+# audio with AVFoundation inside Final Cut Pro's process deadlocks. The dylib
+# looks for them in the framework's Resources first. Built with the swiftc
+# that ships with the Command Line Tools; cached in build/. Never fatal.
+# ============================================================
+step "Step 3c: Installing audio helpers"
+
+if command -v swiftc >/dev/null 2>&1; then
+    for helper in audio-levels silence-detector; do
+        src="$REPO_DIR/tools/$helper.swift"
+        out="$BUILD_DIR/$helper"
+        [ -f "$src" ] || continue
+        if [ ! -x "$out" ] || [ "$src" -nt "$out" ]; then
+            if swiftc -O -suppress-warnings -o "$out" "$src" 2>"$BUILD_DIR/$helper-build.log"; then
+                # Ad-hoc sign like build-transcribers.sh does: an unsigned Mach-O inside the
+                # framework's Resources makes the framework's own signature fail to verify.
+                codesign --force --sign - "$out" >/dev/null 2>&1 || true
+                log "Built: $out"
+            else
+                warn "Could not build $helper (see $BUILD_DIR/$helper-build.log); its features will report it as missing."
+                continue
+            fi
+        fi
+        if cp "$out" "$FW_DIR/Versions/A/Resources/$helper"; then
+            log "Installed: $helper"
+        else
+            warn "Could not copy $helper into the framework; its features will report it as missing."
+        fi
+    done
+else
+    warn "swiftc not found: audio-levels and silence-detector were not built (get_audio_levels will report the helper as missing)."
+fi
+
+# ============================================================
 # Step 4: Inject LC_LOAD_DYLIB
 # ============================================================
 step "Step 4: Injecting dylib into FCP binary"

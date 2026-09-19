@@ -46,3 +46,4 @@ SpliceKitImmersivePreviewPanel.mm
 SpliceKitImmersivePreviewRPC.m
 SpliceKitHapticBridge.m
 SpliceKitHapticSnapEmitters.m
+SpliceKitAudioLevels.m

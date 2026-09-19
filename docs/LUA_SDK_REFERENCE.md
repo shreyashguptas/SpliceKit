@@ -264,6 +264,20 @@ print(r.status, r.before["end"], r.after["end"], r.appliedDelta)  -- "end" is a 
 sk.rpc("timeline.trimClip", {handle = h, edge = "start", toSeconds = 6.5})  -- to an absolute time
 ```
 
+Audio levels of a clip (dBFS per slice, 50 ms by default and longer for long clips, placed in
+timeline seconds; SpliceKit's measurement of the source media as decoded: FCP's volume, fades,
+effects, retiming and the mix are not applied; needs the `audio-levels` helper `make install` builds):
+
+```lua
+local a = sk.rpc("timeline.getAudioLevels", {handle = h})
+local c = a.clips[1]
+print(c.stats.maxPeakDb, c.stats.tailSilenceSeconds, #c.slices.rmsDb)
+-- whole timeline (first 100 clips), summary only, with the level jump at each straight cut
+-- between neighbouring analysed primary-storyline clips:
+local all = sk.rpc("timeline.getAudioLevels", {includeSlices = false})
+for _, cut in ipairs(all.cuts) do print(cut.atSeconds, cut.jumpDb) end
+```
+
 ### Nudge
 
 ```lua

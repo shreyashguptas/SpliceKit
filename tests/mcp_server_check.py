@@ -98,6 +98,72 @@ TINY_JPEG = base64.b64decode(
 )
 
 
+def _audio_levels_response(p: dict) -> dict:
+    """The shape timeline.getAudioLevels answers with: two analyzed spine clips (the second
+    ends below the silence threshold), one connected clip, one compound clip skipped after
+    resolution, the cut between the two spine clips, and a title skipped before resolution
+    (no audio), as the ObjC handler does it. A single handle brings its spine neighbour
+    along (role "neighbor", summary only)."""
+    def clip(handle, name, start, end, lane=0, connected=False, tail_silent=False, clipped=False, role=None):
+        n = 40
+        rms = [-20.0 + (i % 5) for i in range(n)]
+        peak = [v + 8.0 for v in rms]
+        if tail_silent:
+            rms[-6:] = [-80.0] * 6
+            peak[-6:] = [-70.0] * 6
+        if clipped:
+            peak[3] = 0.0
+        slice_s = (end - start) / n
+        out = {"handle": handle, "name": name, "class": "FFAnchoredMediaComponent", "connected": connected,
+               "lane": lane, "index": 0, "kind": "video clip", "startSeconds": start, "endSeconds": end,
+               "durationSeconds": end - start, "retimed": "unknown",
+               "source": {"path": f"/Volumes/Media/{name}.mov", "fileName": f"{name}.mov",
+                          "representation": "original", "fileStart": 3.0, "fileEnd": 3.0 + (end - start),
+                          "sourceStart": 3603.0, "mediaOrigin": 3600.0},
+               "analysisRange": {"startSeconds": start, "endSeconds": end},
+               "audio": {"sampleRate": 48000, "channels": 1, "channelsMode": "mixdownMono",
+                         "audioTrackCount": 1, "fileDuration": 120.0, "sliceSeconds": slice_s, "sliceCount": n},
+               "stats": {"maxPeakDb": max(peak), "maxPeakAtSeconds": start + 0.5, "meanRmsDb": -18.5,
+                         "clippedSlices": 1 if clipped else 0, "silentSlices": 6 if tail_silent else 0,
+                         "allSilent": False, "headSilenceSeconds": 0.0,
+                         "tailSilenceSeconds": 0.3 if tail_silent else 0.0,
+                         "headRmsDb": -20.0, "headPeakDb": -12.0,
+                         "tailRmsDb": -80.0 if tail_silent else -19.0,
+                         "tailPeakDb": -70.0 if tail_silent else -11.0, "edgeSeconds": 0.1}}
+        if role:
+            out["role"] = role
+        else:
+            out["slices"] = {"startSeconds": start, "sliceSeconds": slice_s, "count": n, "peakDb": peak,
+                             "rmsDb": rms, "clippedSliceIndices": [3] if clipped else []}
+        return out
+    if p.get("handle"):
+        clips = [clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
+                 clip("obj_2", "B-roll", 2.0, 4.0, role="neighbor")]
+        neighbours = 1
+    else:
+        clips = [clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True), clip("obj_2", "B-roll", 2.0, 4.0, clipped=True),
+                 clip("obj_3", "Music", 0.5, 3.5, lane=-1, connected=True),
+                 {"handle": "obj_5", "name": "Nested", "class": "FFAnchoredCollection", "connected": False, "lane": 0,
+                  "startSeconds": 4.0, "endSeconds": 6.0, "durationSeconds": 2.0, "kind": "compound clip",
+                  "skipped": "compound clip: no single source media file (open it to analyse the clips inside)"}]
+        neighbours = 0
+    return {"status": "ok", "levelsAre": "the source media file as decoded", "floorDb": -100.0,
+            "sliceSeconds": p.get("sliceSeconds", 0.05), "silenceDb": p.get("silenceDb", -50.0),
+            "edgeSeconds": p.get("edgeSeconds", 0.1), "perChannel": bool(p.get("perChannel")),
+            "helper": "/Applications/Final Cut Pro Modified.app/Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/audio-levels",
+            "timeline": {"frameRate": 24.0, "durationSeconds": 6.0},
+            "clipCount": len(clips) + 1, "analyzedCount": sum(1 for c in clips if c.get("stats")),
+            "neighborCount": neighbours, "outsideRangeCount": 0, "clips": clips,
+            "cuts": [{"atSeconds": 2.0, "outgoing": {"handle": "obj_1", "name": "Interview A", "tailRmsDb": -80.0,
+                                                     "tailPeakDb": -70.0, "tailSilenceSeconds": 0.3},
+                      "incoming": {"handle": "obj_2", "name": "B-roll", "headRmsDb": -20.0, "headPeakDb": -12.0,
+                                   "headSilenceSeconds": 0.0},
+                      "jumpDb": 60.0, "outgoingEndsInSilence": True, "incomingStartsInSilence": False}],
+            "skipped": [{"handle": "obj_4", "name": "Title", "reason": "no audio"},
+                        {"handle": "obj_9", "name": "Cross Dissolve", "reason": "transition (no source media of its own)"}],
+            "elapsedSeconds": 0.4}
+
+
 # ---------------------------------------------------------------------------
 # Fake bridge: the JSON-RPC server that lives inside Final Cut Pro, stood in for.
 # ---------------------------------------------------------------------------
@@ -157,6 +223,8 @@ class FakeBridge(threading.Thread):
             return _detailed_state()
         if method == "timeline.getMarkers" and _markers_response:
             return _markers_response(p.get("kind"))
+        if method == "timeline.getAudioLevels":
+            return _audio_levels_response(p)
         if method == "timeline.getClipInfo" and _clip_info_response:
             r = _clip_info_response({"handle": p.get("handle", "obj_1"), **p})
             if p.get("includeFrame", True) and isinstance(r, dict):
@@ -591,7 +659,7 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
                 ok = r.structured_content is not None
                 if not ok:
                     detail = "output schema published but no structuredContent returned"
-            if t.name in ("capture_timeline", "capture_viewer", "capture_inspector", "get_clip_info", "capture_clip_frame") and ok:
+            if t.name in ("capture_timeline", "capture_viewer", "capture_inspector", "get_clip_info", "capture_clip_frame", "get_audio_levels") and ok:
                 ok = "image" in kinds
                 if not ok:
                     detail = f"expected an image content block, got {kinds}: {detail}"

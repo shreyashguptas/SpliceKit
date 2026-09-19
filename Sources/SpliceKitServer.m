@@ -22,6 +22,7 @@
 #import "SpliceKitURLImport.h"
 #import "SpliceKitBRAWExports.h"
 #import "SpliceKitImmersivePreviewPanel.h"
+#import "SpliceKitAudioLevels.h"
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <sys/stat.h>
@@ -7911,6 +7912,95 @@ static double SpliceKit_clipInfoFrameTime(double clipStart, double clipEnd, BOOL
     if (requested < clipStart) { if (outClamped) *outClamped = YES; return clipStart; }
     if (requested > lastInside) { if (outClamped) *outClamped = YES; return lastInside; }
     return requested;
+}
+
+// Source media of one timeline item for timeline.getAudioLevels (SpliceKitAudioLevels.m):
+// the same media file, source start and media origin resolution getClipInfo reports,
+// without the frame decode. Main thread only. `fileStart` is how many seconds into the
+// media file the clip's first frame lies; add (timeline time - clip start) to it.
+NSDictionary *SpliceKit_audioSourceForItem(id item) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    if (!item) { out[@"error"] = @"nil item"; return out; }
+    @try {
+        NSString *cls = NSStringFromClass([item class]) ?: @"";
+        BOOL hasAudio = SpliceKit_boolForSelector(item, @"hasAudio");
+        BOOL hasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+        out[@"class"] = cls;
+        out[@"name"] = SpliceKit_displayNameForItem(item) ?: @"";
+        out[@"hasAudio"] = @(hasAudio);
+        out[@"hasVideo"] = @(hasVideo);
+        out[@"kind"] = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio) ?: @"";
+        out[@"isCollection"] = @([cls containsString:@"Collection"]);
+
+        id mediaComp = SpliceKit_clipInfoMediaComponent(item);
+        NSMutableArray *targets = [NSMutableArray arrayWithObject:item];
+        if (mediaComp && mediaComp != item) [targets addObject:mediaComp];
+
+        NSString *representation = nil, *urlSource = nil;
+        NSURL *mediaURL = SpliceKit_clipInfoMediaURL(mediaComp ?: item, &representation, &urlSource);
+        if (!mediaURL && mediaComp && mediaComp != item) {
+            mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
+        }
+
+        SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
+        NSString *sourceStartSelector = @"none";
+        for (id target in targets) {
+            if (SpliceKit_tryReadCMTimeSelector(target, @"trimStartTime", &sourceStart)) {
+                sourceStartSelector = @"trimStartTime"; break;
+            }
+            if (SpliceKit_tryReadCMTimeSelector(target, @"trimmedOffset", &sourceStart)) {
+                sourceStartSelector = @"trimmedOffset"; break;
+            }
+        }
+        double sourceStartSeconds = (sourceStart.timescale > 0) ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+        SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        NSString *mediaOriginSelector = @"none";
+        double mediaOriginSeconds = 0.0;
+        for (id target in [[targets reverseObjectEnumerator] allObjects]) {
+            if (SpliceKit_tryReadCMTimeRangeSelector(target, @"unclippedRange", &unclipped)) {
+                mediaOriginSelector = @"unclippedRange";
+                mediaOriginSeconds = SpliceKit_secondsFromTime(unclipped.start);
+                break;
+            }
+        }
+        out[@"sourceStart"] = @(sourceStartSeconds);
+        out[@"sourceStartSelector"] = sourceStartSelector;
+        out[@"mediaOrigin"] = @(mediaOriginSeconds);
+        out[@"mediaOriginSelector"] = mediaOriginSelector;
+        out[@"fileStart"] = @(sourceStartSeconds - mediaOriginSeconds);
+
+        if (mediaURL) {
+            // No file-system access here: this runs on the main thread, and a stat on an
+            // offline volume can block for seconds. The caller checks existence off main.
+            NSString *path = mediaURL.path ?: (mediaURL.absoluteString ?: @"");
+            out[@"path"] = path;
+            out[@"fileName"] = mediaURL.lastPathComponent ?: @"";
+            out[@"representation"] = representation ?: @"unknown";
+            out[@"urlSource"] = urlSource ?: @"";
+        }
+
+        // Retiming changes the source-to-timeline mapping. Unverified selector names; only a
+        // selector whose type encoding really returns BOOL is called (tryReadBoolSelector),
+        // so a same-named method returning an object or a struct is never invoked.
+        NSString *retimeSelector = nil;
+        BOOL retimed = NO;
+        for (NSString *name in @[@"isRetimed", @"hasRetiming", @"hasTimeMap", @"isSpeedChanged", @"hasSpeedChange"]) {
+            for (id target in targets) {
+                BOOL flag = NO;
+                if (SpliceKit_tryReadBoolSelector(target, name, &flag)) {
+                    retimeSelector = name;
+                    retimed = flag;
+                    break;
+                }
+            }
+            if (retimeSelector) break;
+        }
+        out[@"retimed"] = retimeSelector ? (id)@(retimed) : (id)@"unknown";
+        if (retimeSelector) out[@"retimeSelector"] = retimeSelector;
+    } @catch (NSException *e) {
+        out[@"error"] = e.reason ?: @"exception while resolving the source media";
+    }
+    return out;
 }
 
 // timeline.getClipInfo -- read-only clip information by handle.
@@ -30663,6 +30753,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleTimelineTrimClip(params);
     } else if ([method isEqualToString:@"timeline.getClipInfo"]) {
         result = SpliceKit_handleTimelineGetClipInfo(params);
+    } else if ([method isEqualToString:@"timeline.getAudioLevels"]) {
+        result = SpliceKit_handleTimelineGetAudioLevels(params);
     } else if ([method isEqualToString:@"timeline.captureClipFrame"]) {
         result = SpliceKit_handleTimelineCaptureClipFrame(params);
     } else if ([method isEqualToString:@"timeline.beginEdit"]) {

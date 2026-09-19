@@ -218,6 +218,38 @@ tool returns it as MCP image content. Titles, generators and gap clips have no s
 `capture_viewer`, `capture_timeline` and `capture_inspector` return their PNG inline as MCP image content too
 (`return_image=False` to skip).
 
+### Hear the audio of the clips
+```
+get_audio_levels("obj_12")                        # one clip (+ its primary-storyline neighbours, summary only, for the cuts)
+get_audio_levels(start_seconds=40, end_seconds=70) # every clip with audio in a timeline range
+get_audio_levels()                                 # the whole timeline (first 100 clips with audio)
+get_audio_levels("obj_12", detail="full")          # the raw per-slice arrays as JSON
+```
+SpliceKit's own measurement of each clip's source audio, as numbers: per clip the peak and RMS
+level per slice (50 ms by default, longer for clips over 30 s so no clip reports more than 600
+slices) in dBFS (0 = full scale; -100 is the floor for a slice with no sample above 1e-5), placed
+in timeline seconds, with the seconds below the silence threshold (RMS under -50 dBFS by default)
+at the clip's start and end, the slices at full scale (peak >= -0.1 dBFS: possible clipping), the
+loudest moment, and the RMS of the first and last 100 ms (or one slice, whichever is longer). The
+answer carries a sparkline per clip and a waveform strip as inline MCP image content (one row per
+lane, light = peak, dark = RMS, red = full scale, white = straight cuts). For neighbouring
+primary-storyline clips that were both analysed it reports the outgoing clip's end against the
+incoming clip's start and the jump in dB, or that a transition sits on the cut (FCP crossfades
+attached audio there, which is not checked). Read-only.
+
+Not Final Cut Pro's audio meters (the mix during playback) and not its timeline waveforms (which
+follow the clip's volume and effects): the levels are those of the source media file as decoded by
+SpliceKit's `audio-levels` helper (`tools/audio-levels.swift`, built by `make install`), so FCP's
+volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied, the same way
+`get_clip_info`'s frame is the raw footage. The mapping assumes normal speed (100%); `retimed` is
+true/false when a retime flag is found on FCP's clip object and "unknown" otherwise. Transitions,
+gap clips, titles and generators have no audio of their own; a compound clip has no single source
+file; both are listed as skipped. A harsh audio cut: read the outgoing clip's end and the jump
+(a single handle brings its neighbours along), then `trim_clip`, a fade
+(`direct_timeline_action("applyAudioFadesDirect")` on the selected clip) or `changeAudioVolume`, and
+read again. `slice`, `edge window`, `jump` and the sparkline are SpliceKit bookkeeping, not FCP
+terms. Raw RPC: `timeline.getAudioLevels`.
+
 ### Add a source clip, or a range of it, to the timeline
 ```
 browser_list_clips()                                                       # source clips with handles

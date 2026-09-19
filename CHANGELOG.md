@@ -9,6 +9,25 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **`get_audio_levels`: the audio of the timeline as numbers and a picture.** For one
+  clip (its primary-storyline neighbours come along, summary only, so the cuts on both
+  sides are compared), a list of clips, a time range or the whole timeline (first 100
+  clips with audio), the peak and RMS level per slice (50 ms by default; longer for long
+  clips) in dBFS, placed in timeline seconds, with the silence at each clip's start and
+  end, the slices at full scale, the loudest moment, the first and last 100 ms, a
+  sparkline per clip, a waveform strip returned as inline MCP image content, and for
+  neighbouring primary-storyline clips that were both analysed the level jump at the cut
+  (or the transition on the cut, under which FCP crossfades attached audio). The decoding
+  runs in a new helper, `tools/audio-levels.swift` (AVFoundation audio decoding inside
+  Final Cut Pro's process deadlocks), streaming so memory stays flat on long clips, built
+  and ad-hoc signed by `make install` (patcher step 3c, which now also builds the silence
+  detector the command palette's silence remover needs) and looked up in the patched
+  app's SpliceKit.framework/Resources first. The bridge RPC is `timeline.getAudioLevels`;
+  the clip-to-source-file mapping is the one `get_clip_info` reports. These are
+  SpliceKit's measurements of the source media as decoded, not FCP's meters or
+  waveforms: FCP's volume, fades, effects, retiming and the mix are not applied, and the
+  answer says so. Not yet run against a live Final Cut Pro;
+  `tests/live_timeline_reads_check.py --audio-check` does that.
 - **`add_clip_to_timeline`: a range of a browser clip onto the timeline.** The
   range (`start_seconds`/`end_seconds` from the clip's first frame) is written
   to FCP's pasteboard and placed with FCP's Edit > Paste (insert, the effect of
