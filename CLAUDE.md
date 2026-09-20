@@ -491,8 +491,10 @@ get_playhead_position()              # current time, duration, frame rate, playi
 get_selected_clips()                 # selected clips in timeline (spine + connected, marked "connected": true)
 list_markers()                       # all markers: time, kind, name, completion, handle
 list_markers(kind="chapter")         # filter by kind: standard, todo, chapter, keyword, analysis
+add_markers_at_times("5.0, 12.0")    # batch standard markers at timeline seconds (JSON form too)
 seek_to_time(3.5)                    # jump to 3.5 seconds instantly (faster than stepping)
 ```
+`add_markers_at_times` places every marker in one undo step (Edit > Undo reverts the whole batch).
 `get_timeline_clips()` also lists connected clips (titles, B-roll, music on lanes != 0, with
 the spine index they are anchored to) and markers; raw RPC: `timeline.getDetailedState` returns
 `connectedItems` + `markers`, `timeline.getMarkers` returns markers only.
@@ -564,7 +566,9 @@ Supported formats:
 - `.aaf` — Avid AAF (requires Avid-specific metadata on clips)
 - `.otioz` / `.otiod` — OTIO bundles (media files must exist on disk)
 
-Requires: `pip install opentimelineio otio-fcpx-xml-adapter otio-cmx3600-adapter`
+Optional extra (not in `mcp/requirements.txt`; `make install` does not install it):
+`pip install opentimelineio otio-fcpx-xml-adapter otio-cmx3600-adapter`.
+If the packages are missing, `export_otio` / `import_otio` tell you to install them.
 
 ## Deploy & Restart FCP
 ```
@@ -587,21 +591,45 @@ dismiss_dialog(action="cancel")      # cancel/escape
 ```
 
 ## Scene Detection
+
+Three tools share the same analysis: one timeline clip (or a file on disk), only the portion
+of the media that clip actually uses. Reported cut times are **source media file seconds**, not
+timeline seconds; `mark_scene_changes` and `blade_scene_changes` map them onto the clip.
+
+**Target clip** (same resolution for detect / mark / blade): `handle` if given; else the sole
+selected clip; else the primary-storyline clip under the playhead; else an error listing spine
+candidates. There is no automatic "longest clip" fallback. A compound, multicam, or synchronized
+clip is refused — pass `handle` to a specific inner clip or use `file_url` on the underlying file.
+
+**`file_url`**: analyse a path directly (no timeline clip). Times are file seconds only;
+`mark_scene_changes` and `blade_scene_changes` refuse this mode (nothing to map cuts onto).
+
+Output includes the scanned window, e.g. `Clip used source media range: 0.000-12.012s`.
+
 ```
-detect_scene_changes()                              # list scene change timestamps
-detect_scene_changes(threshold=0.2)                 # more sensitive
-detect_scene_changes(action="markers")              # add markers at cuts
-detect_scene_changes(action="blade")                # blade at every scene change
+detect_scene_changes()                                    # read-only: list cuts + scores
+detect_scene_changes(threshold=0.2)                       # more sensitive
 detect_scene_changes(threshold=0.5, sample_interval=0.25) # less sensitive, faster
+detect_scene_changes(handle="obj_12")                     # analyse this clip
+detect_scene_changes(file_url="/path/to/footage.mov")     # file-only analysis
+
+mark_scene_changes()                                      # markers at cuts (one undo step)
+mark_scene_changes(handle="obj_12", threshold=0.2)
+blade_scene_changes()                                     # blade at cuts (one undo step)
+blade_scene_changes(handle="obj_12", sample_interval=0.25)
 ```
+
+`detect_scene_changes(action=...)` with `markers` or `blade` is rejected; use
+`mark_scene_changes()` or `blade_scene_changes()` instead.
 
 ## Beat Detection
 ```
 detect_beats(file_path="/path/to/song.mp3")         # detect beats, bars, sections, BPM
 detect_beats(file_path="song.mp3", sensitivity=0.8) # more sensitive
 detect_beats(file_path="song.mp3", min_bpm=120, max_bpm=180) # for fast music
+detect_beats(file_path="song.mp3", limit=32)        # show first 32 timestamps per kind; rest summarized
 ```
-Build first: `swiftc -O -o build/beat-detector tools/beat-detector.swift`
+Built and installed with the other Swift helpers (`make tools` / `make install`).
 
 ## Song Cut (Beat-Synced Video Assembly)
 
@@ -682,6 +710,7 @@ build_song_cut(pace="natural", source_project_name="Song",
 ```
 import_srt_as_markers(srt_content="1\n00:00:05,000 --> 00:00:10,000\nSubtitle text")
 ```
+`import_srt_as_markers` is one undo step (all subtitles from the SRT land in a single Edit > Undo).
 
 ## SpliceKit Options
 ```

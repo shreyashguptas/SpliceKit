@@ -7244,28 +7244,37 @@ def beat_sync_blade(file_path: str, cut_on: str = "bar",
 # ============================================================
 # Places song structure labels in FCP's native caption lane — the
 # thin dedicated area above the timeline clips. Uses FCPXML <caption>
-# elements with a custom role so they appear in their own lane.
+# elements; Final Cut Pro assigns them to the library's normal SRT caption
+# role (e.g. English), not a separate "structure" role.
 
 def _structure_caption_role():
-    """Role string for structure block captions. Uses SRT format with a
-    'structure' language so they get their own caption lane."""
+    """Role string passed in FCPXML for structure block captions.
+
+    FCP maps this to the library's standard SRT caption subrole (e.g. English),
+    same lane as user subtitles — removal must not match by role."""
     return "SRT.structure"
 
 
 @splicekit_tool("song_structure_blocks")
 def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
-                          min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
-    """Analyze a song and place section labels in FCP's native caption lane.
+                          min_bpm: float = 60.0, max_bpm: float = 200.0,
+                          at_seconds: float = 0.0) -> str:
+    """Analyze a song and write section labels to the timeline caption lane.
 
-    Creates native FCP caption objects showing the song structure (intro, verse,
-    chorus, bridge, outro) in the thin dedicated caption area above the timeline.
-    Each section appears as a labeled block in the caption lane.
+    This tool modifies the active timeline: it creates native FFAnchoredCaption
+    objects (one per detected section) in FCP's caption lane. Section times in
+    the analysis are placed on the timeline starting at ``at_seconds`` (default 0,
+    so intro at 0s lines up with timeline 0s). If the labels extend past the end
+    of the sequence, Final Cut Pro may append gap media and lengthen the project.
+
+    Remove labels with ``remove_structure_blocks()`` (one undo step).
 
     Args:
         file_path: Path to audio file to analyze for song structure.
         sensitivity: Beat detection sensitivity 0.0-1.0 (default 0.5).
         min_bpm: Minimum expected BPM (default 60).
         max_bpm: Maximum expected BPM (default 200).
+        at_seconds: Timeline time (seconds) where section 0.0s should be placed (default 0).
 
     Returns summary of structure blocks placed in the caption lane.
     """
@@ -7333,7 +7342,7 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
 
     # Use the ObjC bridge to create native captions in the caption lane.
     # This does: FCPXML import → load temp project → selectAll → copy → switch back → paste
-    r = bridge.call("structure.generateCaptions", sections=structure)
+    r = bridge.call("structure.generateCaptions", sections=structure, atSeconds=at_seconds)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
@@ -7341,13 +7350,22 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
     lines = [
         f"Structure Blocks: {os.path.basename(file_path)}",
         f"BPM: {data.get('bpm', '?')}  Sections: {len(structure)}  Captions placed: {caption_count}",
-        f"Placed in caption lane (same area as subtitles)",
+        f"Placed in caption lane starting at timeline {at_seconds:.3f}s",
         "",
     ]
+    if r.get("extendsPastSequenceEnd"):
+        seq_dur = r.get("sequenceDurationSeconds", "?")
+        labels_end = r.get("labelsEndSeconds", "?")
+        lines.append(
+            f"WARNING: Labels extend to ~{labels_end}s but the sequence is only ~{seq_dur}s long. "
+            "Final Cut Pro may append gap media and lengthen the project."
+        )
+        lines.append("")
     for s in structure:
         lines.append(f"  {s['label'].upper():15s}  {s['start']:7.1f}s - {s['end']:7.1f}s  ({s['duration']:.1f}s)")
 
     lines.append(f"\nToggle visibility: View > Timeline Index > Captions tab")
+    lines.append("Remove: remove_structure_blocks()")
     return "\n".join(lines)
 
 
@@ -7368,13 +7386,50 @@ def toggle_structure_blocks() -> str:
 
 
 @splicekit_tool("remove_structure_blocks")
-def remove_structure_blocks() -> str:
-    """Remove all song structure blocks from the timeline."""
-    r = bridge.call("structure.remove")
+def remove_structure_blocks(dry_run: bool = False) -> str:
+    """Remove song structure block storylines and structure captions from the timeline.
+
+    Only deletes captions created by ``song_structure_blocks`` (session registry, or
+    fallback match on exact generated section labels like INTRO, VERSE1 — never by role).
+    """
+    r = bridge.call("structure.remove", dryRun=dry_run)
     if _err(r):
         return f"Error: {r.get('error', r)}"
-    removed = r.get("removed", 0)
-    return f"Removed {removed} structure block storyline(s)"
+    storylines = int(r.get("removedStorylines", 0))
+    captions = int(r.get("removedCaptions", 0))
+    caption_rows = r.get("captions") or []
+
+    def _format_caption_row(row: dict) -> str:
+        text = row.get("text", "?")
+        start = row.get("startSeconds")
+        end = row.get("endSeconds")
+        if start is not None and end is not None:
+            return f'  "{text}"  {float(start):.3f}s – {float(end):.3f}s'
+        return f'  "{text}"'
+
+    if dry_run:
+        if storylines == 0 and captions == 0:
+            return "Dry run: no structure block storylines or structure captions would be removed."
+        lines = ["Dry run — would remove:"]
+        if storylines:
+            lines.append(f"  {storylines} storyline(s) named SpliceKit Structure")
+        if captions:
+            lines.append(f"  {captions} structure caption(s):")
+            for row in caption_rows:
+                lines.append(_format_caption_row(row))
+        return "\n".join(lines)
+
+    if storylines == 0 and captions == 0:
+        return "No structure block storylines or structure captions were found on the timeline."
+
+    lines = ["Removed structure blocks:"]
+    if storylines:
+        lines.append(f"  {storylines} storyline(s)")
+    if captions:
+        lines.append(f"  {captions} structure caption(s):")
+        for row in caption_rows:
+            lines.append(_format_caption_row(row))
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -7457,6 +7512,9 @@ def hide_sections() -> str:
 def flexmusic_list_songs(filter: str = "") -> str:
     """List available FlexMusic songs that can dynamically fit any project duration.
 
+    FlexMusic / Soundtrack Pro content must be installed in Final Cut Pro for songs
+    to appear; an empty library is normal when none is installed.
+
     Args:
         filter: Optional search filter for song name, mood, or genre.
 
@@ -7466,6 +7524,9 @@ def flexmusic_list_songs(filter: str = "") -> str:
     r = bridge.call("flexmusic.listSongs", filter=filter)
     if _err(r):
         return f"Error: {r.get('error', r)}"
+    count = int(r.get("count", 0))
+    if count == 0:
+        return "No FlexMusic songs are available."
     return _fmt(r)
 
 

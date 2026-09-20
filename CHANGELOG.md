@@ -66,14 +66,44 @@ that this fork has removed.
   (`SPLICEKIT_SKIP_MCP_CONFIG=1`). `make install` now finds a Homebrew
   keg-only Python, treats a running Claude Desktop (config not written) as
   an unfinished install, and no longer swallows Ctrl-C after a menu.
+- **`detect_beats` output is formatted** for reading in the MCP answer: beat, bar, and section
+  timestamps are grouped with BPM and duration, and **`limit`** (default 16) controls how many
+  timestamps of each kind are printed; the rest are summarized while full counts stay in the
+  summary.
+- **`deploy_and_restart` no longer runs `make deploy` before quitting Final Cut Pro.** Deploy
+  replaced the dylib inside the running app bundle and could leave the bridge broken on relaunch;
+  the tool now builds with `make install` (or skips build when asked), quits FCP, then relaunches.
+  It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **`beat-detector` was never built or installed by the Makefile.** `make tools` and
+  `make install` now compile and ad-hoc sign it like `audio-levels` and the other Swift helpers.
+- **`make tools` / `make deploy` failed on `tools/mixer-app` under Swift 6.4** because `@State`
+  is a macro and bare `swiftc` from Xcode Command Line Tools has no SwiftUIMacros plugin. The
+  Makefile now passes **`-plugin-path`** to the SwiftUIMacros dylib when one exists on the machine.
+- **Markers were placed in the wrong time base in three code paths.** The range passed to
+  `actionAddMarkerToAnchoredObject:` must be in the clip's **source media** coordinates
+  (`range.start = clipSourceStart + (desiredTimelineTime − clipTimelineStart)`). Add-marker,
+  batch marker, and scene-mark flows now use that mapping.
+- **Marker remove, rename, retype, and complete always answered "not supported on this Final Cut
+  Pro build".** Those selectors live on **`FFAnchoredSequence`**, not `FFAnchoredTimelineModule`;
+  the bridge now targets the sequence.
+- **Scene detection picked an arbitrary clip and could descend into a compound.** It now resolves
+  one target (handle, sole selection, or playhead clip; error with candidates otherwise), refuses
+  compound / multicam / synchronized clips unless you name an inner clip or pass `file_url`, and
+  decodes only the clip's used source media range. Detect is read-only; **`mark_scene_changes`** and
+  **`blade_scene_changes`** are separate tools. Reported cut times are file seconds; mark/blade map
+  them onto the clip. **`file_url`** analysis refuses mark/blade. On FCP 12.3 it also uses the same
+  media URL resolver as **`get_clip_info`** (`originalMediaRep.fileURL` alone is often nil).
+- **`mark_scene_changes`, `add_markers_at_times`, and `delete_transcript_words` are each one undo
+  step** (one Edit > Undo reverts the whole operation).
+- **`get_active_libraries` listed pointer dumps** instead of usable library names; it now returns
+  display names and paths.
+- **`analyze_song_structure` (structure-analyzer) emitted a zero-length trailing section** at the
+  end of the report; that spurious section is gone.
 - **The Vision Pro RPC namespace was never wired into the request dispatcher**, so all 16
   `visionpro.*` methods returned "Method not found" even though the handler was implemented and
   compiled in. Requests whose method name starts with `visionpro.` are now dispatched by prefix.
-- **Scene detection could not resolve clip media on FCP 12.3**: it used only
-  `media.originalMediaRep.fileURL`, which is nil there, instead of the resolver
-  `timeline.getClipInfo` already uses. Scene detection now shares that resolver.
 - **`debug.setConfig`, `debug.resetConfig` and `debug.enablePreset` ran on the bridge's background
   queue** and Final Cut Pro raised "Modifications to the layout engine must not be performed from
   a background thread". All three now perform their work on the main thread.

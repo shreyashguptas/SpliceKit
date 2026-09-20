@@ -27746,7 +27746,593 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
     return result ?: @{@"error": @"Failed to assemble random clips to song beats"};
 }
 
+#pragma mark - Song structure blocks (captions + storyline removal / placement)
+
+static NSString * const kSpliceKitStructureStorylineName = @"SpliceKit Structure";
+
+static id SpliceKit_structurePrimaryObject(id sequence) {
+    if (!sequence) return nil;
+    SEL sel = NSSelectorFromString(@"primaryObject");
+    if (![sequence respondsToSelector:sel]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(sequence, sel);
+}
+
+static NSUInteger SpliceKit_structureCountStorylinesNamed(id sequence, NSString *name) {
+    id primary = SpliceKit_structurePrimaryObject(sequence);
+    if (!primary) return 0;
+
+    SEL itemsSel = NSSelectorFromString(@"containedItems");
+    NSArray *items = [primary respondsToSelector:itemsSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(primary, itemsSel) : nil;
+    if (![items isKindOfClass:[NSArray class]]) return 0;
+
+    NSUInteger count = 0;
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    SEL displayNameSel = NSSelectorFromString(@"displayName");
+
+    for (id item in items) {
+        if (![item respondsToSelector:anchoredSel]) continue;
+        id anchoredRaw = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
+        NSArray *anchored = SpliceKit_mixerArrayFromContainer(anchoredRaw);
+        if (!anchored.count) continue;
+
+        for (id obj in anchored) {
+            NSString *className = NSStringFromClass([obj class]) ?: @"";
+            if (![className containsString:@"Collection"]) continue;
+
+            NSString *dn = nil;
+            @try {
+                if ([obj respondsToSelector:displayNameSel]) {
+                    id n = ((id (*)(id, SEL))objc_msgSend)(obj, displayNameSel);
+                    if ([n isKindOfClass:[NSString class]]) dn = n;
+                }
+            } @catch (NSException *e) {}
+
+            if (name.length > 0 && [dn isEqualToString:name]) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+static NSUInteger SpliceKit_structureRemoveStorylineNamed(id sequence, NSString *name) {
+    id primary = SpliceKit_structurePrimaryObject(sequence);
+    if (!primary) return 0;
+
+    SEL itemsSel = NSSelectorFromString(@"containedItems");
+    NSArray *items = [primary respondsToSelector:itemsSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(primary, itemsSel) : nil;
+    if (![items isKindOfClass:[NSArray class]]) return 0;
+
+    NSUInteger removed = 0;
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    SEL displayNameSel = NSSelectorFromString(@"displayName");
+    SEL removeSel1 = NSSelectorFromString(@"removeAnchoredItemsObject:");
+    SEL removeSel2 = NSSelectorFromString(@"removeAnchoredObject:");
+
+    for (id item in items) {
+        if (![item respondsToSelector:anchoredSel]) continue;
+        id anchoredRaw = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
+        NSArray *anchored = SpliceKit_mixerArrayFromContainer(anchoredRaw);
+        if (!anchored.count) continue;
+
+        for (id obj in anchored) {
+            NSString *className = NSStringFromClass([obj class]) ?: @"";
+            if (![className containsString:@"Collection"]) continue;
+
+            NSString *dn = nil;
+            @try {
+                if ([obj respondsToSelector:displayNameSel]) {
+                    id n = ((id (*)(id, SEL))objc_msgSend)(obj, displayNameSel);
+                    if ([n isKindOfClass:[NSString class]]) dn = n;
+                }
+            } @catch (NSException *e) {}
+
+            if (name.length > 0 && ![dn isEqualToString:name]) continue;
+
+            if ([item respondsToSelector:removeSel1]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(item, removeSel1, obj);
+                removed++;
+            } else if ([item respondsToSelector:removeSel2]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(item, removeSel2, obj);
+                removed++;
+            }
+        }
+    }
+    return removed;
+}
+
+// Captions created by structure.generateCaptions (session registry, keyed by sequence).
+static NSMutableDictionary<NSString *, NSHashTable<id> *> *SpliceKit_structureCaptionRegistry(void) {
+    static NSMutableDictionary *registry = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        registry = [NSMutableDictionary dictionary];
+    });
+    return registry;
+}
+
+static NSString *SpliceKit_structureSequenceRegistryKey(id sequence) {
+    if (!sequence) return nil;
+    return [NSString stringWithFormat:@"%p", sequence];
+}
+
+static NSHashTable<id> *SpliceKit_structureCaptionTableForSequence(id sequence, BOOL create) {
+    NSString *key = SpliceKit_structureSequenceRegistryKey(sequence);
+    if (!key.length) return nil;
+    NSMutableDictionary *registry = SpliceKit_structureCaptionRegistry();
+    NSHashTable<id> *table = registry[key];
+    if (!table && create) {
+        table = [NSHashTable weakObjectsHashTable];
+        registry[key] = table;
+    }
+    return table;
+}
+
+static void SpliceKit_structureRegisterCaptions(id sequence, NSArray *captions) {
+    if (!sequence || captions.count == 0) return;
+    NSHashTable<id> *table = SpliceKit_structureCaptionTableForSequence(sequence, YES);
+    for (id caption in captions) {
+        if (caption) [table addObject:caption];
+    }
+}
+
+static void SpliceKit_structureUnregisterCaptions(id sequence, NSArray *captions) {
+    if (!sequence || captions.count == 0) return;
+    NSHashTable<id> *table = SpliceKit_structureCaptionTableForSequence(sequence, NO);
+    if (!table) return;
+    for (id caption in captions) {
+        if (caption) [table removeObject:caption];
+    }
+}
+
+// Structure captions anchor to spine clips (lane 1), not primaryObject.anchoredItems.
+static void SpliceKit_structureCollectCaptionsFromItem(id item,
+                                                       Class captionClass,
+                                                       NSMutableArray *found,
+                                                       NSMutableSet *visited,
+                                                       NSInteger depth) {
+    if (!item || !found || !visited || depth > 32) return;
+
+    NSString *pointerKey = SpliceKit_handlePointerKey(item);
+    if (pointerKey.length == 0) return;
+    NSString *walkKey = [@"walk:" stringByAppendingString:pointerKey];
+    if ([visited containsObject:walkKey]) return;
+    [visited addObject:walkKey];
+
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    NSArray *anchored = nil;
+    if ([item respondsToSelector:anchoredSel]) {
+        @try {
+            anchored = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, anchoredSel));
+        } @catch (NSException *e) {
+            anchored = nil;
+        }
+    }
+
+    BOOL itemIsConnectedStoryline = SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+    BOOL itemHasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+    BOOL walkContained = itemIsConnectedStoryline || (!itemHasVideo && SpliceKit_mixerIsCollectionLike(item));
+    NSArray *contained = nil;
+    SEL containedSel = NSSelectorFromString(@"containedItems");
+    if (walkContained && [item respondsToSelector:containedSel]) {
+        @try {
+            contained = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel));
+        } @catch (NSException *e) {
+            contained = nil;
+        }
+    }
+
+    for (NSInteger pass = 0; pass < 2; pass++) {
+        NSArray *children = (pass == 1) ? contained : anchored;
+        if (children.count == 0) continue;
+
+        for (id child in children) {
+            if (!child) continue;
+
+            if (captionClass && [child isKindOfClass:captionClass]) {
+                NSString *childKey = SpliceKit_handlePointerKey(child);
+                if (childKey.length > 0 && ![visited containsObject:childKey]) {
+                    [visited addObject:childKey];
+                    [found addObject:child];
+                }
+                continue;
+            }
+
+            SpliceKit_structureCollectCaptionsFromItem(child, captionClass, found, visited, depth + 1);
+        }
+    }
+}
+
+static NSArray *SpliceKit_structureAllCaptionsOnSequence(id sequence) {
+    if (!sequence) return @[];
+
+    Class captionClass = NSClassFromString(@"FFAnchoredCaption");
+    NSMutableArray *found = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+
+    SEL allCaptionsSel = NSSelectorFromString(@"allCaptions");
+    if ([sequence respondsToSelector:allCaptionsSel]) {
+        id allCaptions = ((id (*)(id, SEL))objc_msgSend)(sequence, allCaptionsSel);
+        NSArray *items = nil;
+        if ([allCaptions isKindOfClass:[NSArray class]]) {
+            items = allCaptions;
+        } else if ([allCaptions isKindOfClass:[NSSet class]]) {
+            items = [(NSSet *)allCaptions allObjects];
+        }
+        for (id item in items) {
+            if (!captionClass || ![item isKindOfClass:captionClass]) continue;
+            NSString *key = SpliceKit_handlePointerKey(item);
+            if (key.length == 0 || [seen containsObject:key]) continue;
+            [seen addObject:key];
+            [found addObject:item];
+        }
+    }
+
+    id primaryObject = SpliceKit_structurePrimaryObject(sequence);
+    if (primaryObject) {
+        SEL itemsSel = NSSelectorFromString(@"containedItems");
+        NSArray *spineItems = [primaryObject respondsToSelector:itemsSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(primaryObject, itemsSel) : nil;
+        if ([spineItems isKindOfClass:[NSArray class]]) {
+            NSMutableSet *walkVisited = [NSMutableSet setWithSet:seen];
+            for (id spineItem in spineItems) {
+                SpliceKit_structureCollectCaptionsFromItem(spineItem, captionClass, found, walkVisited, 0);
+            }
+        }
+    }
+
+    return found;
+}
+
+static NSHashTable *SpliceKit_structureCaptionPointerSet(NSArray *captions) {
+    NSHashTable *set = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    for (id caption in captions) {
+        if (caption) [set addObject:caption];
+    }
+    return set;
+}
+
+static NSString *SpliceKit_structureCaptionText(id caption) {
+    if (!caption) return nil;
+    SEL textSel = NSSelectorFromString(@"text");
+    if (![caption respondsToSelector:textSel]) return nil;
+    id text = ((id (*)(id, SEL))objc_msgSend)(caption, textSel);
+    return [text isKindOfClass:[NSString class]] ? text : nil;
+}
+
+// Exact uppercase labels written by structure.generateCaptions (see tools/structure-analyzer + paste).
+static BOOL SpliceKit_structureCaptionTextIsToolGenerated(NSString *text) {
+    if (text.length == 0) return NO;
+
+    static NSSet<NSString *> *exactLabels = nil;
+    static NSArray<NSString *> *numberedPrefixes = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        exactLabels = [NSSet setWithObjects:
+            @"INTRO", @"OUTRO", @"BRIDGE", @"DROP", @"BREAKDOWN", @"SECTION", @"PRE-CHORUS", nil];
+        numberedPrefixes = @[@"VERSE", @"CHORUS", @"BRIDGE"];
+    });
+
+    if ([exactLabels containsObject:text]) return YES;
+
+    for (NSString *prefix in numberedPrefixes) {
+        if (![text hasPrefix:prefix]) continue;
+        NSString *suffix = [text substringFromIndex:prefix.length];
+        if (suffix.length == 0) continue;
+        NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+        if ([suffix rangeOfCharacterFromSet:nonDigits].location == NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSDictionary *SpliceKit_structureCaptionSummary(id sequence, id caption) {
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    NSString *text = SpliceKit_structureCaptionText(caption);
+    if (text) info[@"text"] = text;
+
+    id primaryObject = SpliceKit_structurePrimaryObject(sequence);
+    SpliceKit_CMTimeRange range = {0};
+    if (primaryObject && SpliceKit_tryReadTimelineRange(primaryObject, caption, &range)) {
+        double start = SpliceKit_secondsFromTime(range.start);
+        double end = start + SpliceKit_secondsFromTime(range.duration);
+        info[@"startSeconds"] = @(start);
+        info[@"endSeconds"] = @(end);
+    }
+    return info;
+}
+
+static NSArray *SpliceKit_structureCaptionsToRemove(id sequence, BOOL *outUsedRegistry) {
+    if (outUsedRegistry) *outUsedRegistry = NO;
+    if (!sequence) return @[];
+
+    Class captionClass = NSClassFromString(@"FFAnchoredCaption");
+    NSMutableArray *toRemove = [NSMutableArray array];
+    NSHashTable *seen = SpliceKit_structureCaptionPointerSet(@[]);
+
+    NSHashTable<id> *registry = SpliceKit_structureCaptionTableForSequence(sequence, NO);
+    if (registry.count > 0) {
+        if (outUsedRegistry) *outUsedRegistry = YES;
+        for (id caption in registry) {
+            if (!caption || (captionClass && ![caption isKindOfClass:captionClass])) continue;
+            [toRemove addObject:caption];
+            [seen addObject:caption];
+        }
+    }
+
+    for (id caption in SpliceKit_structureAllCaptionsOnSequence(sequence)) {
+        if ([seen containsObject:caption]) continue;
+        if (captionClass && ![caption isKindOfClass:captionClass]) continue;
+        NSString *text = SpliceKit_structureCaptionText(caption);
+        if (!SpliceKit_structureCaptionTextIsToolGenerated(text)) continue;
+        [toRemove addObject:caption];
+        [seen addObject:caption];
+    }
+
+    return toRemove;
+}
+
+static void SpliceKit_structureSeekTimelineToSeconds(id timeline, id sequence, double seconds) {
+    if (!timeline || seconds < 0) seconds = 0;
+    int fdN = 100, fdD = 2400;
+    SEL fdSel = NSSelectorFromString(@"frameDuration");
+    if (sequence && [sequence respondsToSelector:fdSel]) {
+        SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
+        if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
+    }
+    double fps = (double)fdD / (double)fdN;
+    long long frames = (long long)llround(seconds * fps);
+    if (frames < 0) frames = 0;
+    SpliceKit_CMTime t = {frames * fdN, fdD, 1, 0};
+    SEL setSel = @selector(setPlayheadTime:);
+    if ([timeline respondsToSelector:setSel]) {
+        ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(timeline, setSel, t);
+    }
+}
+
+static double SpliceKit_structureSequenceDurationSeconds(id sequence) {
+    if (!sequence) return 0;
+    SEL durSel = NSSelectorFromString(@"duration");
+    if ([sequence respondsToSelector:durSel]) {
+        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
+        return SpliceKit_cmtimeToSeconds(d);
+    }
+    return 0;
+}
+
+NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
+    NSArray *sections = params[@"sections"];
+    if (!sections || ![sections isKindOfClass:[NSArray class]] || sections.count == 0) {
+        return @{@"error": @"sections array required (each: {label, start, end})"};
+    }
+
+    double atSeconds = params[@"atSeconds"] != nil ? [params[@"atSeconds"] doubleValue] : 0.0;
+    if (atSeconds < 0) atSeconds = 0;
+
+    double maxSectionEnd = 0;
+    for (id obj in sections) {
+        if (![obj isKindOfClass:[NSDictionary class]]) continue;
+        double end = [obj[@"end"] doubleValue];
+        if (end > maxSectionEnd) maxSectionEnd = end;
+    }
+    double labelsEnd = atSeconds + maxSectionEnd;
+
+    __block double sequenceDuration = 0;
+    __block double savedPlayheadSeconds = 0;
+
+    @try {
+        SpliceKit_executeOnMainThread(^{
+            id tm = SpliceKit_getActiveTimelineModule();
+            id seq = tm ? ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence)) : nil;
+            sequenceDuration = SpliceKit_structureSequenceDurationSeconds(seq);
+            if (tm && [tm respondsToSelector:@selector(playheadTime)]) {
+                SpliceKit_CMTime saved = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
+                savedPlayheadSeconds = SpliceKit_secondsFromTime(saved);
+            }
+            if (tm) {
+                SpliceKit_structureSeekTimelineToSeconds(tm, seq, atSeconds);
+            }
+        });
+
+        NSMutableDictionary *mutableParams = [params mutableCopy];
+        mutableParams[@"atSeconds"] = @(atSeconds);
+        __block id userSequence = nil;
+        __block NSArray *captionsBefore = nil;
+        SpliceKit_executeOnMainThread(^{
+            id tm = SpliceKit_getActiveTimelineModule();
+            userSequence = tm ? ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence)) : nil;
+            if (userSequence) {
+                captionsBefore = SpliceKit_structureAllCaptionsOnSequence(userSequence);
+            }
+        });
+
+        NSMutableDictionary *result = [SpliceKit_handleStructureGenerateCaptions(mutableParams) mutableCopy];
+        if (result[@"error"]) return result;
+
+        if (userSequence) {
+            NSHashTable *beforeSet = SpliceKit_structureCaptionPointerSet(captionsBefore ?: @[]);
+            __block NSMutableArray *newCaptions = [NSMutableArray array];
+            SpliceKit_executeOnMainThread(^{
+                for (id caption in SpliceKit_structureAllCaptionsOnSequence(userSequence)) {
+                    if (![beforeSet containsObject:caption]) {
+                        [newCaptions addObject:caption];
+                    }
+                }
+            });
+            if (newCaptions.count > 0) {
+                SpliceKit_structureRegisterCaptions(userSequence, newCaptions);
+                result[@"registeredCaptions"] = @(newCaptions.count);
+            }
+        }
+
+        __block double playheadAfterPaste = 0;
+        SpliceKit_executeOnMainThread(^{
+            id tm = SpliceKit_getActiveTimelineModule();
+            if (tm && [tm respondsToSelector:@selector(playheadTime)]) {
+                SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
+                playheadAfterPaste = SpliceKit_secondsFromTime(t);
+            }
+        });
+
+        result[@"atSeconds"] = @(atSeconds);
+        if (fabs(playheadAfterPaste - atSeconds) > 0.05) {
+            result[@"placedAtSeconds"] = @(playheadAfterPaste);
+        }
+
+        if (sequenceDuration > 0 && labelsEnd > sequenceDuration + 0.05) {
+            result[@"extendsPastSequenceEnd"] = @YES;
+            result[@"sequenceDurationSeconds"] = @(sequenceDuration);
+            result[@"labelsEndSeconds"] = @(labelsEnd);
+        } else {
+            result[@"extendsPastSequenceEnd"] = @NO;
+        }
+        return result;
+    } @finally {
+        SpliceKit_executeOnMainThread(^{
+            id tm = SpliceKit_getActiveTimelineModule();
+            id seq = tm ? ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence)) : nil;
+            if (tm) {
+                SpliceKit_structureSeekTimelineToSeconds(tm, seq, savedPlayheadSeconds);
+            }
+        });
+    }
+}
+
+NSDictionary *SpliceKit_serverStructureRemove(NSDictionary *params) {
+    BOOL dryRun = [params[@"dryRun"] boolValue];
+    __block NSUInteger removedStorylines = 0;
+    __block NSUInteger removedCaptions = 0;
+    __block NSMutableArray *removedCaptionDetails = [NSMutableArray array];
+    __block NSDictionary *result = nil;
+
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) {
+                result = @{@"error": @"No active timeline module"};
+                return;
+            }
+            id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+            if (!sequence) {
+                result = @{@"error": @"No sequence in timeline"};
+                return;
+            }
+
+            BOOL usedRegistry = NO;
+            NSArray *captions = SpliceKit_structureCaptionsToRemove(sequence, &usedRegistry);
+            NSMutableArray *captionSummaries = [NSMutableArray arrayWithCapacity:captions.count];
+            for (id caption in captions) {
+                [captionSummaries addObject:SpliceKit_structureCaptionSummary(sequence, caption)];
+            }
+
+            NSUInteger storylinesToRemove =
+                SpliceKit_structureCountStorylinesNamed(sequence, kSpliceKitStructureStorylineName);
+
+            if (dryRun) {
+                result = @{
+                    @"status": @"ok",
+                    @"dryRun": @YES,
+                    @"removedStorylines": @(storylinesToRemove),
+                    @"removedCaptions": @(captions.count),
+                    @"removed": @(storylinesToRemove + captions.count),
+                    @"captions": captionSummaries,
+                    @"matchedViaRegistry": @(usedRegistry && captions.count > 0),
+                };
+                return;
+            }
+
+            if (storylinesToRemove == 0 && captions.count == 0) {
+                result = @{
+                    @"status": @"ok",
+                    @"removedStorylines": @0,
+                    @"removedCaptions": @0,
+                    @"removed": @0,
+                    @"captions": @[],
+                };
+                return;
+            }
+
+            NSString *undoName = @"Remove Structure Blocks";
+            BOOL openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoName);
+            @try {
+                removedStorylines = SpliceKit_structureRemoveStorylineNamed(sequence, kSpliceKitStructureStorylineName);
+
+                if (captions.count > 0) {
+                    SEL deleteSel = NSSelectorFromString(
+                        @"_deleteAnchoredObjects:rootItem:preserveTime:preserveAnchors:playhead:error:");
+                    NSDictionary *missingDelete = SpliceKit_directActionMissingSelectorError(
+                        sequence, deleteSel, @"structure caption removal");
+                    if (missingDelete) {
+                        result = missingDelete;
+                        return;
+                    }
+
+                    id rootItem = SpliceKit_structurePrimaryObject(sequence);
+                    if (!rootItem) {
+                        result = @{@"error": @"No primary storyline object on sequence"};
+                        return;
+                    }
+
+                    SpliceKit_CMTime playhead = {0, 1, 0, 0};
+                    if ([timeline respondsToSelector:@selector(playheadTime)]) {
+                        playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                    }
+
+                    NSError *deleteError = nil;
+                    BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, SpliceKit_CMTime *, NSError **))objc_msgSend)(
+                        sequence, deleteSel, captions, rootItem, NO, NO, &playhead, &deleteError);
+                    if (deleteError) {
+                        result = @{@"error": deleteError.localizedDescription ?: @"Failed to delete structure captions"};
+                        return;
+                    }
+                    if (!deleted) {
+                        result = @{@"error": @"Failed to delete structure captions"};
+                        return;
+                    }
+                    removedCaptions = captions.count;
+                    [removedCaptionDetails addObjectsFromArray:captionSummaries];
+                    SpliceKit_structureUnregisterCaptions(sequence, captions);
+                }
+            } @finally {
+                SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoName, openedUndoGroup);
+            }
+
+            result = @{
+                @"status": @"ok",
+                @"dryRun": @NO,
+                @"removedStorylines": @(removedStorylines),
+                @"removedCaptions": @(removedCaptions),
+                @"removed": @(removedStorylines + removedCaptions),
+                @"captions": removedCaptionDetails,
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+
+    return result ?: @{@"error": @"Failed to remove structure blocks"};
+}
+
 // ---------- 1. flexmusic.listSongs ----------
+
+static BOOL SpliceKit_flexMusicCollectionIsEmpty(id collection) {
+    if (!collection) return YES;
+    if ([collection isKindOfClass:[NSArray class]]) return [(NSArray *)collection count] == 0;
+    if ([collection isKindOfClass:[NSSet class]]) return [(NSSet *)collection count] == 0;
+    if ([collection isKindOfClass:[NSDictionary class]]) return [(NSDictionary *)collection count] == 0;
+    return YES;
+}
+
+static NSArray *SpliceKit_flexMusicNormalizeSongCollection(id collection) {
+    if (!collection) return nil;
+    if ([collection isKindOfClass:[NSArray class]]) return (NSArray *)collection;
+    if ([collection isKindOfClass:[NSSet class]]) return [(NSSet *)collection allObjects];
+    if ([collection isKindOfClass:[NSDictionary class]]) return [(NSDictionary *)collection allValues];
+    return nil;
+}
 
 NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
     NSString *filter = params[@"filter"];
@@ -27770,7 +28356,7 @@ NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
             }
 
             // 2. fetchSongsWithOptions: — returns array directly (synchronous)
-            if (!songs || ([songs isKindOfClass:[NSArray class]] && [(NSArray *)songs count] == 0)) {
+            if (SpliceKit_flexMusicCollectionIsEmpty(songs)) {
                 SEL fetchSel = NSSelectorFromString(@"fetchSongsWithOptions:");
                 if ([library respondsToSelector:fetchSel]) {
                     Class fetchOptClass = objc_getClass("FMFetchOptions");
@@ -27781,14 +28367,14 @@ NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
                             @selector(init));
                     }
                     id fetched = ((id (*)(id, SEL, id))objc_msgSend)(library, fetchSel, fetchOpts);
-                    if (fetched && [fetched isKindOfClass:[NSArray class]] && [(NSArray *)fetched count] > 0) {
+                    if (fetched && [fetched isKindOfClass:[NSArray class]]) {
                         songs = fetched;
                     }
                 }
             }
 
             // 3. Try generic accessors
-            if (!songs || ([songs isKindOfClass:[NSArray class]] && [(NSArray *)songs count] == 0)) {
+            if (SpliceKit_flexMusicCollectionIsEmpty(songs)) {
                 for (NSString *selName in @[@"songs", @"availableSongs", @"allSongs"]) {
                     SEL sel = NSSelectorFromString(selName);
                     if ([library respondsToSelector:sel]) {
@@ -27802,7 +28388,7 @@ NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
             }
 
             // Also try FFFlexMusicLibrary from Flexo as fallback
-            if (!songs) {
+            if (SpliceKit_flexMusicCollectionIsEmpty(songs)) {
                 Class ffFlexLib = objc_getClass("FFFlexMusicLibrary");
                 if (ffFlexLib) {
                     SEL sharedSel = NSSelectorFromString(@"sharedLibrary");
@@ -27818,14 +28404,12 @@ NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
                 }
             }
 
-            if (!songs || (![songs isKindOfClass:[NSArray class]] && ![songs isKindOfClass:[NSSet class]])) {
+            NSArray *songArray = SpliceKit_flexMusicNormalizeSongCollection(songs);
+            if (!songArray) {
                 result = @{@"error": @"Could not retrieve songs from FMSongLibrary",
                            @"libraryClass": NSStringFromClass([library class])};
                 return;
             }
-
-            // Normalize to array
-            NSArray *songArray = [songs isKindOfClass:[NSSet class]] ? [(NSSet *)songs allObjects] : (NSArray *)songs;
 
             NSMutableArray *songList = [NSMutableArray array];
             for (id song in songArray) {
@@ -32975,9 +33559,9 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     else if ([method isEqualToString:@"structure.generateBlocks"]) {
         result = SpliceKit_handleStructureGenerateBlocks(params);
     } else if ([method isEqualToString:@"structure.generateCaptions"]) {
-        result = SpliceKit_handleStructureGenerateCaptions(params);
+        result = SpliceKit_serverStructureGenerateCaptions(params);
     } else if ([method isEqualToString:@"structure.remove"]) {
-        result = SpliceKit_handleStructureRemove(params);
+        result = SpliceKit_serverStructureRemove(params);
     } else if ([method isEqualToString:@"structure.toggle"]) {
         result = SpliceKit_handleStructureToggle(params);
     }
