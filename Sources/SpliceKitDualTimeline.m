@@ -32,6 +32,27 @@ static IMP sOriginalLayoutManagerExistingModuleFromLayout = NULL;
 // check this before calling into the dual timeline functions.
 static BOOL sDualTimelineInstalled = NO;
 
+// DISABLED (FCP 12.3): secondary timeline creation is blocked until teardown is proven complete.
+// Reproduced crash signatures when closing the secondary container:
+// 1. NSRangeException — removing an unregistered KVO observer (key path
+//    PEEditorContainerModuleTimelineIndexHidden).
+// 2. SIGSEGV — NSNotificationCenter calling a deallocated observer, stack through
+//    FFStoryTimelinePresentation postStoryChanged:.
+// 3. SIGABRT — uncaught ObjC exception via FFApplicationHandleExceptionThatShouldNotBeIgnored
+//    (__pthread_kill -> abort -> _objc_terminate).
+static NSString * const kSpliceKitDualTimelineCreateDisabledReason =
+    @"The secondary timeline is disabled because tearing it down leaves observers "
+    @"registered inside Final Cut Pro and crashes the app; three separate crash "
+    @"signatures were reproduced on FCP 12.3; it will be re-enabled when teardown "
+    @"can be proven complete.";
+
+static NSDictionary *SpliceKit_dualTimelineRefuseSecondaryCreate(void) {
+    return @{
+        @"error": kSpliceKitDualTimelineCreateDisabledReason,
+        @"disabled": @YES,
+    };
+}
+
 static __weak id sFocusedEditorContainer = nil;
 static __weak id sSecondaryContentBrowserModule = nil;
 static __weak id sSecondaryRootWindowModule = nil;
@@ -446,6 +467,105 @@ static id SpliceKit_dualTimelineLookupInstalledContainer(NSString *identifier) {
     }
 
     return ((id (*)(id, SEL, id))objc_msgSend)((id)lkViewModuleClass, installedSel, identifier);
+}
+
+static void SpliceKit_dualTimelineInvokeVoidIfSupported(id target, SEL selector) {
+    if (target && selector && [target respondsToSelector:selector]) {
+        ((void (*)(id, SEL))objc_msgSend)(target, selector);
+    }
+}
+
+// FCP's PEEditorContainerModule registers story/sequence observers when a sequence is
+// loaded (_startObservingEditorModule / _startObservingStoryPresentation). removeSubmodule:
+// alone can deallocate the container while those NSNotificationCenter / KVO registrations
+// remain, which surfaces later as SIGSEGV in -[FFStoryTimelinePresentation postStoryChanged:].
+static void SpliceKit_dualTimelineStopStoryObserversForTimelineModule(id timelineModule) {
+    if (!timelineModule) return;
+
+    SEL storyPresentationSel = NSSelectorFromString(@"storyPresentation");
+    id storyPresentation = [timelineModule respondsToSelector:storyPresentationSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, storyPresentationSel)
+        : nil;
+    if (!storyPresentation) return;
+
+    SpliceKit_dualTimelineInvokeVoidIfSupported(storyPresentation, NSSelectorFromString(@"stopListeningToSequence"));
+    SpliceKit_dualTimelineInvokeVoidIfSupported(storyPresentation,
+                                                NSSelectorFromString(@"_stopListeningToSequenceDefaults"));
+
+    SEL bridgeSel = NSSelectorFromString(@"storySequenceBridge");
+    id bridge = [storyPresentation respondsToSelector:bridgeSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(storyPresentation, bridgeSel)
+        : nil;
+    if (bridge) {
+        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge, NSSelectorFromString(@"stopListeningToSequence"));
+        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge,
+                                                    NSSelectorFromString(@"stopObservingRootItemForEnabledRoleChanges"));
+        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge,
+                                                    NSSelectorFromString(@"nullifyWeakReferenceToStoryTimelinePresentation"));
+    }
+}
+
+static void SpliceKit_dualTimelinePrepareSecondaryContainerForTeardown(id secondary) {
+    if (!secondary) return;
+
+    if (sFocusedEditorContainer == secondary) {
+        sFocusedEditorContainer = SpliceKit_dualTimelinePrimaryEditorContainer();
+    }
+
+    SEL stopSkimmingSel = NSSelectorFromString(@"stopSkimmingForOwner:");
+    if ([secondary respondsToSelector:stopSkimmingSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(secondary, stopSkimmingSel, secondary);
+    }
+
+    SEL windowWillCloseSel = NSSelectorFromString(@"windowWillClose:");
+    if ([secondary respondsToSelector:windowWillCloseSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(secondary, windowWillCloseSel, nil);
+    }
+
+    // Reverse _startObservingStoryPresentation / _startObservingEditorModule (see PEEditorContainerModule).
+    SpliceKit_dualTimelineInvokeVoidIfSupported(secondary, NSSelectorFromString(@"_stopObservingStoryPresentation"));
+    SpliceKit_dualTimelineInvokeVoidIfSupported(secondary, NSSelectorFromString(@"_stopObservingEditorModule"));
+
+    id timelineModule = SpliceKit_dualTimelineTimelineModuleForContainer(secondary);
+    SpliceKit_dualTimelineStopStoryObserversForTimelineModule(timelineModule);
+}
+
+// Closing the secondary NSWindow only hides it. FCP keeps the PEEditorContainerModule
+// registered under SKDualEditorContainer; a later workspace layout pass then tears the
+// module down and can throw on NSUserDefaults KVO (removeObserver without a matching
+// addObserver after the window-only close path). Detach via the parent window module.
+static BOOL SpliceKit_dualTimelineDestroySecondaryContainer(id secondary) {
+    if (!secondary) return YES;
+
+    NSString *identifier = SpliceKit_dualTimelineIdentifierForContainer(secondary);
+    if (![identifier isEqualToString:kSpliceKitDualEditorContainerID]) {
+        return NO;
+    }
+
+    @try {
+        SpliceKit_dualTimelinePrepareSecondaryContainerForTeardown(secondary);
+
+        id parent = nil;
+        SEL supermoduleSel = NSSelectorFromString(@"supermodule");
+        if ([secondary respondsToSelector:supermoduleSel]) {
+            parent = ((id (*)(id, SEL))objc_msgSend)(secondary, supermoduleSel);
+        }
+
+        SEL removeSubmoduleSel = NSSelectorFromString(@"removeSubmodule:");
+        if (parent && [parent respondsToSelector:removeSubmoduleSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(parent, removeSubmoduleSel, secondary);
+        } else {
+            id window = SpliceKit_dualTimelineWindowForContainer(secondary);
+            if (window && [window respondsToSelector:@selector(close)]) {
+                ((void (*)(id, SEL))objc_msgSend)(window, @selector(close));
+            }
+        }
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[DualTimeline] Exception during secondary container teardown: %@", exception);
+        return NO;
+    }
+
+    return SpliceKit_dualTimelineLookupInstalledContainer(kSpliceKitDualEditorContainerID) == nil;
 }
 
 static void SpliceKit_dualTimelineSetFocusedContainer(id container, BOOL rebindEditorState) {
@@ -921,6 +1041,11 @@ id SpliceKit_dualTimelinePrimaryEditorContainer(void) {
 
 id SpliceKit_dualTimelineSecondaryEditorContainer(BOOL createIfNeeded) {
     id existing = SpliceKit_dualTimelineLookupInstalledContainer(kSpliceKitDualEditorContainerID);
+    if (existing && !SpliceKit_dualTimelineIsUsableContainer(existing)) {
+        SpliceKit_log(@"[DualTimeline] Removing stale secondary editor container");
+        SpliceKit_dualTimelineDestroySecondaryContainer(existing);
+        existing = nil;
+    }
     if (existing) {
         SpliceKit_dualTimelineTrackSecondaryWindowModule(existing);
         SpliceKit_dualTimelineRelaxOuterBrowserWidthConstraintsForContainer(existing);
@@ -930,6 +1055,11 @@ id SpliceKit_dualTimelineSecondaryEditorContainer(BOOL createIfNeeded) {
         return existing;
     }
 
+    SpliceKit_log(@"[DualTimeline] Refusing secondary container creation: %@",
+                  kSpliceKitDualTimelineCreateDisabledReason);
+    return nil;
+
+#if 0 // Re-enable with dual timeline open/sync/openSelected when teardown is proven safe.
     id appController = SpliceKit_dualTimelineAppController();
     if (!appController) return nil;
 
@@ -947,6 +1077,7 @@ id SpliceKit_dualTimelineSecondaryEditorContainer(BOOL createIfNeeded) {
         SpliceKit_log(@"[DualTimeline] Secondary editor container ready");
     }
     return container;
+#endif
 }
 
 NSDictionary *SpliceKit_dualTimelineStatus(void) {
@@ -967,7 +1098,14 @@ NSDictionary *SpliceKit_dualTimelineStatus(void) {
 }
 
 NSDictionary *SpliceKit_dualTimelineOpen(NSDictionary *params) {
+    (void)params;
     __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        result = SpliceKit_dualTimelineRefuseSecondaryCreate();
+    });
+    return result ?: SpliceKit_dualTimelineRefuseSecondaryCreate();
+
+#if 0 // Creation disabled — see kSpliceKitDualTimelineCreateDisabledReason above.
     SpliceKit_executeOnMainThread(^{
         id sourceContainer = SpliceKit_dualTimelineSourceContainerForParams(params);
         id sourceEditor = SpliceKit_dualTimelineEditorModuleForContainer(sourceContainer);
@@ -1006,10 +1144,18 @@ NSDictionary *SpliceKit_dualTimelineOpen(NSDictionary *params) {
         };
     });
     return result ?: @{@"error": @"Failed to open the secondary timeline"};
+#endif
 }
 
 NSDictionary *SpliceKit_dualTimelineSyncRoot(NSDictionary *params) {
+    (void)params;
     __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        result = SpliceKit_dualTimelineRefuseSecondaryCreate();
+    });
+    return result ?: SpliceKit_dualTimelineRefuseSecondaryCreate();
+
+#if 0 // Creation disabled — see kSpliceKitDualTimelineCreateDisabledReason above.
     SpliceKit_executeOnMainThread(^{
         id sourceContainer = SpliceKit_dualTimelineSourceContainerForParams(params);
         id sourceEditor = SpliceKit_dualTimelineEditorModuleForContainer(sourceContainer);
@@ -1058,10 +1204,18 @@ NSDictionary *SpliceKit_dualTimelineSyncRoot(NSDictionary *params) {
         };
     });
     return result ?: @{@"error": @"Failed to sync the secondary root"};
+#endif
 }
 
 NSDictionary *SpliceKit_dualTimelineOpenSelectedInSecondary(NSDictionary *params) {
+    (void)params;
     __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        result = SpliceKit_dualTimelineRefuseSecondaryCreate();
+    });
+    return result ?: SpliceKit_dualTimelineRefuseSecondaryCreate();
+
+#if 0 // Creation disabled — see kSpliceKitDualTimelineCreateDisabledReason above.
     SpliceKit_executeOnMainThread(^{
         id sourceContainer = SpliceKit_dualTimelineSourceContainerForParams(params);
         id sourceTimeline = SpliceKit_dualTimelineTimelineModuleForContainer(sourceContainer);
@@ -1120,6 +1274,7 @@ NSDictionary *SpliceKit_dualTimelineOpenSelectedInSecondary(NSDictionary *params
         };
     });
     return result ?: @{@"error": @"Failed to open the selected item in the secondary timeline"};
+#endif
 }
 
 NSDictionary *SpliceKit_dualTimelineFocus(NSDictionary *params) {
@@ -1148,32 +1303,44 @@ NSDictionary *SpliceKit_dualTimelineFocus(NSDictionary *params) {
 NSDictionary *SpliceKit_dualTimelineClose(NSDictionary *params) {
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
-        id secondary = SpliceKit_dualTimelineSecondaryEditorContainer(NO);
-        if (!secondary) {
-            result = @{@"status": @"ok", @"action": @"close", @"message": @"Secondary timeline is already closed"};
-            return;
-        }
+        @try {
+            id secondary = SpliceKit_dualTimelineLookupInstalledContainer(kSpliceKitDualEditorContainerID);
+            if (!secondary) {
+                result = @{@"status": @"ok", @"action": @"close", @"message": @"Secondary timeline is already closed"};
+                return;
+            }
 
-        id window = SpliceKit_dualTimelineWindowForContainer(secondary);
-        if (window && [window respondsToSelector:@selector(close)]) {
-            ((void (*)(id, SEL))objc_msgSend)(window, @selector(close));
-        }
-        sSecondaryContentBrowserModule = nil;
-        sSecondaryRootWindowModule = nil;
+            BOOL destroyed = SpliceKit_dualTimelineDestroySecondaryContainer(secondary);
+            sSecondaryContentBrowserModule = nil;
+            sSecondaryRootWindowModule = nil;
 
-        id primary = SpliceKit_dualTimelinePrimaryEditorContainer();
-        BOOL focusPrimary = params[@"focusPrimary"] ? [params[@"focusPrimary"] boolValue] : YES;
-        if (focusPrimary && primary) {
-            SpliceKit_dualTimelineFocusWindowForContainer(primary);
-        } else if (sFocusedEditorContainer == secondary) {
-            sFocusedEditorContainer = primary;
-        }
+            id primary = SpliceKit_dualTimelinePrimaryEditorContainer();
+            BOOL focusPrimary = params[@"focusPrimary"] ? [params[@"focusPrimary"] boolValue] : YES;
+            if (focusPrimary && primary) {
+                SpliceKit_dualTimelineFocusWindowForContainer(primary);
+            } else if (sFocusedEditorContainer == secondary) {
+                sFocusedEditorContainer = primary;
+            }
 
-        result = @{
-            @"status": @"ok",
-            @"action": @"close",
-            @"focusedPane": primary ? @"primary" : @"",
-        };
+            NSMutableDictionary *payload = [@{
+                @"status": @"ok",
+                @"action": @"close",
+                @"focusedPane": primary ? @"primary" : @"",
+                @"destroyed": @(destroyed),
+            } mutableCopy];
+            if (!destroyed) {
+                payload[@"warning"] =
+                    @"Secondary window closed but the editor module may still be registered; "
+                    @"workspace changes could be unsafe.";
+            }
+            result = payload;
+        } @catch (NSException *exception) {
+            SpliceKit_log(@"[DualTimeline] Exception while closing secondary timeline: %@", exception);
+            result = @{
+                @"error": exception.reason ?: @"Exception while closing secondary timeline",
+                @"exception": exception.name ?: @"NSException",
+            };
+        }
     });
     return result ?: @{@"error": @"Failed to close the secondary timeline"};
 }
