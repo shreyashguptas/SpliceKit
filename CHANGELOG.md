@@ -84,16 +84,15 @@ that this fork has removed.
   in, validation leaves them "Undo" / "Redo" and disabled. `menu.list` now also returns
   `undoState` (canUndo / canRedo and the action names, read from the library document's undo
   manager, which is what Edit > Undo and `history_action` act on) for the Edit menu or the whole
-  menu bar, and a `note` stating the limit. Whether validation resolves the title with FCP
-  frontmost was not tested (the QA Mac's screen was locked).
-- **Window captures reported success on a one-colour image** (QA run 4: a locked screen gave a
-  uniform grey Viewer, a sleeping display a black timeline, both returned as captures; the live
-  check's viewer-frame section passed on the grey frame). `viewer.capture`, `timeline.capture`,
+  menu bar, and a `note` that action names resolve in the title regardless of focus while enabled
+  states follow the key window. Measured on 12.3 with FCP not frontmost: title reads e.g. Undo Trim,
+  disabled.
+- **Window captures reported success on a one-colour image** (QA run 4: Viewer chrome around
+  black gap content fooled the first flat test). `viewer.capture`, `timeline.capture`,
   `inspector.capture` and `timeline.captureClipFrame` now test the captured image for a single
-  flat colour (a 32 x 32 downscale, every pixel within 2/255 of the first) and answer `flat`,
-  `flatColor` and a `warning`; the status stays ok because a flat frame can be real (a black
-  frame). The MCP tools print the warning, the live check says the frame is not verified, and
-  the docs say what a capture needs: the display awake, and for the Viewer the screen unlocked.
+  flat colour (32×32 downscale, uniform border trimmed per edge, inner pixels within 2/255) and
+  answer `flat`, `flatColor` and a `warning`; the status stays ok because a flat frame can be real
+  (a black frame). The MCP tools print the warning; the live check says the frame is not verified.
 - **The dialog summary picked up a popup's value as a field** (QA run 4: "Compound Clip Name: /
   Library: / Item 1"): labels ending in a colon are taken first now, other text only when fewer
   than two of those exist.

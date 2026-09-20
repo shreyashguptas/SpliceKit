@@ -3533,6 +3533,27 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
     return out;
 }
 
+// Edit > Insert Generator > Gap (playhead). actionMap insertGapAtPlayhead: no longer works in FCP 12.3;
+// FFAnchoredTimelineModule exposes -insertGap (v16@0:8, no arguments).
+static NSDictionary *SpliceKit_directInsertGap(id timeline) {
+    SEL sel = NSSelectorFromString(@"insertGap");
+    if (![timeline respondsToSelector:sel]) {
+        return @{@"error": @"Timeline module does not respond to insertGap"};
+    }
+    ((void (*)(id, SEL))objc_msgSend)(timeline, sel);
+    return @{@"action": @"insertGap", @"status": @"ok"};
+}
+
+// Edit > Insert Generator > Placeholder. Same shape as insertGap on FFAnchoredTimelineModule.
+static NSDictionary *SpliceKit_directInsertPlaceholder(id timeline) {
+    SEL sel = NSSelectorFromString(@"insertPlaceholder");
+    if (![timeline respondsToSelector:sel]) {
+        return @{@"error": @"Timeline module does not respond to insertPlaceholder"};
+    }
+    ((void (*)(id, SEL))objc_msgSend)(timeline, sel);
+    return @{@"action": @"insertPlaceholder", @"status": @"ok"};
+}
+
 #pragma mark - Timeline Command Handlers
 
 // This is the main entry point for all editing commands. Clients send a
@@ -3624,9 +3645,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"trimToPlayhead":   @"trimToPlayhead:",
         @"extendEditToPlayhead": @"actionExtendEditToPlayhead",
 
-        // Insert
-        @"insertPlaceholder": @"insertPlaceholderStoryline:",
-        @"insertGap":        @"insertGapAtPlayhead:",
+        // Insert (insertGap / insertPlaceholder — direct on FFAnchoredTimelineModule; see below)
 
         // Color Correction (add to selected clips)
         @"addColorBoard":          @"addColorBoardEffect:",
@@ -4288,6 +4307,40 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         return muteResult ?: @{@"error": @"Failed to toggle audio mute"};
     }
 
+    if ([action isEqualToString:@"insertGap"]) {
+        __block NSDictionary *gapResult = nil;
+        SpliceKit_executeOnMainThread(^{
+            @try {
+                id timeline = SpliceKit_getActiveTimelineModule();
+                if (!timeline) {
+                    gapResult = @{@"error": @"No active timeline module. Is a project open?"};
+                    return;
+                }
+                gapResult = SpliceKit_directInsertGap(timeline);
+            } @catch (NSException *e) {
+                gapResult = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+            }
+        });
+        return gapResult ?: @{@"error": @"Failed to insert gap"};
+    }
+
+    if ([action isEqualToString:@"insertPlaceholder"]) {
+        __block NSDictionary *placeholderResult = nil;
+        SpliceKit_executeOnMainThread(^{
+            @try {
+                id timeline = SpliceKit_getActiveTimelineModule();
+                if (!timeline) {
+                    placeholderResult = @{@"error": @"No active timeline module. Is a project open?"};
+                    return;
+                }
+                placeholderResult = SpliceKit_directInsertPlaceholder(timeline);
+            } @catch (NSException *e) {
+                placeholderResult = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+            }
+        });
+        return placeholderResult ?: @{@"error": @"Failed to insert placeholder"};
+    }
+
     NSString *selector = actionMap[action];
     if (!selector) {
         // Allow passing raw selector names too
@@ -4415,6 +4468,78 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 // they handle parameter marshaling and validation.
 //
 
+static SpliceKit_CMTime SpliceKit_directActionFrameDuration(id timeline) {
+    SpliceKit_CMTime frameDuration = {1, 24, 1, 0};
+    SEL seqSel = @selector(sequence);
+    if ([timeline respondsToSelector:seqSel]) {
+        id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
+        if (sequence) {
+            SEL fdSel = NSSelectorFromString(@"frameDuration");
+            if ([sequence respondsToSelector:fdSel]) {
+                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
+                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
+            }
+        }
+    }
+    return frameDuration;
+}
+
+// Nudge delta from timeline.directAction params. MCP tool direct_timeline_action can only
+// send `frames` and `amount` (mapped to params[@"frames"] / params[@"amount"]). Raw JSON-RPC
+// callers may also use deltaSeconds, seconds, or nudgeAmount — not exposed on the MCP tool.
+static SpliceKit_CMTime SpliceKit_directActionNudgeDelta(NSDictionary *params, id timeline) {
+    SpliceKit_CMTime frameDuration = SpliceKit_directActionFrameDuration(timeline);
+    if (params[@"frames"] != nil) {
+        long long frames = [params[@"frames"] longLongValue];
+        if (frames == 0) frames = 1;
+        SpliceKit_CMTime delta = frameDuration;
+        delta.value = frames * frameDuration.value;
+        return delta;
+    }
+    double seconds = 0.0;
+    BOOL haveSeconds = NO;
+    if (params[@"deltaSeconds"] != nil) {
+        seconds = [params[@"deltaSeconds"] doubleValue];
+        haveSeconds = YES;
+    } else if (params[@"seconds"] != nil) {
+        seconds = [params[@"seconds"] doubleValue];
+        haveSeconds = YES;
+    } else if (params[@"nudgeAmount"] != nil) {
+        seconds = [params[@"nudgeAmount"] doubleValue];
+        haveSeconds = YES;
+    } else if (params[@"amount"] != nil) {
+        seconds = [params[@"amount"] doubleValue];
+        haveSeconds = YES;
+    }
+    if (haveSeconds) {
+        int32_t timescale = frameDuration.timescale > 0 ? frameDuration.timescale : 24000;
+        SpliceKit_CMTime t = {(int64_t)(seconds * timescale), timescale, 1, 0};
+        return t;
+    }
+    return frameDuration;
+}
+
+static NSString *SpliceKit_fcpShortVersionString(void) {
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    return info[@"CFBundleShortVersionString"] ?: @"unknown";
+}
+
+static NSDictionary *SpliceKit_directActionMissingSelectorError(id timeline, SEL sel, NSString *actionName) {
+    if ([timeline respondsToSelector:sel]) {
+        return nil;
+    }
+    NSString *selStr = NSStringFromSelector(sel);
+    NSString *action = (actionName.length > 0) ? actionName : selStr;
+    return @{
+        @"error": [NSString stringWithFormat:@"%@ is not supported on this Final Cut Pro build", action],
+        @"missingSelector": selStr,
+        @"fcpVersion": SpliceKit_fcpShortVersionString(),
+    };
+}
+
+NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params);
+NSDictionary *SpliceKit_handlePlaybackGetPosition(NSDictionary *params);
+
 NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
     NSString *action = params[@"action"];
     NSString *rawSelector = params[@"selector"];
@@ -4461,10 +4586,16 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 SEL sel;
                 if ([type isEqualToString:@"chapter"]) {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToChapter:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 } else if ([type isEqualToString:@"todo"]) {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToTodo:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 } else {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToNote:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 }
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
@@ -4490,6 +4621,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!marker) { result = @{@"error": @"No marker found. Select a marker or pass marker handle."}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionChangeMarkerDisplayName:marker:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(timeline, sel, name, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"name": name, @"status": @"ok"};
@@ -4508,6 +4641,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!marker) { result = @{@"error": @"No marker found"}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionMarkMarkerAsCompleted:marker:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 BOOL completed = [params[@"completed"] boolValue];
                 ((void (*)(id, SEL, BOOL, id, NSError **))objc_msgSend)(timeline, sel, completed, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4520,6 +4655,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!marker) { result = @{@"error": @"marker handle required"}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRemoveMarker:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4540,6 +4677,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeSetRatePreset:rate:ripple:allowVariableSpeedRetiming:objectsAndNewRanges:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, double, BOOL, BOOL, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rate, ripple, allowVariable, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4553,6 +4692,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeHoldPreset:holdComponentTime:duration:newHoldComponentTime:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 // holdComponentTime and duration come from the selected clip context
                 ((void (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, nil, nil, &error);
@@ -4565,6 +4706,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeReverseClipPreset:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4576,6 +4719,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeBladeSpeedPreset:componentTime:newComponentTime:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4589,6 +4734,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeSpeedRampPreset:startComponentTime:endComponentTime:toZero:fromZero:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id, BOOL, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, nil, toZero, fromZero, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4603,6 +4750,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeInstantReplayPreset:range:rate:allowVariableSpeedRetiming:addTitle:objectsAndNewRanges:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, double, BOOL, BOOL, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, rate, allowVariable, addTitle, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4616,6 +4765,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeJumpCutPreset:framesToJump:allowVariableSpeedRetiming:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, int, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, framesToJump, allowVariable, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4629,6 +4780,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRetimeRewindPreset:rewindSpeed:allowVariableSpeedRetiming:objectsAndNewRanges:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, double, BOOL, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rewindSpeed, allowVariable, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4641,6 +4794,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSString *interpolation = params[@"interpolation"];
                 SEL sel = NSSelectorFromString(@"actionRetimeSetInterpolation:edits:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id))objc_msgSend)(timeline, sel, interpolation, selectedItems);
                 result = @{@"action": action, @"status": @"ok"};
                 return;
@@ -4651,19 +4806,96 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // and coarse. These take explicit parameters and return errors properly.
 
             if ([action isEqualToString:@"splitAtTime"]) {
-                // Blade/split at exact time on a specific clip or all clips
-                // This is more precise than the responder-chain blade
-                double time = [params[@"time"] doubleValue];
-                int64_t timeValue = (int64_t)(time * 600);
-                SEL makeSel = NSSelectorFromString(@"CMTimeMake::");
-                id cmtime = nil; // We'll use the Flexo time APIs
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionSplitItems:atTime:forContainer:error:");
-                ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                // Same mechanism as timeline.bladeAtTimes: seek (when time given) + blade:
+                static NSString * const kBladeSelector = @"blade:";
+                SEL bladeSel = NSSelectorFromString(kBladeSelector);
+                SEL canBladeSel = NSSelectorFromString(@"canBlade:");
+
+                if (![timeline respondsToSelector:bladeSel]) {
+                    result = @{@"error": @"Timeline module does not respond to blade:"};
+                    return;
+                }
+
+                BOOL movedPlayhead = NO;
+                BOOL havePlayheadBefore = NO;
+                double playheadBefore = 0.0;
+                double splitAtSeconds = 0.0;
+                NSNumber *timeParam = params[@"time"];
+
+                if (timeParam != nil) {
+                    splitAtSeconds = [timeParam doubleValue];
+                    NSDictionary *before = SpliceKit_handlePlaybackGetPosition(@{});
+                    if ([before[@"seconds"] isKindOfClass:[NSNumber class]]) {
+                        playheadBefore = [before[@"seconds"] doubleValue];
+                        havePlayheadBefore = YES;
+                    }
+                    NSDictionary *seek = SpliceKit_handlePlaybackSeek(@{@"seconds": @(splitAtSeconds)});
+                    if (seek[@"error"]) {
+                        result = @{@"error": seek[@"error"]};
+                        return;
+                    }
+                    movedPlayhead = YES;
+                    [NSThread sleepForTimeInterval:0.03];
+                } else {
+                    NSDictionary *pos = SpliceKit_handlePlaybackGetPosition(@{});
+                    if ([pos[@"seconds"] isKindOfClass:[NSNumber class]]) {
+                        splitAtSeconds = [pos[@"seconds"] doubleValue];
+                    }
+                }
+
+                if ([timeline respondsToSelector:canBladeSel]) {
+                    BOOL canBlade = ((BOOL (*)(id, SEL, id))objc_msgSend)(timeline, canBladeSel, nil);
+                    if (!canBlade) {
+                        BOOL restored = NO;
+                        if (movedPlayhead && havePlayheadBefore) {
+                            SpliceKit_handlePlaybackSeek(@{@"seconds": @(playheadBefore)});
+                            restored = YES;
+                        }
+                        result = @{
+                            @"error": movedPlayhead
+                                ? @"Final Cut Pro cannot blade at the requested time (canBlade: returned NO)"
+                                : @"Final Cut Pro cannot blade at the current playhead (canBlade: returned NO)",
+                            @"playheadMoved": @(movedPlayhead),
+                            @"playheadRestored": @(restored),
+                        };
+                        return;
+                    }
+                }
+
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(timeline, bladeSel, nil);
+                } @catch (NSException *e) {
+                    BOOL restored = NO;
+                    if (movedPlayhead && havePlayheadBefore) {
+                        SpliceKit_handlePlaybackSeek(@{@"seconds": @(playheadBefore)});
+                        restored = YES;
+                    }
+                    result = @{
+                        @"error": [NSString stringWithFormat:@"Exception: %@", e.reason],
+                        @"playheadMoved": @(movedPlayhead),
+                        @"playheadRestored": @(restored),
+                    };
+                    return;
+                }
+
+                BOOL playheadRestored = NO;
+                if (movedPlayhead && havePlayheadBefore) {
+                    SpliceKit_handlePlaybackSeek(@{@"seconds": @(playheadBefore)});
+                    NSDictionary *after = SpliceKit_handlePlaybackGetPosition(@{});
+                    double playheadAfter = playheadBefore;
+                    if ([after[@"seconds"] isKindOfClass:[NSNumber class]]) {
+                        playheadAfter = [after[@"seconds"] doubleValue];
+                    }
+                    playheadRestored = (fabs(playheadAfter - playheadBefore) < 0.001);
+                }
+
+                result = @{
+                    @"action": kBladeSelector,
+                    @"status": @"ok",
+                    @"splitAtSeconds": @(splitAtSeconds),
+                    @"playheadMoved": @(movedPlayhead),
+                    @"playheadRestored": @(playheadRestored),
+                };
                 return;
             }
 
@@ -4673,6 +4905,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionTrimDuration:forEdits:isDelta:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, nil, selectedItems, isDelta, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4684,6 +4918,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionExtendOverNextClip:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4691,72 +4927,112 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             if ([action isEqualToString:@"joinThroughEdits"]) {
-                BOOL onEdges = params[@"onEdges"] ? [params[@"onEdges"] boolValue] : YES;
-                BOOL onLeft = params[@"onLeft"] ? [params[@"onLeft"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionJoinThroughEdits:onEdges:onLeft:error:");
-                ((void (*)(id, SEL, id, BOOL, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, onEdges, onLeft, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                SEL joinSel = NSSelectorFromString(@"_joinSelectedThroughEdits");
+                if (![timeline respondsToSelector:joinSel]) {
+                    result = @{@"error": @"Timeline module does not respond to _joinSelectedThroughEdits"};
+                    return;
+                }
+                SEL canSel = NSSelectorFromString(@"_canJoinThroughEditAtSelectedEdges");
+                if ([timeline respondsToSelector:canSel]) {
+                    BOOL canJoin = ((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel);
+                    if (!canJoin) {
+                        result = @{@"error": @"Final Cut Pro will not join through edits here — this needs edit EDGES selected (the Trim tool), not whole clips selected."};
+                        return;
+                    }
+                }
+                ((void (*)(id, SEL))objc_msgSend)(timeline, joinSel);
+                result = @{@"action": @"_joinSelectedThroughEdits", @"status": @"ok"};
                 return;
             }
 
             if ([action isEqualToString:@"removeEdits"]) {
                 BOOL replaceWithGap = params[@"replaceWithGap"] ? [params[@"replaceWithGap"] boolValue] : NO;
                 id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRemoveEdits:replaceWithGap:removeOperation:rootItem:error:");
-                ((void (*)(id, SEL, id, BOOL, int, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, replaceWithGap, 0, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"replaceWithGap": @(replaceWithGap), @"status": @"ok"};
+                SEL sel = NSSelectorFromString(@"_deleteCore:replaceWithGap:removeOperation:");
+                if (![timeline respondsToSelector:sel]) {
+                    result = @{@"error": @"Timeline module does not respond to _deleteCore:replaceWithGap:removeOperation:"};
+                    return;
+                }
+                ((void (*)(id, SEL, id, BOOL, int))objc_msgSend)(
+                    timeline, sel, selectedItems, replaceWithGap, 0);
+                result = @{
+                    @"action": @"_deleteCore:replaceWithGap:removeOperation:",
+                    @"replaceWithGap": @(replaceWithGap),
+                    @"status": @"ok"
+                };
                 return;
             }
 
             if ([action isEqualToString:@"insertGapDirect"]) {
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionInsertGap:rootItem:error:");
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(timeline, sel, nil, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directInsertGap(timeline);
+                if (result[@"status"]) {
+                    NSMutableDictionary *out = [result mutableCopy];
+                    out[@"action"] = action;
+                    result = out;
+                }
                 return;
             }
 
             if ([action isEqualToString:@"insertFreezeFrame"]) {
-                // Programmatic freeze frame insertion at playhead
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionInsertFreezeFrameAtTime:rootItem:toItems:endTime:error:");
-                ((void (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, nil, rootItem, selectedItems, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                SEL sel = NSSelectorFromString(@"freezeFrame:");
+                if (![timeline respondsToSelector:sel]) {
+                    result = @{@"error": @"Timeline module does not respond to freezeFrame:"};
+                    return;
+                }
+                SEL canSel = NSSelectorFromString(@"canFreezeFrame:");
+                if ([timeline respondsToSelector:canSel]) {
+                    BOOL canFreeze = ((BOOL (*)(id, SEL, id))objc_msgSend)(timeline, canSel, nil);
+                    if (!canFreeze) {
+                        result = @{@"error": @"Final Cut Pro cannot insert a freeze frame with the current selection or playhead"};
+                        return;
+                    }
+                }
+                ((void (*)(id, SEL, id))objc_msgSend)(timeline, sel, nil);
+                result = @{@"action": @"freezeFrame:", @"status": @"ok"};
                 return;
             }
 
             // === Nudge (Direct API with amounts) ===
 
             if ([action isEqualToString:@"nudgeAnchoredItems"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionNudgeAnchoredItems:rootItem:nudgeAmount:error:");
-                ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                SEL sel = NSSelectorFromString(@"_nudgeAnchorObjectWithDelta:");
+                if (![timeline respondsToSelector:sel]) {
+                    result = @{@"error": @"Timeline module does not respond to _nudgeAnchorObjectWithDelta:"};
+                    return;
+                }
+                SpliceKit_CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
+                typedef BOOL (*NudgeAnchorFn)(id, SEL, SpliceKit_CMTime);
+                BOOL ok = ((NudgeAnchorFn)objc_msgSend)(timeline, sel, delta);
+                if (!ok) {
+                    result = @{@"error": @"Final Cut Pro could not nudge anchored items by the requested amount"};
+                    return;
+                }
+                result = @{
+                    @"action": @"_nudgeAnchorObjectWithDelta:",
+                    @"delta": SpliceKit_serializeCMTime(delta),
+                    @"status": @"ok"
+                };
                 return;
             }
 
             if ([action isEqualToString:@"nudgeSpineItems"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionNudgeSpineItems:rootItem:nudgeAmount:error:");
-                ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                SEL sel = NSSelectorFromString(@"_nudgeSpineObjectWithDelta:");
+                if (![timeline respondsToSelector:sel]) {
+                    result = @{@"error": @"Timeline module does not respond to _nudgeSpineObjectWithDelta:"};
+                    return;
+                }
+                SpliceKit_CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
+                typedef BOOL (*NudgeSpineFn)(id, SEL, SpliceKit_CMTime);
+                BOOL ok = ((NudgeSpineFn)objc_msgSend)(timeline, sel, delta);
+                if (!ok) {
+                    result = @{@"error": @"Final Cut Pro could not nudge spine items by the requested amount"};
+                    return;
+                }
+                result = @{
+                    @"action": @"_nudgeSpineObjectWithDelta:",
+                    @"delta": SpliceKit_serializeCMTime(delta),
+                    @"status": @"ok"
+                };
                 return;
             }
 
@@ -4770,6 +5046,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionChangeAudioVolume:byAmount:overRange:isRelative:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, double, id, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, amount, nil, isRelative, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4783,6 +5061,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionApplyAudioFades:objects:fadeInNotOut:fadeDuration:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, BOOL, double, NSError **))objc_msgSend)(
                     timeline, sel, nil, selectedItems, fadeIn, duration, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4795,6 +5075,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionSetAudioPlayEnable:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, BOOL, NSError **))objc_msgSend)(timeline, sel, enabled, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"enabled": @(enabled), @"status": @"ok"};
@@ -4806,6 +5088,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionSetBackgroundMusic:isBackgroundMusic:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, isBackground, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4817,6 +5101,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionDetachAudio:newDetachedEdits:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4827,6 +5113,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"alignAudioToVideoDirect"]) {
                 id selectedItems = getSelectedItems();
                 SEL sel = NSSelectorFromString(@"actionAlignAudioToVideo:endEdits:container:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id))objc_msgSend)(
                     timeline, sel, selectedItems, nil, rootItem);
                 result = @{@"action": action, @"status": @"ok"};
@@ -4841,6 +5129,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionDeleteMultiAngle:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4853,6 +5143,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRenameAngle:newName:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, newName, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4864,6 +5156,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAudioSyncMultiAngleItems:rootItem:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4881,6 +5175,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 NSSet *keywordSet = [NSSet setWithArray:keywords];
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAddKeywordsWithNames:forRange:animationHint:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, int, NSError **))objc_msgSend)(
                     timeline, sel, keywordSet, nil, 0, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4894,6 +5190,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 NSSet *keywordSet = [NSSet setWithArray:keywords];
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRemoveKeywordsWithNames:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, keywordSet, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4904,6 +5202,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionSetRole:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4920,6 +5220,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRemoveEffectID:fromAnchoredObjects:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, effectID, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4931,6 +5233,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionInvertEffectMasks:actionName:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, @"Invert Mask", &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4942,6 +5246,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionToggleEnabled:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4956,6 +5262,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionBreakApartClipItems:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -4967,6 +5275,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionCreateCompoundClip:multiClip:spine:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, BOOL, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, multiClip, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4978,6 +5288,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionLiftAnchoredEdits:rootItem:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -4991,6 +5303,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRename:actionName:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, newName, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5002,6 +5316,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionDeleteItemsInArray:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -5012,6 +5328,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionMoveClipsToTrash:mediaRefsToDelete:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5027,6 +5345,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 NSString *format = params[@"format"] ?: @"ITT";
                 id selectedItems = getSelectedItems();
                 SEL sel = NSSelectorFromString(@"actionDuplicateCaptions:toLanguageIdentifier:andCaptionFormat:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id))objc_msgSend)(
                     timeline, sel, selectedItems, language, format);
                 result = @{@"action": action, @"language": language, @"format": format, @"status": @"ok"};
@@ -5041,6 +5361,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAddVariants:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -5051,6 +5373,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRemoveVariants:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -5061,6 +5385,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionFinalizePickFromVariant:rootItem:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5074,6 +5400,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 NSString *name = params[@"name"] ?: @"Untitled";
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionNewProject:name:sequence:actionName:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
                     timeline, sel, nil, name, nil, @"New Project", &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5085,6 +5413,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 NSString *name = params[@"name"] ?: @"New Event";
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionNewEvent:name:actionName:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
                     timeline, sel, nil, name, @"New Event", &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5095,6 +5425,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"validateAndRepair"]) {
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionValidateAndRepair:validateMode:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, int, NSError **))objc_msgSend)(
                     timeline, sel, nil, 0, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5108,6 +5440,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAutoReframe:forContainer:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5121,6 +5455,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAlignToMusicMarkers:rootItem:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5133,6 +5469,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAlignClipsAtMusicMarkersOnItems:rootItem:asSplit:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, rootItem, asSplit, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5146,6 +5484,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionAddTransitionsToSpineObjects:before:after:effects:transitionOverlapType:transitionsCreated:rootItem:reportErrors:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, id, id, int, id, id, BOOL, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, nil, nil, 0, nil, rootItem, YES, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5159,6 +5499,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionPerformAnalyzeAndOptimizeClips:options:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, selectedItems, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5171,6 +5513,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"resolveLaneConflicts"]) {
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionResolveLaneConflictsInContainer:excludedItems:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
                     timeline, sel, rootItem, nil, &error);
                 result = error ? @{@"error": error.localizedDescription}
@@ -5181,6 +5525,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"resolveLaneGaps"]) {
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionResolveLaneGapsInContainer:error:");
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (missingSel) { result = missingSel; return; }
                 ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, rootItem, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
@@ -5191,7 +5537,14 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // If a selector string is provided directly, try to call it on the timeline module
             if (rawSelector) {
                 SEL sel = NSSelectorFromString(rawSelector);
-                if (![timeline respondsToSelector:sel]) {
+                if ([rawSelector hasPrefix:@"action"]) {
+                    NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(
+                        timeline, sel, rawSelector);
+                    if (missingSel) {
+                        result = missingSel;
+                        return;
+                    }
+                } else if (![timeline respondsToSelector:sel]) {
                     result = @{@"error": [NSString stringWithFormat:@"Timeline module does not respond to %@", rawSelector]};
                     return;
                 }
@@ -17895,11 +18248,10 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
     });
     if (!result) return @{@"error": @"Menu list failed"};
     if (result[@"error"]) return result;
-    // The Edit menu's Undo / Redo titles and enabled states come from AppKit's menu
-    // validation, which resolves them through the key window; with Final Cut Pro not
-    // frontmost (QA run 4) they stay "Undo" / "Redo" and disabled, validate or not, while
-    // the library document's undo manager holds the real step. That manager is what
-    // Edit > Undo and history_action act on, so its state is reported alongside.
+    // Edit > Undo / Redo action names resolve in the menu titles regardless of focus; enabled
+    // states are AppKit menu validation through the key window (false whenever FCP is not
+    // frontmost). The library document's undo manager holds the real step — what Edit > Undo
+    // and history_action act on — and is reported as undoState alongside.
     if (!menuName || [menuName caseInsensitiveCompare:@"Edit"] == NSOrderedSame) {
         __block NSDictionary *undoState = nil;
         SpliceKit_executeOnMainThread(^{
@@ -17921,9 +18273,9 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
         });
         NSMutableDictionary *r = [result mutableCopy];
         if (undoState) r[@"undoState"] = undoState;
-        r[@"note"] = @"Undo / Redo titles and enabled states are AppKit's menu validation, resolved through the key "
-                     @"window: with Final Cut Pro not frontmost they read \"Undo\" / \"Redo\" and disabled even with "
-                     @"validate=true (QA run 4). undoState is read from the document's undo manager.";
+        r[@"note"] = @"Undo / Redo action names resolve in the menu titles regardless of focus; enabled states are "
+                     @"AppKit menu validation through the key window, so they are false whenever Final Cut Pro is "
+                     @"not frontmost. undoState is read from the document's undo manager and is always accurate.";
         result = r;
     }
     return result;
@@ -22973,11 +23325,33 @@ static NSView *SpliceKit_findPlayerViewForCapture(NSWindow *mainWindow,
     return largestPlayerView;
 }
 
-// Is the captured image one flat colour? Drawn into a 32x32 RGBA bitmap (a flat image stays
-// flat under scaling; a real one does not) and every pixel inside the outer ring compared
-// with the centre one, within 2/255 (the ring is skipped: a full-window capture has
-// transparent rounded corners). QA run 4: with the screen locked the window capture was a
-// uniform grey field and with the display asleep a black one, both returned as captures.
+// Is the captured Viewer content one flat colour? Downsample to 32×32, take the centre pixel
+// as reference, trim each edge inward while that row/column still does not match (trimming
+// toward the content colour sheds blended border rows from high-quality scaling), cap each
+// edge at 40% of the dimension, then require the inner rect be at least 8×8 and uniform ±2.
+static BOOL SpliceKit_pixelMatchesFlatRef(const unsigned char *p, const unsigned char *ref) {
+    return abs((int)p[0] - (int)ref[0]) <= 2 && abs((int)p[1] - (int)ref[1]) <= 2
+        && abs((int)p[2] - (int)ref[2]) <= 2;
+}
+
+static BOOL SpliceKit_rowMatchesFlatRef(const unsigned char *pixels, int side, int y,
+                                        int left, int right, const unsigned char *ref) {
+    for (int x = left; x < right; x++) {
+        const unsigned char *p = pixels + (y * side + x) * 4;
+        if (!SpliceKit_pixelMatchesFlatRef(p, ref)) return NO;
+    }
+    return YES;
+}
+
+static BOOL SpliceKit_colMatchesFlatRef(const unsigned char *pixels, int side, int x,
+                                        int top, int bottom, const unsigned char *ref) {
+    for (int y = top; y < bottom; y++) {
+        const unsigned char *p = pixels + (y * side + x) * 4;
+        if (!SpliceKit_pixelMatchesFlatRef(p, ref)) return NO;
+    }
+    return YES;
+}
+
 static BOOL SpliceKit_imageIsFlat(CGImageRef image, unsigned char outRGB[3]) {
     if (!image) return NO;
     const int side = 32;
@@ -22990,13 +23364,47 @@ static BOOL SpliceKit_imageIsFlat(CGImageRef image, unsigned char outRGB[3]) {
     if (ctx) {
         CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
         CGContextDrawImage(ctx, CGRectMake(0, 0, side, side), image);
-        const unsigned char *ref = pixels + ((side / 2) * side + side / 2) * 4;
+        const unsigned char *ref = pixels + ((side / 2) * side + (side / 2)) * 4;
+        int left = 0, top = 0, right = side, bottom = side;
+        const int maxTrimX = (int)(side * 0.4);
+        const int maxTrimY = (int)(side * 0.4);
+        int trimTop = 0;
+        while (top < bottom && !SpliceKit_rowMatchesFlatRef(pixels, side, top, left, right, ref)) {
+            trimTop++;
+            if (trimTop > maxTrimY) { CGContextRelease(ctx); CGColorSpaceRelease(cs); free(pixels); return NO; }
+            top++;
+        }
+        int trimBottom = 0;
+        while (bottom > top && !SpliceKit_rowMatchesFlatRef(pixels, side, bottom - 1, left, right, ref)) {
+            trimBottom++;
+            if (trimBottom > maxTrimY) { CGContextRelease(ctx); CGColorSpaceRelease(cs); free(pixels); return NO; }
+            bottom--;
+        }
+        int trimLeft = 0;
+        while (left < right && !SpliceKit_colMatchesFlatRef(pixels, side, left, top, bottom, ref)) {
+            trimLeft++;
+            if (trimLeft > maxTrimX) { CGContextRelease(ctx); CGColorSpaceRelease(cs); free(pixels); return NO; }
+            left++;
+        }
+        int trimRight = 0;
+        while (right > left && !SpliceKit_colMatchesFlatRef(pixels, side, right - 1, top, bottom, ref)) {
+            trimRight++;
+            if (trimRight > maxTrimX) { CGContextRelease(ctx); CGColorSpaceRelease(cs); free(pixels); return NO; }
+            right--;
+        }
+        const int innerW = right - left;
+        const int innerH = bottom - top;
+        if (innerW < 8 || innerH < 8) {
+            CGContextRelease(ctx);
+            CGColorSpaceRelease(cs);
+            free(pixels);
+            return NO;
+        }
         flat = YES;
-        for (int y = 1; y < side - 1 && flat; y++) {
-            for (int x = 1; x < side - 1; x++) {
+        for (int y = top; y < bottom && flat; y++) {
+            for (int x = left; x < right; x++) {
                 const unsigned char *p = pixels + (y * side + x) * 4;
-                if (abs((int)p[0] - (int)ref[0]) > 2 || abs((int)p[1] - (int)ref[1]) > 2
-                    || abs((int)p[2] - (int)ref[2]) > 2) { flat = NO; break; }
+                if (!SpliceKit_pixelMatchesFlatRef(p, ref)) { flat = NO; break; }
             }
         }
         if (flat && outRGB) { outRGB[0] = ref[0]; outRGB[1] = ref[1]; outRGB[2] = ref[2]; }
@@ -23015,9 +23423,9 @@ static void SpliceKit_captureAnnotateFlat(NSMutableDictionary *r, BOOL flat, con
     r[@"flatColor"] = @[@(rgb[0]), @(rgb[1]), @(rgb[2])];
     r[@"warning"] = [NSString stringWithFormat:
         @"the captured image is one flat colour (RGB %d,%d,%d): either what Final Cut Pro shows there really is flat "
-        @"(a black frame, an empty Viewer) or the window rendered nothing. The Viewer's content needs the screen "
-        @"unlocked and the display awake (QA run 4: a locked screen gave a uniform grey field, a sleeping display a "
-        @"black one)", rgb[0], rgb[1], rgb[2]];
+        @"(a black frame, a gap, an empty Viewer) or nothing rendered in that area. Captures are drawn in-process "
+        @"from Final Cut Pro's views and a locked screen does not blank them; a sleeping display has been reported "
+        @"to give a black frame but that is unconfirmed", rgb[0], rgb[1], rgb[2]];
     SpliceKit_log(@"[Capture] flat image (RGB %d,%d,%d) at %@", rgb[0], rgb[1], rgb[2], r[@"path"] ?: @"");
 }
 
@@ -23825,6 +24233,13 @@ void SpliceKit_setSpringLoadedBladeEnabled(BOOL enabled) {
 // Recursively collect UI elements from a view hierarchy
 // Forward declarations for dialog helpers
 static NSArray<NSButton *> *SpliceKit_findButtonsInView(NSView *root);
+static NSWindow *SpliceKit_findDialogWindow(void);
+static NSDictionary *SpliceKit_dialogUndoSettleSnapshot(void);
+static BOOL SpliceKit_dialogUndoSettleChanged(NSDictionary *before, NSDictionary *after);
+static void SpliceKit_dialogApplySettle(NSMutableDictionary *result, NSDictionary *undoBefore, BOOL waitForUndo);
+static BOOL SpliceKit_dialogButtonIsCancelLike(NSButton *btn);
+static NSButton *SpliceKit_findCancelDialogButton(NSArray<NSButton *> *allButtons);
+static NSButton *SpliceKit_findDefaultDialogButton(NSArray<NSButton *> *allButtons);
 
 // Safe subview accessor - returns a COPY of the subviews array to avoid mutation crashes
 static NSArray *SpliceKit_safeSubviews(NSView *view) {
@@ -24188,11 +24603,14 @@ static NSDictionary *SpliceKit_handleDialogClick(NSDictionary *params) {
                 return;
             }
 
-            // Click the button
+            BOOL waitForUndo = !SpliceKit_dialogButtonIsCancelLike(targetButton);
+            NSDictionary *undoBefore = waitForUndo ? SpliceKit_dialogUndoSettleSnapshot() : nil;
             [targetButton performClick:nil];
 
-            result = @{@"status": @"ok", @"clicked": [targetButton title],
-                      @"dialog": [dialogWindow title] ?: @""};
+            NSMutableDictionary *answer = [@{@"status": @"ok", @"clicked": [targetButton title],
+                                              @"dialog": [dialogWindow title] ?: @""} mutableCopy];
+            SpliceKit_dialogApplySettle(answer, undoBefore, waitForUndo);
+            result = answer;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -24414,6 +24832,98 @@ static NSDictionary *SpliceKit_handleDialogPopup(NSDictionary *params) {
 }
 
 // BFS helper to find buttons safely in a view hierarchy
+static NSWindow *SpliceKit_findDialogWindow(void) {
+    NSWindow *dialogWindow = [NSApp modalWindow];
+    if (!dialogWindow) {
+        for (NSWindow *window in [NSApp windows]) {
+            @try {
+                NSWindow *sheet = [window attachedSheet];
+                if (sheet) { dialogWindow = sheet; break; }
+            } @catch (NSException *e) {}
+        }
+    }
+    return dialogWindow;
+}
+
+static NSDictionary *SpliceKit_dialogUndoSettleSnapshot(void) {
+    id um = SpliceKit_getUndoManager();
+    if (!um) return @{@"canUndo": @NO, @"undoActionName": @""};
+    BOOL canUndo = ((BOOL (*)(id, SEL))objc_msgSend)(um, @selector(canUndo));
+    id undoName = canUndo ? ((id (*)(id, SEL))objc_msgSend)(um, @selector(undoActionName)) : nil;
+    NSString *name = [undoName isKindOfClass:[NSString class]] ? undoName : @"";
+    return @{@"canUndo": @(canUndo), @"undoActionName": name};
+}
+
+static BOOL SpliceKit_dialogUndoSettleChanged(NSDictionary *before, NSDictionary *after) {
+    if (!before || !after) return NO;
+    if ([before[@"canUndo"] boolValue] != [after[@"canUndo"] boolValue]) return YES;
+    return ![[before[@"undoActionName"] description] isEqualToString:[after[@"undoActionName"] description]];
+}
+
+// After a dialog button click: spin the main run loop until the dialog is gone and, when
+// waitForUndo is YES, the library undo snapshot differs (bounded at 2s).
+static void SpliceKit_dialogApplySettle(NSMutableDictionary *result, NSDictionary *undoBefore,
+                                        BOOL waitForUndo) {
+    if (result[@"error"]) return;
+    NSDate *start = [NSDate date];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
+    while ([deadline timeIntervalSinceNow] > 0.0) {
+        BOOL dialogGone = (SpliceKit_findDialogWindow() == nil);
+        if (!waitForUndo) {
+            if (dialogGone) {
+                result[@"settled"] = @YES;
+                result[@"settleMs"] = @0;
+                return;
+            }
+        } else if (dialogGone && SpliceKit_dialogUndoSettleChanged(undoBefore, SpliceKit_dialogUndoSettleSnapshot())) {
+            NSInteger ms = (NSInteger)([[NSDate date] timeIntervalSinceDate:start] * 1000.0 + 0.5);
+            result[@"settled"] = @YES;
+            result[@"settleMs"] = @(ms);
+            return;
+        }
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.025]];
+    }
+    result[@"settled"] = @NO;
+}
+
+static BOOL SpliceKit_dialogButtonIsCancelLike(NSButton *btn) {
+    @try {
+        NSString *keyEq = [btn keyEquivalent] ?: @"";
+        NSString *title = [btn title] ?: @"";
+        return [keyEq isEqualToString:@"\033"] ||
+               [title caseInsensitiveCompare:@"Cancel"] == NSOrderedSame ||
+               [title caseInsensitiveCompare:@"Don't Save"] == NSOrderedSame;
+    } @catch (NSException *e) { return NO; }
+}
+
+static NSButton *SpliceKit_findCancelDialogButton(NSArray<NSButton *> *allButtons) {
+    for (NSButton *btn in allButtons) {
+        if (SpliceKit_dialogButtonIsCancelLike(btn)) return btn;
+    }
+    return nil;
+}
+
+static NSButton *SpliceKit_findDefaultDialogButton(NSArray<NSButton *> *allButtons) {
+    for (NSButton *btn in allButtons) {
+        @try {
+            if ([[btn keyEquivalent] isEqualToString:@"\r"] && [btn isEnabled]) return btn;
+        } @catch (NSException *e) {}
+    }
+    for (NSButton *btn in allButtons) {
+        @try {
+            NSString *title = [btn title] ?: @"";
+            if (([title caseInsensitiveCompare:@"OK"] == NSOrderedSame ||
+                 [title caseInsensitiveCompare:@"Done"] == NSOrderedSame ||
+                 [title caseInsensitiveCompare:@"Share"] == NSOrderedSame) &&
+                [btn isEnabled]) {
+                return btn;
+            }
+        } @catch (NSException *e) {}
+    }
+    return nil;
+}
+
 static NSArray<NSButton *> *SpliceKit_findButtonsInView(NSView *root) {
     NSMutableArray<NSButton *> *found = [NSMutableArray array];
     if (!root) return found;
@@ -24437,76 +24947,64 @@ static NSArray<NSButton *> *SpliceKit_findButtonsInView(NSView *root) {
 }
 
 static NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params) {
-    NSString *action = params[@"action"] ?: @"default";
+    NSString *action = params[@"action"] ?: @"cancel";
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
-            NSWindow *dialogWindow = [NSApp modalWindow];
-            if (!dialogWindow) {
-                for (NSWindow *window in [NSApp windows]) {
-                    @try {
-                        NSWindow *sheet = [window attachedSheet];
-                        if (sheet) { dialogWindow = sheet; break; }
-                    } @catch (NSException *e) {}
-                }
-            }
+            NSWindow *dialogWindow = SpliceKit_findDialogWindow();
             if (!dialogWindow) {
                 result = @{@"error": @"No dialog to dismiss"};
                 return;
             }
 
             NSArray<NSButton *> *allButtons = SpliceKit_findButtonsInView([dialogWindow contentView]);
+            NSMutableDictionary *answer = nil;
+            NSDictionary *undoBefore = nil;
+            BOOL waitForUndo = NO;
 
             if ([action isEqualToString:@"cancel"]) {
-                NSButton *cancelBtn = nil;
-                for (NSButton *btn in allButtons) {
-                    @try {
-                        NSString *keyEq = [btn keyEquivalent] ?: @"";
-                        NSString *title = [btn title] ?: @"";
-                        if ([keyEq isEqualToString:@"\033"] ||
-                            [title caseInsensitiveCompare:@"Cancel"] == NSOrderedSame ||
-                            [title caseInsensitiveCompare:@"Don't Save"] == NSOrderedSame) {
-                            cancelBtn = btn; break;
-                        }
-                    } @catch (NSException *e) {}
-                }
+                NSButton *cancelBtn = SpliceKit_findCancelDialogButton(allButtons);
                 if (cancelBtn) {
                     [cancelBtn performClick:nil];
-                    result = @{@"status": @"ok", @"action": @"cancel", @"clicked": [cancelBtn title]};
+                    answer = [@{@"status": @"ok", @"action": @"cancel", @"clicked": [cancelBtn title]} mutableCopy];
+                    waitForUndo = NO;
                 } else {
                     [dialogWindow performClose:nil];
-                    result = @{@"status": @"ok", @"action": @"close"};
-                }
-            } else {
-                NSButton *targetBtn = nil;
-                for (NSButton *btn in allButtons) {
-                    @try {
-                        if ([[btn keyEquivalent] isEqualToString:@"\r"] && [btn isEnabled]) {
-                            targetBtn = btn; break;
+                    if (!SpliceKit_findDialogWindow()) {
+                        answer = [@{@"status": @"ok", @"action": @"close"} mutableCopy];
+                        waitForUndo = NO;
+                    } else {
+                        NSWindow *stillOpen = SpliceKit_findDialogWindow();
+                        NSArray<NSButton *> *remaining = SpliceKit_findButtonsInView([stillOpen contentView]);
+                        NSButton *defaultBtn = SpliceKit_findDefaultDialogButton(remaining);
+                        if (defaultBtn) {
+                            undoBefore = SpliceKit_dialogUndoSettleSnapshot();
+                            [defaultBtn performClick:nil];
+                            answer = [@{@"status": @"ok", @"action": @"cancel", @"clicked": [defaultBtn title],
+                                         @"fellBackToDefault": @YES} mutableCopy];
+                            waitForUndo = YES;
+                        } else {
+                            result = @{@"error": @"No Cancel or default button found"};
+                            return;
                         }
-                    } @catch (NSException *e) {}
-                }
-                if (!targetBtn) {
-                    for (NSButton *btn in allButtons) {
-                        @try {
-                            NSString *title = [btn title] ?: @"";
-                            if (([title caseInsensitiveCompare:@"OK"] == NSOrderedSame ||
-                                 [title caseInsensitiveCompare:@"Done"] == NSOrderedSame ||
-                                 [title caseInsensitiveCompare:@"Share"] == NSOrderedSame) &&
-                                [btn isEnabled]) {
-                                targetBtn = btn; break;
-                            }
-                        } @catch (NSException *e) {}
                     }
                 }
+            } else {
+                NSButton *targetBtn = SpliceKit_findDefaultDialogButton(allButtons);
                 if (targetBtn) {
+                    undoBefore = SpliceKit_dialogUndoSettleSnapshot();
                     [targetBtn performClick:nil];
-                    result = @{@"status": @"ok", @"action": action, @"clicked": [targetBtn title]};
+                    answer = [@{@"status": @"ok", @"action": action, @"clicked": [targetBtn title]} mutableCopy];
+                    waitForUndo = YES;
                 } else {
                     result = @{@"error": @"No default/OK button found"};
+                    return;
                 }
             }
+
+            SpliceKit_dialogApplySettle(answer, undoBefore, waitForUndo);
+            result = answer;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }

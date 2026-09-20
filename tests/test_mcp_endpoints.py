@@ -15,17 +15,78 @@ Usage:
 Requires: FCP running with SpliceKit injected, bridge on 127.0.0.1:9876
 """
 
+import os
 import socket
 import json
 import sys
 import time
 import argparse
+from pathlib import Path
 
 # ── Connection ──────────────────────────────────────────────
 
-HOST = "127.0.0.1"
-PORT = 9876
+HOST = os.environ.get("SPLICEKIT_HOST", "127.0.0.1")
+PORT = int(os.environ.get("SPLICEKIT_PORT", "9876"))
 _id = 0
+
+# Live Final Cut Pro (default 127.0.0.1:9876) vs mcp_server_check's fake bridge (version "check").
+LIVE_PROJECT_BRIDGE = True
+FAKE_BRIDGE = False
+
+_MCP_SERVER = None
+
+
+def _load_mcp_action_sets():
+    global _MCP_SERVER
+    if _MCP_SERVER is not None:
+        return _MCP_SERVER
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_mcp_tool_annotations import load_server_module  # noqa: WPS433
+
+    _MCP_SERVER = load_server_module()
+    return _MCP_SERVER
+
+
+# Legacy timeline.action keys that are safe to fire on a loaded project (cancel a drop menu, etc.).
+_LIVE_SAFE_LEGACY_ACTIONS = frozenset({"dropMenuCancel"})
+
+
+def _timeline_action_mutates(action):
+    m = _load_mcp_action_sets()
+    if action in m.TIMELINE_NAVIGATION_ACTIONS:
+        return False
+    if action in m.TIMELINE_EDIT_ACTIONS:
+        return True
+    if action in m.TIMELINE_DESTRUCTIVE_ACTIONS:
+        return True
+    if action in m.TIMELINE_HISTORY_ACTIONS:
+        return True
+    return action not in _LIVE_SAFE_LEGACY_ACTIONS
+
+
+def _live_timeline_skip_reason(action):
+    m = _load_mcp_action_sets()
+    if action in m.TIMELINE_DESTRUCTIVE_ACTIONS:
+        return "not invoked against a live project: it destructively edits the timeline"
+    if action in m.TIMELINE_HISTORY_ACTIONS:
+        return "not invoked against a live project: it changes edit history"
+    if action in m.TIMELINE_EDIT_ACTIONS:
+        return "not invoked against a live project: it edits the timeline"
+    return "not invoked against a live project: it may edit the timeline"
+
+
+def _rpc_timeline_action(action, *, dry_run=False):
+    params = {"action": action}
+    if dry_run:
+        params["dry_run"] = True
+    return rpc("timeline.action", params)
+
+
+def _skip_live_mutating_timeline_action(test_name, action):
+    if LIVE_PROJECT_BRIDGE and not FAKE_BRIDGE and _timeline_action_mutates(action):
+        skip(test_name, _live_timeline_skip_reason(action))
+        return True
+    return False
 
 
 def rpc(method, params=None, timeout=10):
@@ -189,15 +250,19 @@ def test_timeline():
     expect_error("getClipInfo (bogus handle)", rpc("timeline.getClipInfo",
                  {"handle": "obj_does_not_exist", "includeFrame": False}))
     expect_error("captureClipFrame (no params)", rpc("timeline.captureClipFrame", {}), "handle")
-    # beginEdit / endEdit round trip: opens and closes one undoable action, no edits inside
-    r = rpc("timeline.beginEdit", {"name": "SpliceKit endpoint check"})
-    if "error" in str(r) and "No active" in str(r):
-        skip("beginEdit", "no project open")
-        skip("endEdit", "no project open")
+    if LIVE_PROJECT_BRIDGE and not FAKE_BRIDGE:
+        skip("beginEdit", "not invoked against a live project: it opens an undo group")
+        skip("endEdit", "not invoked against a live project: it opens an undo group")
     else:
-        ok("beginEdit", r, lambda r: _res(r).get("status") == "ok")
-        ok("endEdit", rpc("timeline.endEdit", {"name": "SpliceKit endpoint check"}),
-           lambda r: _res(r).get("status") == "ok")
+        # beginEdit / endEdit round trip: opens and closes one undoable action, no edits inside
+        r = rpc("timeline.beginEdit", {"name": "SpliceKit endpoint check"})
+        if "error" in str(r) and "No active" in str(r):
+            skip("beginEdit", "no project open")
+            skip("endEdit", "no project open")
+        else:
+            ok("beginEdit", r, lambda r: _res(r).get("status") == "ok")
+            ok("endEdit", rpc("timeline.endEdit", {"name": "SpliceKit endpoint check"}),
+               lambda r: _res(r).get("status") == "ok")
 
 
 def test_timeline_direct():
@@ -394,7 +459,10 @@ def test_transcript():
     print("\n[transcript.*]")
     r = rpc("transcript.getState")
     ok("getState", r)
-    ok("setEngine", rpc("transcript.setEngine", {"engine": "fcpNative"}))
+    if LIVE_PROJECT_BRIDGE and not FAKE_BRIDGE:
+        skip("setEngine", "would modify transcript state")
+    else:
+        ok("setEngine", rpc("transcript.setEngine", {"engine": "fcpNative"}))
     expect_error("setEngine bad", rpc("transcript.setEngine", {"engine": "nonexistent"}), "Unknown")
     skip("open/close/delete/move/search/setSpeaker/setSilence/deleteSilences",
          "would modify transcript state")
@@ -620,27 +688,60 @@ def test_debug_notification():
 
 # ── New actionMap entries ───────────────────────────────────
 
+_NEW_ACTION_MAP_ENTRIES = [
+    "dropMenuCancel", "retimeTurnOnOpticalFlowHigh", "resetCinematic", "trimEdgeAtPlayhead",
+    "setCaptionPlaybackEnabled", "deleteActiveVariant",
+]
+
+
 def test_new_actions():
     print("\n[new actionMap entries]")
+    global PASSED, FAILED
     # These send through the responder chain — they may error with "No responder"
     # if no project is open, but the point is they don't return "Method not found"
-    for action_name in ["dropMenuCancel", "retimeTurnOnOpticalFlowHigh",
-                        "resetCinematic", "trimEdgeAtPlayhead",
-                        "setCaptionPlaybackEnabled", "deleteActiveVariant"]:
-        r = rpc("timeline.action", {"action": action_name})
+    for action_name in _NEW_ACTION_MAP_ENTRIES:
+        if _skip_live_mutating_timeline_action(action_name, action_name):
+            continue
+        r = _rpc_timeline_action(action_name)
         res = _res(r)
         err = str(res.get("error", "")) if isinstance(res, dict) else ""
         if "Method not found" in err:
             print(f"  FAIL  {action_name}: not registered in actionMap")
-            global FAILED
             FAILED += 1
         elif "No responder" in err or "No active" in err or "does not respond" in err:
             # Expected when no project/clip is active — action IS registered
-            global PASSED
             print(f"  OK    {action_name} (registered, needs active target)")
             PASSED += 1
         else:
             ok(action_name, r)
+
+
+def test_timeline_action_registration():
+    """Every timeline.action key in mcp/server.py is registered (dry_run on live, real on fake)."""
+    print("\n[timeline.action registration]")
+    global PASSED, FAILED
+    m = _load_mcp_action_sets()
+    all_actions = sorted(
+        m.TIMELINE_NAVIGATION_ACTIONS
+        | m.TIMELINE_EDIT_ACTIONS
+        | m.TIMELINE_DESTRUCTIVE_ACTIONS
+        | m.TIMELINE_HISTORY_ACTIONS
+    )
+    for action in all_actions:
+        label = f"timeline.action ({action})"
+        if _skip_live_mutating_timeline_action(label, action):
+            continue
+        r = _rpc_timeline_action(action)
+        res = _res(r)
+        err = str(res.get("error", "")) if isinstance(res, dict) else ""
+        if "Method not found" in err:
+            print(f"  FAIL  {label}: not registered in actionMap")
+            FAILED += 1
+        elif "No responder" in err or "No active" in err or "does not respond" in err:
+            print(f"  OK    {label} (registered, needs active target)")
+            PASSED += 1
+        else:
+            ok(label, r)
 
 
 # ── Run ─────────────────────────────────────────────────────
@@ -688,6 +789,7 @@ TEST_GROUPS = {
     "debug_plugin": test_debug_plugin,
     "debug_notification": test_debug_notification,
     "new_actions": test_new_actions,
+    "timeline_action_registration": test_timeline_action_registration,
 }
 
 
@@ -701,11 +803,15 @@ def main():
     VERBOSE = args.verbose
 
     # Verify connection
+    global LIVE_PROJECT_BRIDGE, FAKE_BRIDGE
     try:
         r = rpc("system.version", timeout=3)
         ver = _res(r).get("splicekit_version", "?")
         pid = _res(r).get("pid", "?")
-        print(f"Connected to SpliceKit {ver} (FCP pid {pid})")
+        FAKE_BRIDGE = _res(r).get("version") == "check" or _res(r).get("splicekit") == "check"
+        LIVE_PROJECT_BRIDGE = not FAKE_BRIDGE
+        bridge_kind = "fake stand-in bridge" if FAKE_BRIDGE else "live Final Cut Pro bridge"
+        print(f"Connected to SpliceKit {ver} (FCP pid {pid}, {bridge_kind})")
     except Exception as e:
         print(f"Cannot connect to SpliceKit: {e}")
         print("Make sure modded FCP is running with SpliceKit injected.")

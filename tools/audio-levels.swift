@@ -57,7 +57,7 @@ struct AudioLevelsResult: Codable {
     let channelsMode: String           // "pooled" (no channel mixed with another) or "mixdownMono" (the fallback)
     let videoFrameRate: Double?        // the first video track's average rate over the file (AVAssetTrack.nominalFrameRate)
     let videoFrameRateAverage: Double? // the same reading under its own name
-    let videoFrameRateShortest: Double? // the rate the track's shortest frame duration corresponds to (1 / minFrameDuration)
+    let videoFrameRateShortest: Double? // the rate of the track's most common frame duration (key name kept for compatibility)
     let analysisRange: Range
     let sliceSeconds: Double
     let floorDb: Double
@@ -171,13 +171,14 @@ guard !audioTracks.isEmpty else {
 // The first video track's frame rate, for the bridge's frame-rate-conform reading (a media
 // file whose frame rate differs from the project's is rate-conformed by FCP). Two readings,
 // both reported as what they are: the average over the file (AVAssetTrack.nominalFrameRate,
-// frame count over duration) and the rate the shortest frame duration in the track
-// corresponds to (1 / minFrameDuration). They agree for a constant-frame-rate file with a
-// fine timescale; QA run 4 found a variable-frame-rate screen recording (30 fps frames with
-// drops, averaging 29.74 fps) that the average alone had presented as "nominally 29.740
-// fps". Neither is a "nominal" rate: a 29.97 fps file in a 600-tick timescale alternates
-// 20- and 21-tick frames, so its shortest frame reads 30.000. A shortest-frame rate above
-// 240 fps (one glitch frame would give that) is not reported.
+// frame count over duration) and the rate implied by the most common per-frame duration in
+// the track (modal frame duration from a capped compressed-sample scan; JSON key
+// videoFrameRateShortest is unchanged for compatibility). They agree for a constant-frame-
+// rate file with a fine timescale; QA run 4 found a variable-frame-rate screen recording
+// (30 fps frames with drops, averaging 29.74 fps) that the average alone had presented as
+// "nominally 29.740 fps". Neither is a "nominal" rate: a 29.97 fps file in a 600-tick
+// timescale alternates 20- and 21-tick frames, so the mode reads 30.000. minFrameDuration
+// is used only when the scan finds nothing usable. A rate above 240 fps is not reported.
 let videoSemaphore = DispatchSemaphore(value: 0)
 var videoTracks: [AVAssetTrack] = []
 asset.loadTracks(withMediaType: .video) { tracks, _ in
@@ -185,14 +186,57 @@ asset.loadTracks(withMediaType: .video) { tracks, _ in
     videoSemaphore.signal()
 }
 videoSemaphore.wait()
+
+struct FrameDurationKey: Hashable {
+    let value: Int64
+    let timescale: Int32
+}
+
+/// Modal frame rate from compressed sample durations (no decode). Capped for the time budget.
+func modalVideoFrameRate(asset: AVURLAsset, videoTrack: AVAssetTrack,
+                         maxSamples: Int = 2000, timeBudget: TimeInterval = 1.0) -> Double? {
+    let reader: AVAssetReader
+    do { reader = try AVAssetReader(asset: asset) } catch { return nil }
+    let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else { return nil }
+    reader.add(output)
+    guard reader.startReading() else { return nil }
+
+    var buckets: [FrameDurationKey: Int] = [:]
+    let deadline = Date().addingTimeInterval(timeBudget)
+    var samplesRead = 0
+    while samplesRead < maxSamples, Date() < deadline {
+        guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
+        samplesRead += 1
+        let duration = CMSampleBufferGetDuration(sampleBuffer)
+        guard duration.isValid, duration.value > 0, duration.timescale > 0 else { continue }
+        let key = FrameDurationKey(value: duration.value, timescale: duration.timescale)
+        buckets[key, default: 0] += 1
+    }
+    reader.cancelReading()
+
+    guard let best = buckets.max(by: { $0.value < $1.value })?.key else { return nil }
+    let rate = Double(best.timescale) / Double(best.value)
+    guard rate > 0, rate <= 240 else { return nil }
+    return rate
+}
+
+func frameRateFromMinDuration(_ duration: CMTime) -> Double {
+    guard duration.isValid, duration.value > 0, duration.timescale > 0 else { return 0 }
+    let rate = Double(duration.timescale) / Double(duration.value)
+    guard rate > 0, rate <= 240 else { return 0 }
+    return rate
+}
+
 var videoFrameRateAverage: Double = 0
 var videoFrameRateShortest: Double = 0
 if let video = videoTracks.first {
     videoFrameRateAverage = Double(video.nominalFrameRate)
-    let shortest = video.minFrameDuration
-    if shortest.isValid && shortest.value > 0 && shortest.timescale > 0 {
-        let rate = Double(shortest.timescale) / Double(shortest.value)
-        if rate > 0 && rate <= 240 { videoFrameRateShortest = rate }
+    if let modal = modalVideoFrameRate(asset: asset, videoTrack: video) {
+        videoFrameRateShortest = modal
+    } else {
+        videoFrameRateShortest = frameRateFromMinDuration(video.minFrameDuration)
     }
 }
 

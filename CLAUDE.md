@@ -501,10 +501,10 @@ the spine index they are anchored to) and markers; raw RPC: `timeline.getDetaile
 
 Use `capture_viewer()` and `capture_timeline()` to take screenshots of FCP without
 bringing it to the foreground. These capture the window's content directly — no `screencapture`
-needed. The resulting PNGs can be read by Claude to visually verify edits. The display must be
-awake, and the Viewer's content needs the screen unlocked: a locked screen gives a flat grey Viewer
-and a sleeping display a black capture (QA run 4). A one-colour capture is reported with `flat: true`
-and a WARNING line (it can also be a genuinely black frame).
+needed. The resulting PNGs can be read by Claude to visually verify edits. Flat detection
+trims uniform Viewer chrome / letterbox bars and tests the inner content; a one-colour
+content region is reported with `flat: true` and a WARNING line (it can also be a genuinely
+black frame or gap). Captures render in-process from FCP's views; a locked screen does not blank them.
 
 **When to use:**
 - After applying effects, color corrections, titles, or captions → `capture_viewer()`

@@ -626,14 +626,14 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 // The flag is FCP's; what it covers beyond a speed change SpliceKit cannot tell
                 // from the flag alone. What it can read (from the helper, SpliceKit's readings
                 // of the file, not FCP's): the average frame rate over the file and the rate
-                // the shortest frame duration corresponds to. A file at another frame rate is
+                // the most common frame duration corresponds to. A file at another frame rate is
                 // rate-conformed by FCP (Video inspector: Rate Conform), which QA run 3 found
                 // sets isRetimed by itself on a 30 fps, variable-frame-rate screen recording
                 // in a 29.97 fps project; a conform keeps the file-to-timeline mapping
                 // (frames are repeated or dropped, the audio is not stretched). Neither
                 // reading is the file's "nominal" rate (QA run 4: the average alone had been
-                // presented as that; a 29.97 fps file in a 600-tick timescale has 30.000 as
-                // its shortest-frame rate), and which one FCP's Rate Conform goes by SpliceKit
+                // presented as that; a 29.97 fps file in a 600-tick timescale has 29.970 as
+                // its most-common-frame rate), and which one FCP's Rate Conform goes by SpliceKit
                 // does not know: a conform is asserted only when both differ from the
                 // project's rate, and left open when they straddle it.
                 NSString *flagName = entry[@"retimeSelector"] ?: @"its retime flag";
@@ -644,16 +644,16 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 NSString *readings = nil;
                 if (haveAverage && haveShortest) {
                     readings = [NSString stringWithFormat:
-                        @"the media file's video averages %.3f fps over the file and its shortest frame duration corresponds "
+                        @"the media file's video averages %.3f fps over the file and its most common frame duration corresponds "
                         @"to %.3f fps%@", averageFps, shortestFps,
                         variableRate ? @" (a variable-frame-rate recording, most likely)" : @""];
                 } else if (haveAverage) {
                     readings = [NSString stringWithFormat:
-                        @"the media file's video averages %.3f fps over the file (its shortest frame duration could not be "
+                        @"the media file's video averages %.3f fps over the file (its most common frame duration could not be "
                         @"read or was not trusted)", averageFps];
                 } else if (haveShortest) {
                     readings = [NSString stringWithFormat:
-                        @"the media file's shortest frame duration corresponds to %.3f fps (its average frame rate could "
+                        @"the media file's most common frame duration corresponds to %.3f fps (its average frame rate could "
                         @"not be read)", shortestFps];
                 }
                 BOOL allDiffer = readings && frameRate > 0

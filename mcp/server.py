@@ -189,8 +189,8 @@ HEAR it: get_audio_levels(handle) (its primary-storyline neighbours come along, 
   cut between two analysed primary-storyline clips. Not FCP's audio meters or waveforms: FCP's
   volume, fades, effects, retiming and the mix of all concurrent clips are not applied. Read-only.
 SEE it: capture_timeline, capture_viewer, capture_inspector, capture_clip_frame(handle) (the clip
-  as rendered in the Viewer, effects included; moves the playhead and restores it). The display must
-  be awake and, for the Viewer, the screen unlocked; a one-colour capture comes back with a WARNING.
+  as rendered in the Viewer, effects included; moves the playhead and restores it). Captures are
+  in-process from FCP's views; a one-colour content region comes back with flat:true and a WARNING.
 SOURCE CLIPS (browser -> timeline): browser_list_clips() then
   add_clip_to_timeline(handle, edit="insert"|"connect"|"append", start_seconds, end_seconds,
   at_seconds, backtimed, dry_run): a range of a source clip (seconds from its first frame)
@@ -248,7 +248,8 @@ PROJECTS / LIBRARY / BROWSER: open_project, create_project, create_event, create
 FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_panel,
   set_workspace, select_tool, get_viewer_zoom / set_viewer_zoom, detect_dialog then
   click_dialog_button / fill_dialog_field / select_dialog_popup / toggle_dialog_checkbox /
-  dismiss_dialog (share and export dialogs), search_commands / execute_command (the Command
+  dismiss_dialog (cancels by default; action='default' to confirm share/export sheets),
+  search_commands / execute_command (the Command
   Palette's commands).
 ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_object_property,
   raw_call, debug_eval; explore_class / search_methods find a selector; manage_handles releases
@@ -4981,8 +4982,7 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
 
 
 def _capture_flat_note(r: dict) -> str:
-    """One WARNING line when the bridge found the captured image to be one flat colour
-    (QA run 4: a locked screen gives a grey field, a sleeping display a black one)."""
+    """One WARNING line when the bridge found the captured image content to be one flat colour."""
     if not isinstance(r, dict) or not r.get("flat"):
         return ""
     return "\nWARNING: " + str(r.get("warning") or "the captured image is one flat colour: the window may have rendered nothing")
@@ -4998,10 +4998,9 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
     FCP's File > Share > Save Current Frame export) and puts the playhead back where
     it was (the selection is not touched). The frame is returned inline as MCP image
     content and the PNG path is reported. The Viewer shows the playhead frame only
-    while the pointer is not skimming over the timeline, and renders only with the
-    screen unlocked and the display awake: a one-colour image (QA run 4: uniform grey
-    with the screen locked) is reported with `flat: true` and a WARNING line, and is
-    not a verified frame unless the frame really is flat (black).
+    while the pointer is not skimming over the timeline. A one-colour content region is
+    reported with `flat: true` and a WARNING line; that can be a genuinely flat frame
+    (black, a gap) or nothing rendered in the Viewer area.
 
     Prefer get_clip_info() when the raw footage is enough: it reads the frame from the
     source media file without moving the playhead. Use this tool to see what the clip
@@ -5075,10 +5074,9 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool =
 
     Screenshots the viewer area only (cropped from the FCP window, not the
     whole screen). Captures the window's content directly (CGWindowListCreateImage),
-    so FCP need not be frontmost; the display must be awake and, for the Viewer's
-    content, the screen unlocked (QA run 4: a locked screen gave a flat grey field, a
-    sleeping display a black one). A one-colour capture is reported with `flat: true`
-    and a WARNING line; it can also be a genuinely black frame.
+    so FCP need not be frontmost. Flat detection trims uniform Viewer chrome /
+    letterbox bars and tests the inner content; `flat: true` with a WARNING can mean
+    a genuinely flat frame (black, a gap) or that nothing rendered in the content area.
 
     Use after: applying effects, color correction, titles, captions, or
     any change visible in the canvas. Read the resulting PNG to visually
@@ -5507,7 +5505,7 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     retimed clip the levels and their times do not correspond to what FCP plays. `retimed`
     is FCP's own flag (`isRetimed` on 12.3) and "unknown" when the clip object answers
     none. When the flag is set the note compares two readings of the media file's video,
-    its average frame rate over the file and the rate its shortest frame duration
+    its average frame rate over the file and the rate its most common frame duration
     corresponds to (neither is a "nominal" rate), with the project's rate, naming a
     variable-frame-rate recording when they differ; a conform is asserted only when both
     differ from the project's rate, and left open when they straddle it, since which one
@@ -5634,9 +5632,8 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bo
 
     Screenshots the timeline area only (cropped from the FCP window, not the
     whole screen). Captures the window's content directly (CGWindowListCreateImage),
-    so FCP need not be frontmost; the display must be awake (QA run 4: a sleeping
-    display gave a black capture; a locked screen still rendered the timeline). A
-    one-colour capture is reported with `flat: true` and a WARNING line.
+    so FCP need not be frontmost. A one-colour capture is reported with `flat: true`
+    and a WARNING line.
 
     Use after: blade cuts, clip rearrangement, adding/removing markers,
     transitions, trim edits, or any structural timeline change. Read the
@@ -6446,13 +6443,18 @@ def select_dialog_popup(select: str, popup_index: int = 0) -> str:
 
 
 @splicekit_tool("dismiss_dialog")
-def dismiss_dialog(action: str = "default") -> str:
-    """Dismiss the currently showing dialog.
+def dismiss_dialog(action: str = "cancel") -> str:
+    """Dismiss the currently showing dialog without committing (by default).
+
+    With no arguments, clicks Cancel (or equivalent) and does not confirm the
+    sheet. Pass action="default" or action="ok" only when you intend to commit
+    (OK, Share, Done, etc.).
 
     Args:
-        action: How to dismiss:
+        action: How to dismiss (default "cancel"):
+                "cancel" - click Cancel / Don't Save; OK-only alerts fall back to
+                the default button and set fellBackToDefault in the response
                 "default" - click the default button (usually OK/Share/Done)
-                "cancel" - click Cancel or press Escape
                 "ok" - explicitly look for OK/Done/Share button
 
     Automatically finds and clicks the appropriate button to dismiss
@@ -7863,7 +7865,8 @@ def direct_timeline_action(action: str = "", selector: str = "",
                            frames_to_jump: int = 0, speed: float = 0,
                            name: str = "", marker: str = "",
                            type_: str = "", completed: bool = False,
-                           amount: float = 0, relative: bool = True,
+                           amount: float = 0, frames: int = 0,
+                           relative: bool = True,
                            fade_in: bool = True, duration: float = 0,
                            enabled: bool = True, effect_id: str = "",
                            keywords: str = "", language: str = "",
@@ -7873,11 +7876,20 @@ def direct_timeline_action(action: str = "", selector: str = "",
                            on_edges: bool = True, on_left: bool = True,
                            add_title: bool = True,
                            interpolation: str = "",
+                           time: float = -1,
                            store_result: bool = False) -> str:
     """Call Flexo's parameterized action methods directly on FFAnchoredTimelineModule.
 
     More powerful than timeline_action() because these accept real parameters
     (rates, durations, flags) instead of just dispatching through the responder chain.
+
+    Many advertised actions call Flexo ``action*`` selectors that are not present on
+    Final Cut Pro 12.3 (only 17 ``action*`` methods exist on FFAnchoredTimelineModule
+    there). Unsupported ones return a clear error:
+    ``<action> is not supported on this Final Cut Pro build``, plus ``missingSelector``
+    and ``fcpVersion``. Verified working on FCP 12.3: insertGap, insertPlaceholder,
+    insertGapDirect, splitAtTime, nudgeAnchoredItems, nudgeSpineItems, insertFreezeFrame,
+    removeEdits, joinThroughEdits.
 
     Args:
         action: The action name. Available actions:
@@ -7906,8 +7918,10 @@ def direct_timeline_action(action: str = "", selector: str = "",
               detachAudioDirect, alignAudioToVideoDirect
 
             Trim/Edit:
-              splitAtTime, trimDuration (is_delta)
-              extendOverNextClip, joinThroughEdits (on_edges, on_left)
+              splitAtTime (time: seconds, or current playhead when omitted)
+              trimDuration (is_delta)
+              extendOverNextClip, joinThroughEdits (on_edges/on_left kept for
+              compatibility but ignored — FCP 12.3 only has parameterless join)
               removeEdits (replace_with_gap), insertGapDirect
 
             Clips:
@@ -7940,9 +7954,13 @@ def direct_timeline_action(action: str = "", selector: str = "",
             Other:
               autoReframeDirect, addTransitionsDirect
               analyzeAndOptimize, resolveLaneConflicts, resolveLaneGaps
-              nudgeAnchoredItems, nudgeSpineItems
+              nudgeAnchoredItems, nudgeSpineItems (frames for whole frames, amount for
+              seconds; default one project frame when neither is set)
 
         selector: Raw ObjC selector for fallback (e.g. "actionValidateAndRepair:validateMode:error:")
+
+    Nudge amount (nudgeAnchoredItems, nudgeSpineItems): pass frames=N to move N whole
+    frames, or amount=S to move S seconds. Omit both for a one-frame nudge.
     """
     # Only include params that were explicitly set -- the bridge uses their
     # presence/absence to determine which ObjC selector variant to call
@@ -7975,6 +7993,8 @@ def direct_timeline_action(action: str = "", selector: str = "",
         params["completed"] = True
     if amount != 0:
         params["amount"] = amount
+    if frames != 0:
+        params["frames"] = frames
     if not relative:
         params["relative"] = False
     if not fade_in:
@@ -7999,17 +8019,29 @@ def direct_timeline_action(action: str = "", selector: str = "",
         params["isDelta"] = True
     if replace_with_gap:
         params["replaceWithGap"] = True
-    if not on_edges:
-        params["onEdges"] = False
-    if not on_left:
-        params["onLeft"] = False
+    if time >= 0:
+        params["time"] = time
     if not add_title:
         params["addTitle"] = False
     if interpolation:
         params["interpolation"] = interpolation
+    ignored_parameters = []
+    if action == "joinThroughEdits":
+        if not on_edges:
+            ignored_parameters.append("on_edges")
+        if not on_left:
+            ignored_parameters.append("on_left")
+
     r = bridge.call("timeline.directAction", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
+    if ignored_parameters and isinstance(r, dict):
+        r = dict(r)
+        r["ignoredParameters"] = ignored_parameters
+        r["ignoredParametersNote"] = (
+            "FCP 12.3 only exposes the parameterless join-through-edits path "
+            "(_joinSelectedThroughEdits); on_edges and on_left are not applied."
+        )
     return _fmt(r)
 
 

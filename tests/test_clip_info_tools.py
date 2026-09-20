@@ -286,14 +286,13 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertIn("at 4.000s", out_custom[0])
 
     def test_capture_tools_warn_on_a_flat_image(self):
-        # QA run 4: with the screen locked every window capture was a uniform grey field that
-        # looked like a successful capture; the bridge now reports `flat` + `warning`.
+        # When the bridge reports flat content (e.g. blank Viewer or gap), MCP tools surface the warning.
         with tempfile.TemporaryDirectory() as tmp:
             png_path = os.path.join(tmp, "viewer.png")
             with open(png_path, "wb") as f:
                 f.write(TINY_PNG)
             warning = ("the captured image is one flat colour (RGB 35,35,35): either what Final Cut Pro shows "
-                       "there really is flat (a black frame, an empty Viewer) or the window rendered nothing")
+                       "there really is flat (a black frame, a gap, an empty Viewer) or nothing rendered in that area")
 
             def responder(method, params):
                 return {"status": "ok", "path": params["path"], "width": 1, "height": 1, "bytes": len(TINY_PNG),
