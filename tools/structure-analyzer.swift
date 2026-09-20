@@ -383,14 +383,40 @@ struct Section {
     var group: Int = -1      // repetition group
 }
 
+func recomputeSectionFeatures(_ s: inout Section) {
+    let span = s.endBar - s.startBar
+    guard span > 0 else {
+        s.meanEnergy = 0
+        s.meanCentroid = 0
+        return
+    }
+    var eSum: Float = 0, cSum: Float = 0
+    for bi in s.startBar..<s.endBar {
+        eSum += normEnergy[bi]
+        cSum += normCentroid[bi]
+    }
+    let count = Float(span)
+    s.meanEnergy = eSum / count
+    s.meanCentroid = cSum / count
+}
+
+func isDegenerateSection(_ s: Section, beatInterval: Double) -> Bool {
+    let barSpan = s.endBar - s.startBar
+    let duration = s.endTime - s.startTime
+    if barSpan <= 0 { return true }
+    if duration < beatInterval { return true }
+    return false
+}
+
 var sections = [Section]()
 for si in 0..<boundaries.count {
     let startBar = boundaries[si]
     let endBar = (si + 1 < boundaries.count) ? boundaries[si + 1] : bars.count
+    if endBar <= startBar { continue }
+
     let startTime = bars[startBar]
     let endTime = (endBar < bars.count) ? bars[endBar] : totalDuration
 
-    // Mean features across the section
     var eSum: Float = 0, cSum: Float = 0
     for bi in startBar..<endBar {
         eSum += normEnergy[bi]
@@ -402,6 +428,26 @@ for si in 0..<boundaries.count {
         startTime: startTime, endTime: endTime,
         meanEnergy: eSum / count, meanCentroid: cSum / count
     ))
+}
+
+// Drop degenerate sections (e.g. trailing tail past the last bar) by merging into the previous section
+if !sections.isEmpty {
+    var merged = [Section]()
+    for s in sections {
+        if isDegenerateSection(s, beatInterval: beatInterval) {
+            if var prev = merged.popLast() {
+                prev.endBar = s.endBar
+                prev.endTime = s.endTime
+                recomputeSectionFeatures(&prev)
+                merged.append(prev)
+            } else {
+                merged.append(s)
+            }
+        } else {
+            merged.append(s)
+        }
+    }
+    sections = merged
 }
 
 // MARK: - Repetition Detection (group similar sections)

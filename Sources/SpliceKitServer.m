@@ -2798,6 +2798,72 @@ NSDictionary *SpliceKit_handleTimelineEndEdit(NSDictionary *params) {
     return result;
 }
 
+// Main-thread-only helpers for grouping multi-step edits into one undo step.
+// Skips begin when SpliceKit (or begin_edit) already has a group open.
+static BOOL SpliceKit_internalBeginEditGroupIfNeeded(id sequence, NSString *name) {
+    if (!sequence || name.length == 0 || sOpenEditGroupName) {
+        return NO;
+    }
+    SEL namedBeginSel = NSSelectorFromString(@"actionBegin:");
+    SEL legacyBeginSel = NSSelectorFromString(@"actionBeginEditing");
+    if ([sequence respondsToSelector:namedBeginSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(sequence, namedBeginSel, name);
+        sOpenEditGroupBeginSelector = @"actionBegin:";
+    } else if ([sequence respondsToSelector:legacyBeginSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(sequence, legacyBeginSel);
+        sOpenEditGroupBeginSelector = @"actionBeginEditing";
+    } else {
+        return NO;
+    }
+    sOpenEditGroupName = [name copy];
+    return YES;
+}
+
+static void SpliceKit_internalEndEditGroupIfOpened(id sequence, id timeline, NSString *name, BOOL openedByUs) {
+    if (!openedByUs || !sOpenEditGroupName) {
+        return;
+    }
+    NSString *closeName = name.length > 0 ? name : (sOpenEditGroupName ?: @"Edit");
+    NSString *beginUsed = sOpenEditGroupBeginSelector ?: @"actionBegin:";
+
+    SEL forceUpdateSel = NSSelectorFromString(@"forceUpdate");
+    if (sequence && [sequence respondsToSelector:forceUpdateSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(sequence, forceUpdateSel);
+    }
+
+    NSError *err = nil;
+    if ([beginUsed isEqualToString:@"actionBeginEditing"]) {
+        SEL endSel = NSSelectorFromString(@"actionEndEditing:error:");
+        if (sequence && [sequence respondsToSelector:endSel]) {
+            if (SpliceKit_selectorReturnsBOOL(sequence, endSel)) {
+                ((BOOL (*)(id, SEL, BOOL, NSError **))objc_msgSend)(sequence, endSel, YES, &err);
+            } else {
+                ((void (*)(id, SEL, BOOL, NSError **))objc_msgSend)(sequence, endSel, YES, &err);
+            }
+        }
+    } else {
+        SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
+        if (sequence && [sequence respondsToSelector:endSel]) {
+            if (SpliceKit_selectorReturnsBOOL(sequence, endSel)) {
+                ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(sequence, endSel, closeName, YES, &err);
+            } else {
+                ((void (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(sequence, endSel, closeName, YES, &err);
+            }
+        }
+    }
+    if (err) {
+        SpliceKit_log(@"internalEndEditGroup \"%@\" error: %@", closeName, err.localizedDescription);
+    }
+
+    sOpenEditGroupName = nil;
+    sOpenEditGroupBeginSelector = nil;
+
+    SEL reloadSel = NSSelectorFromString(@"reloadTimelineView:");
+    if (timeline && [timeline respondsToSelector:reloadSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(timeline, reloadSel, nil);
+    }
+}
+
 #pragma mark - FCPXML Import
 //
 // Two ways to import FCPXML:
@@ -4432,10 +4498,13 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                     if (fd.timescale > 0) frameDur = fd;
                 }
 
-                // Find the clip at the playhead
+                // Find the primary-storyline clip at the playhead (timeline range via effectiveRangeOfObject:).
                 id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
                     ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
-                id targetClip = primaryObj; // fallback to primary object
+                id targetClip = nil;
+                double targetClipTimelineStart = 0;
+                double targetClipTimelineEnd = 0;
+                double ph = SpliceKit_secondsFromTime(playheadTime);
                 if (primaryObj && [primaryObj respondsToSelector:@selector(containedItems)]) {
                     id items = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
                     if ([items isKindOfClass:[NSArray class]]) {
@@ -4443,19 +4512,25 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                         if ([primaryObj respondsToSelector:erSel]) {
                             for (id item in (NSArray *)items) {
                                 @try {
-                                    SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                    SpliceKit_CMTimeRange itemRange = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                                         primaryObj, erSel, item);
-                                    double clipStart = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
-                                    double clipDur = (range.duration.timescale > 0) ? (double)range.duration.value / range.duration.timescale : 0;
-                                    double ph = (playheadTime.timescale > 0) ? (double)playheadTime.value / playheadTime.timescale : 0;
-                                    if (ph >= clipStart - 0.01 && ph < clipStart + clipDur + 0.01) {
+                                    double clipTimelineStart = SpliceKit_secondsFromTime(itemRange.start);
+                                    double clipDur = SpliceKit_secondsFromTime(itemRange.duration);
+                                    double clipTimelineEnd = clipTimelineStart + clipDur;
+                                    if (ph >= clipTimelineStart - 0.01 && ph < clipTimelineEnd + 0.01) {
                                         targetClip = item;
+                                        targetClipTimelineStart = clipTimelineStart;
+                                        targetClipTimelineEnd = clipTimelineEnd;
                                         break;
                                     }
                                 } @catch (NSException *e) {}
                             }
                         }
                     }
+                }
+                if (!targetClip) {
+                    todoResult = @{@"error": @"No primary storyline clip at playhead"};
+                    return;
                 }
 
                 SEL addSel = NSSelectorFromString(@"actionAddMarkerToAnchoredObject:isToDo:isChapter:withRange:error:");
@@ -4464,12 +4539,38 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                     return;
                 }
 
-                SpliceKit_CMTimeRange range = {playheadTime, frameDur};
+                double clipDuration = targetClipTimelineEnd - targetClipTimelineStart;
+                double localTime = ph - targetClipTimelineStart;
+                if (localTime < -0.01 || localTime > clipDuration + 0.01) {
+                    todoResult = @{@"error": [NSString stringWithFormat:
+                        @"Playhead %.3fs is outside clip timeline range %.3f-%.3fs",
+                        ph, targetClipTimelineStart, targetClipTimelineEnd]};
+                    return;
+                }
+
+                NSDictionary *audioSrc = SpliceKit_audioSourceForItem(targetClip);
+                double clipSourceStart = 0;
+                BOOL sourceStartKnown = [audioSrc[@"sourceStartKnown"] boolValue];
+                if (sourceStartKnown) {
+                    clipSourceStart = [audioSrc[@"sourceStart"] doubleValue];
+                }
+                // actionAddMarkerToAnchoredObject: range.start is SOURCE MEDIA time (measured):
+                // timeline = range.start - clipSourceStart + clipTimelineStart
+                // => range.start = clipSourceStart + (T - clipTimelineStart).
+                double rangeStartSeconds = clipSourceStart + localTime;
+                int32_t ts = frameDur.timescale > 0 ? frameDur.timescale : 600;
+                SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
+                SpliceKit_CMTimeRange range = {markerTime, frameDur};
                 NSError *err = nil;
                 typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, SpliceKit_CMTimeRange, NSError **);
                 BOOL ok = ((AddMarkerFn)objc_msgSend)(sequence, addSel, targetClip, YES, NO, range, &err);
                 if (ok) {
-                    todoResult = @{@"action": @"addTodoMarker", @"status": @"ok"};
+                    NSMutableDictionary *okOut = [@{@"action": @"addTodoMarker", @"status": @"ok"} mutableCopy];
+                    if (!sourceStartKnown) {
+                        okOut[@"warning"] =
+                            @"clip sourceStart unknown; used 0 for marker range (may be misplaced)";
+                    }
+                    todoResult = okOut;
                 } else {
                     todoResult = @{@"error": err ? [err localizedDescription] : @"Failed to add todo marker"};
                 }
@@ -4618,31 +4719,44 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // methods live on FFAnchoredSequence and take the marker object directly.
 
             if ([action isEqualToString:@"changeMarkerType"]) {
-                // Change marker type: "chapter", "todo", "note"
+                if (!sequence) {
+                    result = @{@"error": @"No sequence in timeline."};
+                    return;
+                }
                 NSString *type = params[@"type"] ?: @"note";
                 SEL sel;
                 if ([type isEqualToString:@"chapter"]) {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToChapter:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
                 } else if ([type isEqualToString:@"todo"]) {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToTodo:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
                 } else {
                     sel = NSSelectorFromString(@"actionChangeMarkerTypeToNote:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
                 }
-                id selectedItems = getSelectedItems();
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(sequence, sel, action);
+                if (missingSel) { result = missingSel; return; }
+                id marker = params[@"marker"] ? SpliceKit_resolveHandle(params[@"marker"]) : nil;
+                if (!marker) {
+                    id selected = getSelectedItems();
+                    if ([selected respondsToSelector:@selector(firstObject)]) {
+                        marker = ((id (*)(id, SEL))objc_msgSend)(selected, @selector(firstObject));
+                    }
+                }
+                if (!marker) {
+                    result = @{@"error": @"No marker found. Select a marker or pass marker handle."};
+                    return;
+                }
                 NSError *error = nil;
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
+                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"type": type, @"status": @"ok"};
                 return;
             }
 
             if ([action isEqualToString:@"changeMarkerName"]) {
+                if (!sequence) {
+                    result = @{@"error": @"No sequence in timeline."};
+                    return;
+                }
                 // Rename a marker: requires marker handle and new name
                 NSString *name = params[@"name"];
                 NSString *markerHandle = params[@"marker"];
@@ -4658,15 +4772,19 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!marker) { result = @{@"error": @"No marker found. Select a marker or pass marker handle."}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionChangeMarkerDisplayName:marker:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(timeline, sel, name, marker, &error);
+                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, name, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"name": name, @"status": @"ok"};
                 return;
             }
 
             if ([action isEqualToString:@"markMarkerCompleted"]) {
+                if (!sequence) {
+                    result = @{@"error": @"No sequence in timeline."};
+                    return;
+                }
                 // Mark a todo marker as completed
                 id marker = params[@"marker"] ? SpliceKit_resolveHandle(params[@"marker"]) : nil;
                 if (!marker) {
@@ -4678,23 +4796,27 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!marker) { result = @{@"error": @"No marker found"}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionMarkMarkerAsCompleted:marker:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
                 BOOL completed = [params[@"completed"] boolValue];
-                ((void (*)(id, SEL, BOOL, id, NSError **))objc_msgSend)(timeline, sel, completed, marker, &error);
+                ((void (*)(id, SEL, BOOL, id, NSError **))objc_msgSend)(sequence, sel, completed, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
                 return;
             }
 
             if ([action isEqualToString:@"removeMarker"]) {
+                if (!sequence) {
+                    result = @{@"error": @"No sequence in timeline."};
+                    return;
+                }
                 id marker = params[@"marker"] ? SpliceKit_resolveHandle(params[@"marker"]) : nil;
                 if (!marker) { result = @{@"error": @"marker handle required"}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionRemoveMarker:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, marker, &error);
+                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, marker, &error);
                 result = error ? @{@"error": error.localizedDescription}
                                : @{@"action": action, @"status": @"ok"};
                 return;
@@ -6450,7 +6572,7 @@ static NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
 
             // For renaming markers after creation
             SEL renameSel = NSSelectorFromString(@"actionChangeMarkerDisplayName:marker:error:");
-            BOOL canRename = [timeline respondsToSelector:renameSel];
+            BOOL canRename = [sequence respondsToSelector:renameSel];
 
             typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, SpliceKit_CMTimeRange, NSError **);
             AddMarkerFn addMarker = (AddMarkerFn)objc_msgSend;
@@ -6458,7 +6580,10 @@ static NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
             int32_t ts = frameDur.timescale > 0 ? frameDur.timescale : 600;
             NSUInteger applied = 0;
             NSMutableArray *results = [NSMutableArray array];
+            NSString *undoGroupName = @"Add Markers";
+            BOOL openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
 
+            @try {
             for (NSDictionary *m in markers) {
                 double t = [m[@"time"] doubleValue];
                 NSString *name = m[@"name"];
@@ -6466,22 +6591,50 @@ static NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                 BOOL isToDo = [kind isEqualToString:@"todo"];
                 BOOL isChapter = [kind isEqualToString:@"chapter"];
 
-                // Find the clip that contains this time
+                // Find the clip that contains this time (content-relative start/end).
+                // ci[@"start"] is cumulativeStart from the spine walk (timeline start, not source timecode).
                 id targetClip = nil;
+                double clipTimelineStart = 0;
+                double clipTimelineEnd = 0;
                 for (NSDictionary *ci in clipInfos) {
                     double cStart = [ci[@"start"] doubleValue];
                     double cEnd = [ci[@"end"] doubleValue];
                     if (t >= cStart - 0.01 && t < cEnd + 0.01) {
                         targetClip = ci[@"clip"];
+                        clipTimelineStart = cStart;
+                        clipTimelineEnd = cEnd;
                         break;
                     }
                 }
                 // Fallback: use the last clip if marker time is past all clips
-                if (!targetClip) targetClip = [clipInfos lastObject][@"clip"];
+                if (!targetClip) {
+                    NSDictionary *last = [clipInfos lastObject];
+                    targetClip = last[@"clip"];
+                    clipTimelineStart = [last[@"start"] doubleValue];
+                    clipTimelineEnd = [last[@"end"] doubleValue];
+                }
 
-                // Add timeline start offset so relative times map to absolute FCP positions
-                double absoluteTime = t + timelineStartOffset;
-                SpliceKit_CMTime markerTime = {(int64_t)round(absoluteTime * ts), ts, 1, 0};
+                double clipDuration = clipTimelineEnd - clipTimelineStart;
+                double localTime = t - clipTimelineStart;
+                if (localTime < -0.01 || localTime > clipDuration + 0.01) {
+                    [results addObject:@{@"time": @(t), @"success": @NO,
+                        @"error": [NSString stringWithFormat:
+                            @"Marker time %.3fs is outside clip timeline range %.3f-%.3fs",
+                            t, clipTimelineStart, clipTimelineEnd]}];
+                    continue;
+                }
+
+                NSDictionary *audioSrc = SpliceKit_audioSourceForItem(targetClip);
+                double clipSourceStart = 0;
+                BOOL sourceStartKnown = [audioSrc[@"sourceStartKnown"] boolValue];
+                if (sourceStartKnown) {
+                    clipSourceStart = [audioSrc[@"sourceStart"] doubleValue];
+                }
+                // actionAddMarkerToAnchoredObject: range.start is SOURCE MEDIA time (measured):
+                // timeline = range.start - clipSourceStart + clipTimelineStart
+                // => range.start = clipSourceStart + (T - clipTimelineStart).
+                double rangeStartSeconds = clipSourceStart + localTime;
+                SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
                 SpliceKit_CMTimeRange range = {markerTime, frameDur};
                 NSError *err = nil;
                 BOOL ok = addMarker(sequence, addSel, targetClip, isToDo, isChapter, range, &err);
@@ -6504,25 +6657,41 @@ static NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                                 if (marker) {
                                     NSError *renameErr = nil;
                                     ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                                        timeline, renameSel, name, marker, &renameErr);
+                                        sequence, renameSel, name, marker, &renameErr);
                                 }
                             }
                         }
                     }
 
-                    [results addObject:@{@"time": @(t), @"success": @YES}];
+                    NSMutableDictionary *one = [@{@"time": @(t), @"success": @YES} mutableCopy];
+                    if (!sourceStartKnown) {
+                        one[@"warning"] =
+                            @"clip sourceStart unknown; used 0 for marker range (may be misplaced)";
+                    }
+                    [results addObject:one];
                 } else {
                     [results addObject:@{@"time": @(t), @"success": @NO,
                         @"error": err ? [err localizedDescription] : @"unknown"}];
                 }
             }
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
+            }
 
-            result = @{
+            NSMutableDictionary *out = [@{
                 @"status": @"ok",
                 @"count": @(markers.count),
                 @"applied": @(applied),
                 @"markers": results,
-            };
+            } mutableCopy];
+            if (openedUndoGroup) {
+                out[@"undoStep"] = undoGroupName;
+            } else if (sOpenEditGroupName) {
+                out[@"undoStep"] = sOpenEditGroupName;
+            }
+            result = out;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -10190,7 +10359,31 @@ static NSDictionary *SpliceKit_handleTranscriptDeleteWords(NSDictionary *params)
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
-        result = [[SpliceKitTranscriptPanel sharedPanel] deleteWordsFromIndex:startIndex count:count];
+        id timeline = nil;
+        id sequence = nil;
+        NSString *undoGroupName = @"Delete Words";
+        BOOL openedUndoGroup = NO;
+        @try {
+            timeline = SpliceKit_getActiveTimelineModule();
+            if (timeline) {
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
+            }
+            @try {
+                result = [[SpliceKitTranscriptPanel sharedPanel] deleteWordsFromIndex:startIndex count:count];
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
+            }
+            if (result && !result[@"error"] && openedUndoGroup) {
+                NSMutableDictionary *out = [result mutableCopy];
+                out[@"undoStep"] = undoGroupName;
+                result = out;
+            }
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
     });
     return result ?: @{@"error": @"Operation failed"};
 }
@@ -10804,67 +10997,224 @@ static NSDictionary *SpliceKit_handleNativeCaptionsVerify(NSDictionary *params) 
 // between consecutive frames. Optionally places markers or blades at cuts.
 //
 
+// Primary-storyline clip whose timeline range contains the playhead (nil if none).
+static id SpliceKit_scenePrimaryClipAtPlayhead(id timeline, id primaryObj,
+                                               double *outStart, double *outEnd) {
+    if (!timeline || !primaryObj) return nil;
+    SpliceKit_CMTime playheadTime = {0, 1, 0, 0};
+    @try {
+        if ([timeline respondsToSelector:@selector(playheadTime)]) {
+            playheadTime = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+        }
+    } @catch (NSException *e) {}
+    double ph = SpliceKit_secondsFromTime(playheadTime);
+    NSArray *items = SpliceKit_mixerArrayFromContainer(
+        [primaryObj respondsToSelector:@selector(containedItems)]
+            ? ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)) : nil);
+    for (id item in items) {
+        SpliceKit_CMTimeRange range;
+        if (!SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) continue;
+        double start = SpliceKit_secondsFromTime(range.start);
+        double end = start + SpliceKit_secondsFromTime(range.duration);
+        if (ph >= start - 0.01 && ph < end + 0.01) {
+            if (outStart) *outStart = start;
+            if (outEnd) *outEnd = end;
+            return item;
+        }
+    }
+    return nil;
+}
+
+static NSArray *SpliceKit_scenePrimarySpineCandidates(id primaryObj) {
+    NSMutableArray *list = [NSMutableArray array];
+    if (!primaryObj) return list;
+    NSArray *items = SpliceKit_mixerArrayFromContainer(
+        [primaryObj respondsToSelector:@selector(containedItems)]
+            ? ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)) : nil);
+    for (id item in items) {
+        SpliceKit_CMTimeRange range;
+        if (!SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) continue;
+        double start = SpliceKit_secondsFromTime(range.start);
+        double end = start + SpliceKit_secondsFromTime(range.duration);
+        [list addObject:@{
+            @"handle": SpliceKit_storeHandle(item) ?: @"",
+            @"name": SpliceKit_displayNameForItem(item),
+            @"start": @(start),
+            @"end": @(end),
+        }];
+    }
+    return list;
+}
+
+// Single source media file for scene detection (no compound/multicam descent).
+static NSURL *SpliceKit_sceneMediaURLForClip(id item, NSString **outError) {
+    if (outError) *outError = nil;
+    if (!item) {
+        if (outError) *outError = @"nil clip";
+        return nil;
+    }
+    BOOL hasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+    BOOL hasAudio = SpliceKit_boolForSelector(item, @"hasAudio");
+    NSString *kind = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio);
+    NSString *containerKind = ([kind isEqualToString:@"compound clip"]
+                               || [kind isEqualToString:@"reference clip"]
+                               || [kind isEqualToString:@"multicam clip"]) ? kind : nil;
+    if (containerKind) {
+        if (outError) {
+            *outError = [NSString stringWithFormat:
+                @"no single source media file: this is a %@. Pass handle to a specific inner clip, "
+                @"or fileURL to analyse a file directly",
+                containerKind];
+        }
+        return nil;
+    }
+    int mediaDepth = -1;
+    id mediaComp = SpliceKit_clipInfoMediaComponentWithDepth(item, &mediaDepth);
+    if (mediaDepth >= 2) {
+        if (outError) {
+            *outError = [NSString stringWithFormat:
+                @"no single source media file: the first media file inside this clip sits %d levels "
+                @"down inside nested containers; pass handle to a specific clip or fileURL",
+                mediaDepth];
+        }
+        return nil;
+    }
+    NSURL *url = SpliceKit_clipInfoMediaURL(mediaComp ?: item, NULL, NULL);
+    if (!url && outError) *outError = @"No video media file found for this clip.";
+    return url;
+}
+
 NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
     // Get parameters
     double threshold = [params[@"threshold"] doubleValue] ?: 0.35;
     double sampleInterval = [params[@"sampleInterval"] doubleValue] ?: 0.1; // check every 0.1s
     NSString *action = params[@"action"] ?: @"detect"; // "detect", "markers", "blade"
 
-    // Get media URL from timeline's first clip, or use provided URL
-    __block NSURL *mediaURL = nil;
-    NSString *urlStr = params[@"fileURL"];
-    if (urlStr) {
-        mediaURL = [NSURL fileURLWithPath:urlStr];
-    } else {
-        // Get from timeline
+    NSString *urlStr = [params[@"fileURL"] isKindOfClass:[NSString class]] ? params[@"fileURL"] : nil;
+    BOOL fileURLMode = (urlStr.length > 0);
+    NSString *handleParam = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
+    if (handleParam.length == 0) handleParam = nil;
+
+    if (fileURLMode && handleParam) {
+        return @{@"error": @"Pass either handle (timeline clip) or fileURL (direct file analysis), not both."};
+    }
+    if (fileURLMode && ([action isEqualToString:@"markers"] || [action isEqualToString:@"blade"])) {
+        return @{@"error":
+            @"Cannot place markers or blade when analysing fileURL directly: there is no timeline clip "
+            @"to map source-media times onto. Open a project, pass handle to a timeline clip, or use "
+            @"detect_scene_changes() with file_url only to list cuts in the file."};
+    }
+
+    __block NSURL *mediaURL = fileURLMode ? [NSURL fileURLWithPath:urlStr] : nil;
+    __block id targetClip = nil;
+    __block NSString *clipHandle = nil;
+    __block NSString *clipName = nil;
+    __block double clipTimelineStart = 0.0;
+    __block double clipTimelineEnd = 0.0;
+    __block double fileStartSeconds = 0.0;
+    __block double clipSourceStartSeconds = 0.0;
+    __block BOOL clipSourceStartKnown = NO;
+    __block NSString *mediaResolveError = nil;
+    __block NSArray *spineCandidates = nil;
+
+    if (!fileURLMode) {
         SpliceKit_executeOnMainThread(^{
             @try {
                 id timeline = SpliceKit_getActiveTimelineModule();
-                if (!timeline) return;
+                if (!timeline) {
+                    mediaResolveError = @"No active timeline module. Is a project open?";
+                    return;
+                }
                 id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-                if (!sequence) return;
+                if (!sequence) {
+                    mediaResolveError = @"No sequence in timeline.";
+                    return;
+                }
+                id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                    ? ((id (*)(id, SEL))objc_msgSend)(sequence, NSSelectorFromString(@"primaryObject")) : nil;
+                spineCandidates = SpliceKit_scenePrimarySpineCandidates(primaryObj);
 
-                // Get primary object -> containedItems -> first clip -> media URL
-                SEL poSel = NSSelectorFromString(@"primaryObject");
-                if (![sequence respondsToSelector:poSel]) return;
-                id primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, poSel);
-                if (!primaryObj) return;
-
-                SEL ciSel = @selector(containedItems);
-                if (![primaryObj respondsToSelector:ciSel]) return;
-                id items = ((id (*)(id, SEL))objc_msgSend)(primaryObj, ciSel);
-                if (!items) return;
-
-                // Find the longest clip (skip tiny remnants)
-                id bestItem = nil;
-                double bestDur = 0;
-                for (id item in (NSArray *)items) {
-                    if ([item respondsToSelector:@selector(duration)]) {
-                        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-                        double dur = (d.timescale > 0) ? (double)d.value / d.timescale : 0;
-                        if (dur > bestDur) { bestDur = dur; bestItem = item; }
+                if (handleParam) {
+                    targetClip = SpliceKit_resolveHandle(handleParam);
+                    if (!targetClip) {
+                        mediaResolveError = [NSString stringWithFormat:
+                            @"handle %@ does not resolve to an object (get_timeline_clips() gives fresh handles)",
+                            handleParam];
+                        return;
+                    }
+                } else {
+                    NSArray *selected = SpliceKit_handleSelectionCurrentItems(timeline);
+                    if (selected.count == 1) {
+                        targetClip = selected[0];
+                    } else if (selected.count > 1) {
+                        mediaResolveError =
+                            @"More than one clip is selected. Select exactly one clip, pass handle, "
+                            @"or position the playhead on a primary storyline clip.";
+                        return;
+                    } else {
+                        double phStart = 0, phEnd = 0;
+                        targetClip = SpliceKit_scenePrimaryClipAtPlayhead(timeline, primaryObj, &phStart, &phEnd);
+                        if (targetClip) {
+                            clipTimelineStart = phStart;
+                            clipTimelineEnd = phEnd;
+                        }
                     }
                 }
-                if (bestItem) {
-                    @try {
-                        id mediaObj = bestItem;
-                        if ([bestItem respondsToSelector:ciSel]) {
-                            id innerItems = ((id (*)(id, SEL))objc_msgSend)(bestItem, ciSel);
-                            if ([innerItems isKindOfClass:[NSArray class]] && [(NSArray *)innerItems count] > 0) {
-                                mediaObj = [(NSArray *)innerItems objectAtIndex:0];
-                            }
+
+                if (!targetClip) {
+                    NSMutableString *msg = [NSMutableString stringWithString:
+                        @"Could not determine which clip to analyse. Pass handle, select exactly one clip, "
+                        @"or position the playhead on a primary storyline clip."];
+                    if (spineCandidates.count > 0) {
+                        [msg appendString:@" Primary storyline:"];
+                        for (NSDictionary *c in spineCandidates) {
+                            [msg appendFormat:@" \"%@\" %@ %.3f-%.3fs;",
+                             c[@"name"] ?: @"", c[@"handle"] ?: @"",
+                             [c[@"start"] doubleValue], [c[@"end"] doubleValue]];
                         }
-                        mediaURL = SpliceKit_clipInfoMediaURL(mediaObj, NULL, NULL);
-                    } @catch (NSException *e) {}
+                    }
+                    mediaResolveError = msg;
+                    return;
+                }
+
+                clipHandle = SpliceKit_storeHandle(targetClip) ?: @"";
+                clipName = SpliceKit_displayNameForItem(targetClip);
+
+                if (clipTimelineEnd <= clipTimelineStart) {
+                    SpliceKit_CMTimeRange range;
+                    if (primaryObj && SpliceKit_tryReadTimelineRange(primaryObj, targetClip, &range)) {
+                        clipTimelineStart = SpliceKit_secondsFromTime(range.start);
+                        clipTimelineEnd = clipTimelineStart + SpliceKit_secondsFromTime(range.duration);
+                    }
+                }
+
+                NSDictionary *audioSrc = SpliceKit_audioSourceForItem(targetClip);
+                if (audioSrc[@"fileStart"]) {
+                    fileStartSeconds = [audioSrc[@"fileStart"] doubleValue];
+                }
+                clipSourceStartKnown = [audioSrc[@"sourceStartKnown"] boolValue];
+                if (clipSourceStartKnown) {
+                    clipSourceStartSeconds = [audioSrc[@"sourceStart"] doubleValue];
+                }
+
+                NSString *clipMediaError = nil;
+                mediaURL = SpliceKit_sceneMediaURLForClip(targetClip, &clipMediaError);
+                if (!mediaURL) {
+                    mediaResolveError = clipMediaError ?: @"No media file found for the resolved clip.";
                 }
             } @catch (NSException *e) {
-                SpliceKit_log(@"Exception getting media URL: %@", e.reason);
+                mediaResolveError = [NSString stringWithFormat:@"Exception resolving clip: %@", e.reason];
             }
         });
+        if (mediaResolveError) {
+            NSMutableDictionary *err = [@{@"error": mediaResolveError} mutableCopy];
+            if (spineCandidates.count > 0) err[@"candidates"] = spineCandidates;
+            return err;
+        }
     }
 
     if (!mediaURL) {
-        return @{@"error": @"No media file found. Open a project with media on the timeline."};
+        return @{@"error": @"No media file found. Open a project with media on the timeline or pass fileURL."};
     }
 
     SpliceKit_log(@"Scene detection starting on: %@ (threshold=%.2f, interval=%.2fs)",
@@ -10891,6 +11241,19 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
         assetReaderTrackOutputWithTrack:videoTrack outputSettings:outputSettings];
     output.alwaysCopiesSampleData = NO;
     [reader addOutput:output];
+
+    if (!fileURLMode && targetClip) {
+        double clipDuration = clipTimelineEnd - clipTimelineStart;
+        if (isfinite(fileStartSeconds) && isfinite(clipDuration) && clipDuration > 0.0
+            && fileStartSeconds >= 0.0) {
+            CMTime rangeStart = CMTimeMakeWithSeconds(fileStartSeconds, 600);
+            CMTime rangeDuration = CMTimeMakeWithSeconds(clipDuration, 600);
+            reader.timeRange = CMTimeRangeMake(rangeStart, rangeDuration);
+            SpliceKit_log(@"Scene detection: limiting decode to file %.3f-%.3fs (clip timeline %.3f-%.3fs)",
+                          fileStartSeconds, fileStartSeconds + clipDuration,
+                          clipTimelineStart, clipTimelineEnd);
+        }
+    }
 
     if (![reader startReading]) {
         return @{@"error": [NSString stringWithFormat:@"Cannot start reading: %@", reader.error.localizedDescription]};
@@ -10984,42 +11347,63 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
     SpliceKit_log(@"Scene detection complete: %lu changes found in %.1fs (%d frames sampled)",
                   (unsigned long)sceneChanges.count, duration, sampledFrames);
 
-    // If action is "markers" or "blade", apply them programmatically (no playhead movement)
+    NSMutableDictionary *baseResult = [@{
+        @"sceneChanges": sceneChanges,
+        @"count": @(sceneChanges.count),
+        @"duration": @(duration),
+        @"threshold": @(threshold),
+        @"action": action,
+        @"mediaFile": mediaURL.lastPathComponent ?: @"",
+        @"sourceTimesAreMediaFile": @YES,
+    } mutableCopy];
+    if (targetClip) {
+        baseResult[@"clipHandle"] = clipHandle ?: @"";
+        baseResult[@"clipName"] = clipName ?: @"";
+        baseResult[@"clipTimelineStart"] = @(clipTimelineStart);
+        baseResult[@"clipTimelineEnd"] = @(clipTimelineEnd);
+        baseResult[@"fileStart"] = @(fileStartSeconds);
+    }
+
+    // If action is "markers" or "blade", apply at timeline times mapped from source file times
     if (([action isEqualToString:@"markers"] || [action isEqualToString:@"blade"]) && sceneChanges.count > 0) {
+        if (!targetClip) {
+            baseResult[@"error"] =
+                @"Cannot apply markers or blade without a timeline clip (fileURL-only analysis has no mapping).";
+            return baseResult;
+        }
+
         __block NSInteger applied = 0;
+        __block NSInteger skippedOutsideClip = 0;
+        __block BOOL sceneOpenedUndoGroup = NO;
+        id clipForApply = targetClip;
+        double mapClipStart = clipTimelineStart;
+        double mapClipEnd = clipTimelineEnd;
+        double mapFileStart = fileStartSeconds;
+        double mapClipSourceStart = clipSourceStartSeconds;
+        BOOL mapClipSourceStartKnown = clipSourceStartKnown;
+
         SpliceKit_executeOnMainThread(^{
+            id timeline = nil;
+            id sequence = nil;
+            NSString *undoGroupName = @"Mark Scene Changes";
+            BOOL openedUndoGroup = NO;
             @try {
-                id timeline = SpliceKit_getActiveTimelineModule();
+                timeline = SpliceKit_getActiveTimelineModule();
                 if (!timeline) return;
-                id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
                 if (!sequence) return;
 
-                // Get frame duration for marker length
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
+                sceneOpenedUndoGroup = openedUndoGroup;
+
                 SpliceKit_CMTime frameDur = {1, 30, 1, 0};
                 SEL fdSel = NSSelectorFromString(@"frameDuration");
                 if ([sequence respondsToSelector:fdSel]) {
                     frameDur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
                 }
-
-                // Get the primary object and find the target clip (longest one)
-                id primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, NSSelectorFromString(@"primaryObject"));
-                if (!primaryObj) return;
-                id containedItems = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
-                if (![containedItems isKindOfClass:[NSArray class]]) return;
-
-                id targetClip = nil;
-                double bestDur = 0;
-                for (id item in (NSArray *)containedItems) {
-                    if ([item respondsToSelector:@selector(duration)]) {
-                        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-                        double dur = (d.timescale > 0) ? (double)d.value / d.timescale : 0;
-                        if (dur > bestDur) { bestDur = dur; targetClip = item; }
-                    }
-                }
-                if (!targetClip) return;
+                int32_t ts = (frameDur.timescale > 0) ? frameDur.timescale : 600;
 
                 if ([action isEqualToString:@"markers"]) {
-                    // Add markers programmatically via actionAddMarkerToAnchoredObject:isToDo:isChapter:withRange:error:
                     SEL addSel = NSSelectorFromString(@"actionAddMarkerToAnchoredObject:isToDo:isChapter:withRange:error:");
                     if (![sequence respondsToSelector:addSel]) {
                         SpliceKit_log(@"Scene detection: sequence does not respond to actionAddMarkerToAnchoredObject:");
@@ -11030,20 +11414,34 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                     AddMarkerFn addMarker = (AddMarkerFn)objc_msgSend;
 
                     for (NSDictionary *sc in sceneChanges) {
-                        double t = [sc[@"time"] doubleValue];
-                        int32_t ts = 600;
-                        SpliceKit_CMTime markerTime = {(int64_t)round(t * ts), ts, 1, 0};
+                        double fileTime = [sc[@"time"] doubleValue];
+                        double timelineTime = mapClipStart + (fileTime - mapFileStart);
+                        if (timelineTime < mapClipStart - 0.001 || timelineTime > mapClipEnd + 0.001) {
+                            skippedOutsideClip++;
+                            continue;
+                        }
+                        // actionAddMarkerToAnchoredObject: range.start is SOURCE MEDIA time (measured):
+                        // timeline = range.start - clipSourceStart + clipTimelineStart.
+                        // Detection times are media-file seconds; range.start = clipSourceStart + (fileTime - fileStart).
+                        double clipSourceStart = mapClipSourceStartKnown ? mapClipSourceStart : 0.0;
+                        double rangeStartSeconds = clipSourceStart + (fileTime - mapFileStart);
+                        SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
                         SpliceKit_CMTimeRange range = {markerTime, frameDur};
                         NSError *err = nil;
-                        BOOL ok = addMarker(sequence, addSel, targetClip, NO, NO, range, &err);
+                        BOOL ok = addMarker(sequence, addSel, clipForApply, NO, NO, range, &err);
                         if (ok) applied++;
-                        else SpliceKit_log(@"Scene marker failed at %.2fs: %@", t, err);
+                        else SpliceKit_log(@"Scene marker failed at file %.2fs / tl %.2fs: %@", fileTime, timelineTime, err);
                     }
                 } else {
-                    // Blade: seek + blade (still needs playhead for blade action)
                     for (NSDictionary *sc in sceneChanges) {
-                        double t = [sc[@"time"] doubleValue];
-                        SpliceKit_handlePlaybackSeek(@{@"seconds": @(t)});
+                        double fileTime = [sc[@"time"] doubleValue];
+                        double timelineTime = mapClipStart + (fileTime - mapFileStart);
+                        if (timelineTime < mapClipStart - 0.001 || timelineTime > mapClipEnd + 0.001) {
+                            skippedOutsideClip++;
+                            continue;
+                        }
+                        // Blade seeks the playhead; needs absolute timeline seconds, not clip-local.
+                        SpliceKit_handlePlaybackSeek(@{@"seconds": @(timelineTime)});
                         [NSThread sleepForTimeInterval:0.03];
                         SpliceKit_handleTimelineAction(@{@"action": @"blade"});
                         applied++;
@@ -11051,31 +11449,21 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                 }
             } @catch (NSException *e) {
                 SpliceKit_log(@"Scene action error: %@", e.reason);
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
             }
         });
-        // Update count with actually applied
-        if (applied > 0) {
-            NSMutableDictionary *mutableResult = [NSMutableDictionary dictionaryWithDictionary:@{
-                @"sceneChanges": sceneChanges,
-                @"count": @(sceneChanges.count),
-                @"applied": @(applied),
-                @"duration": @(duration),
-                @"threshold": @(threshold),
-                @"action": action,
-                @"mediaFile": mediaURL.lastPathComponent ?: @"",
-            }];
-            return mutableResult;
+
+        baseResult[@"applied"] = @(applied);
+        baseResult[@"skippedOutsideClip"] = @(skippedOutsideClip);
+        if (applied > 0 && sceneOpenedUndoGroup) {
+            baseResult[@"undoStep"] = @"Mark Scene Changes";
         }
     }
 
-    return @{
-        @"sceneChanges": sceneChanges,
-        @"count": @(sceneChanges.count),
-        @"duration": @(duration),
-        @"threshold": @(threshold),
-        @"action": action,
-        @"mediaFile": mediaURL.lastPathComponent ?: @"",
-    };
+    return baseResult;
 }
 
 #pragma mark - Effects Browse & Apply Handlers

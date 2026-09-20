@@ -1427,45 +1427,148 @@ def set_playback_speed(rate: float = None, action: str = None) -> str:
     return "Error: provide either rate (float) or action (string)"
 
 
+def _format_scene_detect_result(r: dict) -> str:
+    changes = r.get("sceneChanges", [])
+    total = int(r.get("count", len(changes)))
+    lines = [
+        f"Scene changes: {total} (threshold={r.get('threshold', 0)}, file={r.get('mediaFile', '?')})",
+    ]
+    if r.get("clipName"):
+        tl_start = float(r.get("clipTimelineStart", 0))
+        tl_end = float(r.get("clipTimelineEnd", 0))
+        file_start = float(r.get("fileStart", 0))
+        clip_media_dur = tl_end - tl_start
+        file_end = file_start + clip_media_dur
+        lines.append(
+            f"Analysed clip: \"{r.get('clipName')}\" ({r.get('clipHandle', '')}) "
+            f"timeline {tl_start:.3f}-{tl_end:.3f}s"
+        )
+        lines.append(
+            f"Clip used source media range: {file_start:.3f}-{file_end:.3f}s "
+            f"(mark/blade only apply to cuts inside this window)."
+        )
+    lines.append(
+        "Times below are SOURCE MEDIA file seconds (not timeline). "
+        "mark_scene_changes / blade_scene_changes map them onto the analysed clip."
+    )
+    action = r.get("action")
+    if action not in (None, "detect"):
+        applied = int(r.get("applied", 0))
+        skipped = int(r.get("skippedOutsideClip", 0))
+        lines.append(f"Action: {action}")
+        lines.append(
+            f"Applied {applied} of {total} ({skipped} fell outside the clip's used media range and were skipped)."
+        )
+        if applied == 0:
+            lines.append(
+                "No markers or blades were placed (all detected cuts were outside the clip's "
+                "used source media range, or placement failed)."
+            )
+    lines.append("")
+    for sc in changes:
+        lines.append(f"  {sc['time']:.2f}s  (score: {sc.get('score', 0):.3f})")
+    if r.get("error"):
+        lines.append(f"\nWarning: {r['error']}")
+    return "\n".join(lines)
+
+
 @splicekit_tool("detect_scene_changes")
-def detect_scene_changes(threshold: float = 0.35, action: str = "detect", sample_interval: float = 0.1) -> str:
+def detect_scene_changes(
+    threshold: float = 0.35,
+    action: str = "detect",
+    sample_interval: float = 0.1,
+    handle: str = "",
+    file_url: str = "",
+) -> str:
     """Use this read-only tool to inspect scene changes before deciding whether to mark or blade them.
+
+    Target clip (analysed once, same for detect/mark/blade): handle if given; else the sole
+    selected clip; else the primary-storyline clip under the playhead; else an error listing
+    spine candidates. Pass file_url to analyse a file on disk without a timeline clip (times
+    are file seconds only; mark/blade are refused).
 
     Args:
         threshold: Sensitivity (0.0-1.0). Lower = more sensitive. Default 0.35.
         action: Deprecated compatibility argument. Only "detect" is accepted here.
         sample_interval: Seconds between sampled frames. Default 0.1.
+        handle: Timeline clip handle from get_timeline_clips() (required for compound/multicam).
+        file_url: Analyse this media path directly (no timeline mapping).
 
-    Returns list of scene change timestamps with confidence scores.
-    Uses GPU-style histogram comparison (same approach as FCP internally).
+    Returns scene-change timestamps in source-media seconds with confidence scores.
     """
     if action != "detect":
         return "Error: detect_scene_changes() is read-only. Use mark_scene_changes() or blade_scene_changes()."
 
-    r = bridge.call("scene.detect", threshold=threshold, action=action, sampleInterval=sample_interval)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
+    params: dict = {
+        "threshold": threshold,
+        "action": action,
+        "sampleInterval": sample_interval,
+    }
+    if handle:
+        params["handle"] = handle
+    if file_url:
+        params["fileURL"] = file_url
 
-    changes = r.get("sceneChanges", [])
-    lines = [f"Scene changes: {r.get('count', 0)} (threshold={r.get('threshold', 0)}, file={r.get('mediaFile', '?')})"]
-    if r.get("action") != "detect":
-        lines.append(f"Action: {r.get('action')} applied at each scene change")
-    lines.append("")
-    for sc in changes:
-        lines.append(f"  {sc['time']:.2f}s  (score: {sc.get('score', 0):.3f})")
-    return "\n".join(lines)
+    r = bridge.call("scene.detect", **params)
+    if _err(r):
+        err = f"Error: {r.get('error', r)}"
+        candidates = r.get("candidates")
+        if candidates:
+            err += "\nPrimary storyline candidates:"
+            for c in candidates:
+                err += (
+                    f"\n  {c.get('handle', '?')} \"{c.get('name', '')}\" "
+                    f"{c.get('start', 0):.3f}-{c.get('end', 0):.3f}s"
+                )
+        return err
+
+    return _format_scene_detect_result(r)
 
 
 @splicekit_tool("mark_scene_changes")
-def mark_scene_changes(threshold: float = 0.35, sample_interval: float = 0.1) -> str:
-    """Use this tool to add markers at detected scene changes without cutting the timeline."""
-    return _call_or_error("scene.detect", threshold=threshold, action="markers", sampleInterval=sample_interval)
+def mark_scene_changes(
+    threshold: float = 0.35,
+    sample_interval: float = 0.1,
+    handle: str = "",
+    file_url: str = "",
+) -> str:
+    """Add markers at detected scene changes on the resolved timeline clip (see detect_scene_changes)."""
+    params: dict = {
+        "threshold": threshold,
+        "action": "markers",
+        "sampleInterval": sample_interval,
+    }
+    if handle:
+        params["handle"] = handle
+    if file_url:
+        params["fileURL"] = file_url
+    r = bridge.call("scene.detect", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _format_scene_detect_result(r)
 
 
 @splicekit_tool("blade_scene_changes")
-def blade_scene_changes(threshold: float = 0.35, sample_interval: float = 0.1) -> str:
-    """Use this tool to blade the timeline at detected scene changes."""
-    return _call_or_error("scene.detect", threshold=threshold, action="blade", sampleInterval=sample_interval)
+def blade_scene_changes(
+    threshold: float = 0.35,
+    sample_interval: float = 0.1,
+    handle: str = "",
+    file_url: str = "",
+) -> str:
+    """Blade the timeline at detected scene changes on the resolved timeline clip (see detect_scene_changes)."""
+    params: dict = {
+        "threshold": threshold,
+        "action": "blade",
+        "sampleInterval": sample_interval,
+    }
+    if handle:
+        params["handle"] = handle
+    if file_url:
+        params["fileURL"] = file_url
+    r = bridge.call("scene.detect", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _format_scene_detect_result(r)
 
 
 @splicekit_tool("seek_to_time")
@@ -3008,11 +3111,115 @@ def import_srt_as_markers(srt_content: str) -> str:
 @splicekit_tool("get_active_libraries")
 def get_active_libraries() -> str:
     """Get list of currently open libraries in FCP."""
+    from urllib.parse import unquote, urlparse
+
+    def _objc(target, selector, args=None, return_handle=False):
+        return bridge.call(
+            "system.callMethodWithArgs",
+            target=target,
+            selector=selector,
+            args=args or [],
+            classMethod=False,
+            returnHandle=return_handle,
+        )
+
     r = bridge.call("system.callMethodWithArgs", target="FFLibraryDocument",
                     selector="copyActiveLibraries", args=[], classMethod=True, returnHandle=True)
     if _err(r):
         return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    array_handle = r.get("handle")
+    if not array_handle:
+        return "No libraries are open."
+
+    lib_handles = []
+    count = None
+    try:
+        cr = _objc(array_handle, "count")
+        if not _err(cr) and cr.get("result") is not None:
+            count = int(cr["result"])
+    except (TypeError, ValueError):
+        count = None
+
+    if count is not None:
+        if count == 0:
+            return "No libraries are open."
+        for i in range(count):
+            lr = _objc(
+                array_handle,
+                "objectAtIndex:",
+                [{"type": "int", "value": i}],
+                return_handle=True,
+            )
+            lib_handles.append(lr.get("handle") if not _err(lr) else None)
+    else:
+        i = 0
+        while i < 256:
+            lr = _objc(
+                array_handle,
+                "objectAtIndex:",
+                [{"type": "int", "value": i}],
+                return_handle=True,
+            )
+            if _err(lr) or not lr.get("handle"):
+                break
+            lib_handles.append(lr["handle"])
+            i += 1
+        count = len(lib_handles)
+
+    if count == 0:
+        return "No libraries are open."
+
+    lines = [f"Open libraries ({count}):"]
+    for lib_handle in lib_handles:
+        name = None
+        path = None
+        unread = []
+        if not lib_handle:
+            lines.append("  (could not read library entry)")
+            continue
+        try:
+            nr = _objc(lib_handle, "displayName")
+            if _err(nr):
+                unread.append("name")
+            else:
+                name = nr.get("result")
+        except Exception:
+            unread.append("name")
+        try:
+            ur = _objc(lib_handle, "URL")
+            if _err(ur):
+                unread.append("path")
+            else:
+                url_str = ur.get("result") or ""
+                if url_str:
+                    parsed = urlparse(str(url_str))
+                    path = unquote(parsed.path).rstrip("/")
+        except Exception:
+            unread.append("path")
+        if name and path:
+            line = f"  {name} — {path}"
+        elif name:
+            line = f"  {name}"
+        elif path:
+            line = f"  (unnamed) — {path}"
+        else:
+            line = "  (library)"
+        if unread:
+            line += f" (could not read: {', '.join(unread)})"
+        try:
+            ir = _objc(lib_handle, "isUpdating")
+            if not _err(ir) and ir.get("result"):
+                line += " [updating]"
+        except Exception:
+            pass
+        try:
+            idr = _objc(lib_handle, "uniqueIdentifier")
+            if not _err(idr) and idr.get("result"):
+                line += f"  id={idr['result']}"
+        except Exception:
+            pass
+        lines.append(line)
+    return "\n".join(lines)
 
 
 @splicekit_tool("is_library_updating")
@@ -6325,7 +6532,7 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
 # ============================================================
 # Deploy & Restart FCP
 # ============================================================
-# One-shot command to build, deploy, re-sign, kill FCP, relaunch,
+# One-shot command to resolve modded app, quit FCP, build/deploy, relaunch,
 # and wait for the bridge to come back online.
 
 @splicekit_tool("deploy_and_restart")
@@ -6333,10 +6540,11 @@ def deploy_and_restart(skip_build: bool = False) -> str:
     """Build SpliceKit, deploy to the modded FCP app, and restart FCP.
 
     This automates the entire deploy cycle:
-    1. Run `make deploy` (builds dylib + copies to framework path + re-signs)
-    2. Kill any running FCP process
-    3. Relaunch the modded FCP
-    4. Wait for the SpliceKit bridge to come online (up to 30 seconds)
+    1. Resolve the modded FCP app path (same precedence as the Makefile)
+    2. Quit Final Cut Pro and wait for the process to exit
+    3. Run `make deploy` (builds dylib + copies to framework path + re-signs)
+    4. Relaunch the modded FCP
+    5. Wait for the SpliceKit bridge to come online (up to 30 seconds)
 
     Args:
         skip_build: If True, skip `make deploy` and just restart FCP.
@@ -6349,45 +6557,86 @@ def deploy_and_restart(skip_build: bool = False) -> str:
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     results = []
 
-    # Step 1: Build and deploy
+    modded_modified = "/Applications/Final Cut Pro Modified.app"
+    modded_standard = os.path.expanduser("~/Applications/SpliceKit/Final Cut Pro.app")
+    modded_creator = os.path.expanduser(
+        "~/Applications/SpliceKit/Final Cut Pro Creator Studio.app"
+    )
+    modded_app = None
+    for candidate in (modded_modified, modded_standard, modded_creator):
+        if os.path.isdir(candidate):
+            modded_app = candidate
+            break
+    if modded_app is None:
+        return (
+            "Error: modded FCP not found at "
+            f"{modded_modified}, {modded_standard}, or {modded_creator}"
+        )
+
+    def _fcp_is_running() -> bool:
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-x", "Final Cut Pro"],
+                capture_output=True,
+                timeout=5,
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    # Step 2: Quit FCP before deploy (make deploy removes the in-app framework)
+    if _fcp_is_running():
+        try:
+            subprocess.run(
+                ["pkill", "-x", "Final Cut Pro"], capture_output=True, timeout=5
+            )
+        except Exception as e:
+            return f"Error sending quit to Final Cut Pro: {e}"
+
+        quit_deadline = _time.time() + 30
+        while _time.time() < quit_deadline:
+            if not _fcp_is_running():
+                results.append("Quit FCP: OK")
+                break
+            _time.sleep(0.5)
+        else:
+            return (
+                "Error: Final Cut Pro did not exit within 30s after SIGTERM. "
+                "Not running make deploy — quit FCP manually (Cmd+Q) and retry."
+            )
+    else:
+        results.append("FCP was not running")
+
+    # Step 3: Build and deploy (only after FCP has exited)
     if not skip_build:
         try:
             proc = subprocess.run(
                 ["make", "deploy"],
-                cwd=project_dir, capture_output=True, text=True, timeout=120
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=900,
             )
             if proc.returncode != 0:
                 return f"Build failed (exit {proc.returncode}):\n{proc.stderr}\n{proc.stdout}"
             results.append("Build + deploy: OK")
         except subprocess.TimeoutExpired:
-            return "Error: build timed out after 120s"
+            return (
+                "Error: make deploy timed out after 900s. "
+                "The app's SpliceKit.framework may already have been replaced; "
+                "check the modded app and relaunch manually if needed."
+            )
         except Exception as e:
             return f"Error running make deploy: {e}"
 
-    # Step 2: Kill FCP
-    try:
-        subprocess.run(["pkill", "-x", "Final Cut Pro"], capture_output=True, timeout=5)
-        results.append("Killed FCP")
-        _time.sleep(2)  # wait for process to fully exit
-    except Exception:
-        results.append("FCP was not running")
-
-    # Step 3: Relaunch
-    # Find the modded app
-    modded_standard = os.path.expanduser("~/Applications/SpliceKit/Final Cut Pro.app")
-    modded_creator = os.path.expanduser("~/Applications/SpliceKit/Final Cut Pro Creator Studio.app")
-    modded_app = modded_standard if os.path.isdir(modded_standard) else modded_creator
-
-    if not os.path.isdir(modded_app):
-        return f"Error: modded FCP not found at {modded_standard} or {modded_creator}"
-
+    # Step 4: Relaunch
     try:
         subprocess.Popen(["open", modded_app])
         results.append(f"Launched: {os.path.basename(modded_app)}")
     except Exception as e:
         return f"Error launching FCP: {e}"
 
-    # Step 4: Wait for bridge
+    # Step 5: Wait for bridge
     # Drop the existing connection so we don't use a stale socket
     bridge.reset()
 
@@ -6669,7 +6918,8 @@ def set_bridge_option_value(option: str, value: str) -> str:
 # timestamps for syncing video cuts to music.
 
 @splicekit_tool("detect_beats")
-def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
+def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0,
+                 limit: int = 16) -> str:
     """Detect beats, bars, and sections in any audio file (MP3, WAV, M4A, etc.).
 
     Analyzes the audio using onset detection and tempo estimation.
@@ -6683,6 +6933,8 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
                      Higher = more beats detected, lower = only strong beats.
         min_bpm: Minimum expected BPM (default 60).
         max_bpm: Maximum expected BPM (default 200).
+        limit: Max beat/bar/section timestamps to show in the preview (default 16).
+               Full counts are always reported; omitted timestamps are summarized.
 
     Returns beat timestamps, bar timestamps, section timestamps, BPM, and duration.
     """
@@ -6709,7 +6961,46 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
         )
         if result.returncode != 0:
             return f"Error: beat-detector failed: {result.stderr}"
-        return result.stdout.strip()
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            return f"Error: beat-detector returned invalid JSON: {e}"
+
+        preview_n = max(0, int(limit))
+
+        def _preview_line(label, times):
+            total = len(times)
+            if total == 0:
+                return f"{label} (0): none"
+            shown = times[:preview_n]
+            body = ", ".join(f"{t:.2f}s" for t in shown)
+            omitted = total - len(shown)
+            line = f"{label} ({total}): {body}"
+            if omitted > 0:
+                line += f" ... {omitted} more omitted (showing first {len(shown)}; pass limit= to see more)"
+            return line
+
+        beats = data.get("beats") or []
+        bars = data.get("bars") or []
+        sections = data.get("sections") or []
+        beat_count = data.get("beatCount", len(beats))
+        bar_count = data.get("barCount", len(bars))
+        section_count = data.get("sectionCount", len(sections))
+        onset_count = data.get("onsetCount", 0)
+        bpm = data.get("bpm", "?")
+        beat_interval = data.get("beatInterval", 0)
+        duration = data.get("duration", 0)
+
+        lines = [
+            f"Beat Detection: {os.path.basename(file_path)}",
+            f"Duration: {duration:.1f}s  BPM: {bpm}  Beat interval: {beat_interval:.4f}s",
+            f"Counts: {beat_count} beats, {bar_count} bars, {onset_count} onsets, {section_count} sections",
+            "",
+            _preview_line("Beats", beats),
+            _preview_line("Bars", bars),
+            _preview_line("Sections", sections),
+        ]
+        return "\n".join(lines)
     except subprocess.TimeoutExpired:
         return "Error: beat-detector timed out"
     except Exception as e:

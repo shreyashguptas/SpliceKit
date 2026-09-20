@@ -46,6 +46,7 @@ PROAPP_SUPPORT_FRAMEWORK = $(MODDED_APP)/Contents/Frameworks/ProAppSupport.frame
 SILENCE_DETECTOR = $(BUILD_DIR)/silence-detector
 STRUCTURE_ANALYZER = $(BUILD_DIR)/structure-analyzer
 AUDIO_LEVELS = $(BUILD_DIR)/audio-levels
+BEAT_DETECTOR = $(BUILD_DIR)/beat-detector
 MIXER_APP = $(BUILD_DIR)/SpliceKitMixer
 AUDIO_BUS_PROBE_DIR = tools/audio-bus-probe-au
 AUDIO_BUS_PROBE_COMPONENT = $(BUILD_DIR)/SpliceKitAudioBusProbe.component
@@ -146,7 +147,7 @@ all: $(OUTPUT)
 
 symbols: $(DSYM)
 
-tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(MIXER_APP)
+tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP)
 
 audio-bus-probe: $(AUDIO_BUS_PROBE_BINARY)
 	@echo "Built: $(AUDIO_BUS_PROBE_COMPONENT)"
@@ -311,6 +312,11 @@ $(STRUCTURE_ANALYZER): tools/structure-analyzer.swift | $(BUILD_DIR)
 	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) tools/structure-analyzer.swift
 	@echo "Built: $(STRUCTURE_ANALYZER)"
 
+$(BEAT_DETECTOR): tools/beat-detector.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) tools/beat-detector.swift
+	@codesign --force --sign - $(BEAT_DETECTOR) >/dev/null 2>&1 || true
+	@echo "Built: $(BEAT_DETECTOR)"
+
 # Peak/RMS levels of a media file's audio (timeline.getAudioLevels shells out to it:
 # in-process AVFoundation audio decoding deadlocks inside Final Cut Pro).
 $(AUDIO_LEVELS): tools/audio-levels.swift | $(BUILD_DIR)
@@ -318,9 +324,15 @@ $(AUDIO_LEVELS): tools/audio-levels.swift | $(BUILD_DIR)
 	@codesign --force --sign - $(AUDIO_LEVELS) >/dev/null 2>&1 || true
 	@echo "Built: $(AUDIO_LEVELS)"
 
+SWIFT_PLUGIN_PATH = $(shell \
+	if [ -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" ]; then \
+		echo "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"; \
+	elif XCODE="$$(xcode-select -p 2>/dev/null)" && [ -n "$$XCODE" ] && [ -d "$$XCODE/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" ]; then \
+		echo "$$XCODE/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"; \
+	fi)
 MIXER_SOURCES = $(wildcard tools/mixer-app/*.swift)
 $(MIXER_APP): $(MIXER_SOURCES) | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -parse-as-library -o $(MIXER_APP) $(MIXER_SOURCES)
+	swiftc -O -suppress-warnings -parse-as-library $(if $(SWIFT_PLUGIN_PATH),-plugin-path $(SWIFT_PLUGIN_PATH),) -o $(MIXER_APP) $(MIXER_SOURCES)
 	@echo "Built: $(MIXER_APP)"
 
 # Lua static library — compiled as C (no -fobjc-arc)
@@ -452,7 +464,7 @@ braw-prototype: $(BRAW_IMPORT_EXEC) $(BRAW_DECODER_EXEC) $(BRAW_CLI_BIN)
 braw-raw-processor: $(BRAW_RAWPROC_EXEC)
 	@echo "Staged: $(BRAW_RAWPROC_BUNDLE)"
 
-deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(MIXER_APP) braw-prototype vp9-prototype mkv-prototype
+deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP) braw-prototype vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
@@ -481,9 +493,11 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(MI
 	@cp $(SILENCE_DETECTOR) "$(TOOLS_DIR)/silence-detector" 2>/dev/null || true
 	@cp $(STRUCTURE_ANALYZER) "$(TOOLS_DIR)/structure-analyzer" 2>/dev/null || true
 	@cp $(AUDIO_LEVELS) "$(TOOLS_DIR)/audio-levels" 2>/dev/null || true
+	@cp $(BEAT_DETECTOR) "$(TOOLS_DIR)/beat-detector" 2>/dev/null || true
 	@# The dylib looks in the framework's Resources first (no per-user path needed).
 	@cp $(SILENCE_DETECTOR) "$(FW_DIR)/Versions/A/Resources/silence-detector" 2>/dev/null || true
 	@cp $(AUDIO_LEVELS) "$(FW_DIR)/Versions/A/Resources/audio-levels" 2>/dev/null || true
+	@cp $(BEAT_DETECTOR) "$(FW_DIR)/Versions/A/Resources/beat-detector" 2>/dev/null || true
 	@cp $(MIXER_APP) "$(TOOLS_DIR)/SpliceKitMixer" 2>/dev/null || true
 	@# Build (cached) and install the Parakeet/Whisper CLIs into both the
 	@# framework Resources and Application Support. Non-fatal by design.
