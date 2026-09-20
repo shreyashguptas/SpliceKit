@@ -209,6 +209,32 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertIn("frame: not available -- no source media file to read a frame from", out)
         self.assertNotIn("notes:", out)
 
+    def test_get_clip_info_renders_container_without_source_file_or_frame(self):
+        # QA run 3: a compound (FCP: reference clip) must not be given a source media file or a
+        # frame decoded from one; the bridge now answers sourceMediaError + frameError for it.
+        def responder(method, params):
+            r = _clip_info_response(params, kind="reference clip", containerKind="reference clip",
+                                    isReferenceClip=True,
+                                    frameError="no single source media file to decode a frame from: this is a "
+                                               "reference clip whose contents are clips of their own; "
+                                               "timeline.captureClipFrame renders it as the Viewer plays it")
+            r.pop("sourceMedia")
+            r.pop("frame")
+            r["sourceMediaError"] = ("no single source media file: this is a reference clip, whose contents are "
+                                     "clips of their own, each with its own media file (Final Cut Pro opens it in "
+                                     "its own timeline: select it and timeline_action(\"openClip\")); "
+                                     "timeline.captureClipFrame renders it as the Viewer plays it")
+            return r
+
+        self._install_bridge(responder)
+        out = self.module.get_clip_info("obj_12")
+        self.assertIsInstance(out, str)   # no frame -> no image
+        self.assertIn("reference clip on lane 0 (primary storyline)", out)
+        self.assertIn("source media file: no single source media file: this is a reference clip", out)
+        self.assertIn("frame: not available -- no single source media file to decode a frame from", out)
+        self.assertNotIn("into the media file", out)
+        self.assertNotIn("from the source media file, no effects", out)
+
     def test_get_clip_info_renders_every_text_layer_and_unknown_range(self):
         def responder(method, params):
             r = _clip_info_response(params, kind="title",

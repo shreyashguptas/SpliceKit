@@ -291,7 +291,10 @@ Re-run get_timeline_clips() if a handle comes back unresolved.
   mistake, history_action("undo"). add_clip_to_timeline replaces the pasteboard.
 - "No active timeline module" / "No sequence in timeline" = no project open: open_project().
   "Cannot connect" = the patched Final Cut Pro is not running.
-- Titles, generators and gap clips have no source media file; get_clip_info says so.
+- Titles, generators and gap clips have no source media file; get_clip_info says so. A compound,
+  multicam or synchronized clip (FCP: reference clip; get_timeline_clips marks it [reference clip])
+  has no single one: get_clip_info reports no source file and no frame for it, get_audio_levels
+  skips it; capture_clip_frame shows it as the Viewer plays it.
 - A harsh audio cut: get_audio_levels(handle) reports the clip's last edge window (100 ms by
   default) and the jump into the next primary-storyline clip, because that neighbour is analysed
   too (or pass handles=[outgoing, incoming] / a range spanning the cut); fix with trim_clip (move
@@ -1433,6 +1436,17 @@ def _connected_lane(c):
     return lane or 0
 
 
+def _container_tag(item) -> str:
+    """Marker for a clip that is a container of clips (FCP's isReferenceClip / isCompoundClip flags)."""
+    if not isinstance(item, dict):
+        return ""
+    if item.get("isReferenceClip"):
+        return "  [reference clip]"
+    if item.get("isCompound"):
+        return "  [compound clip]"
+    return ""
+
+
 def _connected_table_lines(connected):
     """Render connectedItems from timeline.getDetailedState as a table,
     sorted by start time then lane."""
@@ -1461,7 +1475,7 @@ def _connected_table_lines(connected):
             f"{(dur_s if dur_s is not None else 0.0):>9.3f}s "
             f"{c.get('parentIndex', '?'):>6} "
             f"{'*' if c.get('selected') else ' ':>4} "
-            f"{c.get('handle', '')}"
+            f"{c.get('handle', '')}{_container_tag(c)}"
         )
     return lines
 
@@ -1569,7 +1583,7 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
                     f"{end_s:>7.2f}s "
                     f"{dur_s:>9.3f}s "
                     f"{'*' if item.get('selected') else ' ':>4} "
-                    f"{item.get('handle', '')}"
+                    f"{item.get('handle', '')}{_container_tag(item)}"
                 )
             else:
                 lines.append(
@@ -1579,7 +1593,7 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
                     f"{dur_s:>9.3f}s "
                     f"{item.get('lane', 0):>5} "
                     f"{'*' if item.get('selected') else ' ':>4} "
-                    f"{item.get('handle', '')}"
+                    f"{item.get('handle', '')}{_container_tag(item)}"
                 )
 
     if include_connected:
@@ -1597,6 +1611,13 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
             lines.extend(_marker_table_lines(markers))
             if r.get("markersTruncated"):
                 lines.append(f"(showing {len(markers)} of {r.get('markerTotal', '?')} markers)")
+
+    tagged = [i for i in items if _container_tag(i)] + [c for c in (r.get("connectedItems") or []) if _container_tag(c)]
+    if tagged:
+        lines.append("\n[reference clip] = a compound, multicam or synchronized clip (FCP's own isReferenceClip flag; "
+                     "isCompoundClip gives [compound clip]): one clip on the timeline whose contents are clips of "
+                     "their own. get_clip_info reports no single source media file for it and get_audio_levels "
+                     "skips it; timeline_action(\"openClip\") with it selected opens its own timeline.")
 
     return "\n".join(lines)
 
@@ -3729,19 +3750,25 @@ def execute_menu_command(menu_path: list[str], dry_run: bool = False) -> str:
 
 
 @splicekit_tool("list_menus")
-def list_menus(menu: str = "", depth: int = 2) -> str:
+def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
     """List FCP menu items to discover available commands.
 
     Args:
         menu: Optional top-level menu name (e.g. "File", "Edit", "Modify").
               If empty, lists all top-level menus.
         depth: How deep to recurse into submenus (default 2).
+        validate: run each listed menu's validation first (what AppKit does when the menu
+              opens), so titles set on validation, such as Edit > "Undo <action>", and the
+              enabled states are current. Off by default: without it the titles are the
+              static ones ("Undo") and the enabled states those of the last validation.
 
     Returns structured list of menu items with shortcuts and enabled status.
     """
     params = {"depth": depth}
     if menu:
         params["menu"] = menu
+    if validate:
+        params["validate"] = True
     r = bridge.call("menu.list", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -4911,7 +4938,11 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
     reference (an FFAnchoredClip standing in for an event clip: a compound, multicam or
     synchronized clip) and multicam come from FCP's own flags on the clip, not from its
     class name. Titles, generators and gap clips have no
-    source media file and report that instead of a frame. A marker is not a clip;
+    source media file and report that instead of a frame. A compound, multicam or
+    synchronized clip (FCP: reference clip) has no single source media file: its contents
+    are clips of their own, so no source file, no start point and no frame are reported
+    for it (capture_clip_frame shows it as the Viewer plays it; timeline_action
+    "openClip" on the selected clip opens its own timeline). A marker is not a clip;
     use list_markers().
     """
     if not handle:
@@ -5104,7 +5135,10 @@ def _render_audio_levels(r: dict, detail: str) -> str:
     lines = ["Audio levels in dBFS measured by SpliceKit from each clip's source media file (0 = full scale; "
              "-100 is the floor for a slice with no sample above 1e-5). Not Final Cut Pro's audio meters (the mix "
              "during playback) and not its timeline waveforms (which follow the clip's volume and effects): FCP's "
-             "volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied."]
+             "volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied. Channels are "
+             "pooled, not mixed: a slice's peak is the loudest sample in any channel and its RMS is over all "
+             "channels' samples (the figures ffmpeg's volumedetect gives for the same range), unless a clip's line "
+             "says mixdownMono."]
     rng = ""
     if _is_num(tl.get("rangeStartSeconds")) or _is_num(tl.get("rangeEndSeconds")):
         rng = (f"; requested range {_s3(tl.get('rangeStartSeconds')) if _is_num(tl.get('rangeStartSeconds')) else 'start'}"
@@ -5150,9 +5184,22 @@ def _render_audio_levels(r: dict, detail: str) -> str:
         rate = audio.get("sampleRate")
         rate_s = f"{rate:g} Hz" if _is_num(rate) else "? Hz"
         a_slice = audio.get("sliceSeconds") if _is_num(audio.get("sliceSeconds")) else slice_s
+        mode = audio.get("channelsMode")
+        if mode == "pooled":
+            ch_s = f"{audio.get('channels')} ch pooled"
+            tracks = audio.get("audioTrackCount")
+            decoded = audio.get("tracksDecoded")
+            if _is_num(tracks) and tracks > 1:
+                ch_s += f" over {decoded if _is_num(decoded) else tracks} of {tracks} audio tracks"
+        elif mode == "mixdownMono":
+            ch_s = ("1 ch mixdownMono (the decoder's mono mixdown, the fallback when no track decodes at its own "
+                    "channel count: it reads up to 3 dB above the per-channel level when the channels carry the "
+                    "same signal)")
+        else:
+            ch_s = f"{audio.get('channels')} ch decoded ({mode})"
         lines.append(f"  source: {src.get('fileName')} ({src.get('representation')}) file "
-                     f"{_s3(src.get('fileStart'))}-{_s3(src.get('fileEnd'))}; {rate_s}, {audio.get('channels')} ch decoded "
-                     f"({audio.get('channelsMode')}), {audio.get('sliceCount')} slices of {_ms(a_slice)}")
+                     f"{_s3(src.get('fileStart'))}-{_s3(src.get('fileEnd'))}; {rate_s}, {ch_s}, "
+                     f"{audio.get('sliceCount')} slices of {_ms(a_slice)}")
         ar = clip.get("analysisRange") if isinstance(clip.get("analysisRange"), dict) else {}
         if ar and (ar.get("startSeconds") != clip.get("startSeconds") or ar.get("endSeconds") != clip.get("endSeconds")):
             lines.append(f"  analyzed: {_s3(ar.get('startSeconds'))}-{_s3(ar.get('endSeconds'))} (the requested range)")
@@ -5163,6 +5210,11 @@ def _render_audio_levels(r: dict, detail: str) -> str:
                      f"RMS mean {_db(st.get('meanRmsDb'))}; slices at full scale (peak >= -0.1 dBFS) "
                      f"{st.get('clippedSlices', 0)}; slices below {silence:.0f} dB {silent}/{count}{pct}"
                      + ("; ALL BELOW THE SILENCE THRESHOLD" if st.get("allSilent") else ""))
+        # channels="separate": the same figures per channel of the first audio track.
+        for i, ch in enumerate(sl.get("perChannel") if isinstance(sl.get("perChannel"), list) else []):
+            if isinstance(ch, dict) and _is_num(ch.get("maxPeakDb")):
+                lines.append(f"  ch{i + 1}: peak max {_db(ch.get('maxPeakDb'))}; RMS mean {_db(ch.get('meanRmsDb'))}; "
+                             f"slices at full scale {ch.get('clippedSlices', 0)}")
         lines.append(f"  start: {_s3(st.get('headSilenceSeconds'))} below threshold, first window RMS "
                      f"{_db(st.get('headRmsDb'))} (peak {_db(st.get('headPeakDb'))}); end: "
                      f"{_s3(st.get('tailSilenceSeconds'))} below threshold, last window RMS "
@@ -5390,7 +5442,7 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     all are listed as skipped with the reason.
 
     Per clip: the source media file and where the clip lies in it, the sample rate and the
-    number of channels decoded (1 in the default mixdown), then per slice (`slice_ms`,
+    number of channels pooled (and of audio tracks, when the file has several), then per slice (`slice_ms`,
     default 50 ms; lengthened for a clip that would otherwise exceed `max_slices_per_clip`
     slices, so with the defaults any clip longer than 30 s gets longer slices; each clip's
     actual slice length is reported) the peak level and the RMS level in dBFS (0 = full
@@ -5423,14 +5475,19 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     retimed clip the levels and their times do not correspond to what FCP plays. `retimed`
     is FCP's own flag (`isRetimed` on 12.3; a frame-rate conform may set it too, which
     SpliceKit cannot tell from a speed change) and "unknown" when the clip object answers
-    none; check the clip's Retime state yourself before trusting a retimed clip's levels. By default every audio
-    track is mixed down to one mono channel before measuring, so a peak can read lower
-    than a single channel's own peak (channels are summed and scaled, and opposite-phase
-    content cancels) and a channel at full scale can go unreported. `channels="separate"`
-    decodes the first audio track's own channels (up to two) and adds a per-channel RMS
-    sparkline and, with `detail="full"`, per-channel arrays; the main peak is then the
-    loudest channel and the main RMS the mean power across channels (other audio tracks
-    of the file are not read in this mode).
+    none; check the clip's Retime state yourself before trusting a retimed clip's levels.
+    When the flag is set the note also compares the media file's video frame rate with the
+    project's: a file at another frame rate is rate-conformed by FCP (Rate Conform in the
+    Video inspector), which sets the flag by itself and keeps the file-to-timeline mapping.
+    Channels are pooled, never mixed: every audio track of the file is decoded at its own
+    channel count, a slice's peak is the loudest sample in any channel and its RMS is over
+    all channels' samples (the figures ffmpeg's volumedetect gives for the same range), so
+    a channel at full scale is never hidden by another. `channels="separate"` adds each
+    channel of the first audio track (up to eight): its peak max, RMS mean and full-scale
+    count, a per-channel RMS sparkline and, with `detail="full"`, per-channel arrays. A clip
+    whose line says mixdownMono fell back to the decoder's mono mixdown (no track decoded
+    at its own channel count), which reads up to 3 dB above the per-channel level when the
+    channels carry the same signal.
 
     Args:
         handle: one clip's handle (get_timeline_clips()).

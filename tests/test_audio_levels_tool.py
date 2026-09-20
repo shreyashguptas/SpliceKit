@@ -32,8 +32,9 @@ def _clip(handle, name, start, end, lane=0, connected=False, n=40, tail_silent=F
         "source": {"path": f"/Volumes/Media/{name}.mov", "fileName": f"{name}.mov", "representation": "original",
                    "fileStart": 3.0, "fileEnd": 3.0 + (end - start), "sourceStart": 3603.0, "mediaOrigin": 3600.0},
         "analysisRange": {"startSeconds": start, "endSeconds": end},
-        "audio": {"sampleRate": 48000, "channels": 1, "channelsMode": "mixdownMono", "audioTrackCount": 1,
-                  "fileDuration": 120.0, "sliceSeconds": slice_s, "sliceCount": n},
+        "audio": {"sampleRate": 48000, "channels": 2, "channelsMode": "pooled", "audioTrackCount": 1,
+                  "tracksDecoded": 1, "videoFrameRate": 24.0, "fileDuration": 120.0, "sliceSeconds": slice_s,
+                  "sliceCount": n},
         "stats": {"maxPeakDb": max(peak), "maxPeakAtSeconds": start + 0.5, "meanRmsDb": -18.5,
                   "clippedSlices": 1 if clipped else 0, "silentSlices": 6 if tail_silent else 0,
                   "allSilent": False, "headSilenceSeconds": 0.0,
@@ -218,8 +219,12 @@ class GetAudioLevelsTests(unittest.TestCase):
         self.assertIn("Slice requested 50 ms (each clip line shows its own)", text)
         self.assertIn("Clips considered: 5; analyzed: 3; skipped: 3; errors: 0.", text)
         self.assertIn('Clip obj_1 "Interview A"  primary storyline  0.000s-2.000s (2.000s)', text)
-        self.assertIn("source: Interview A.mov (original) file 3.000s-5.000s; 48000 Hz, 1 ch decoded (mixdownMono), "
+        self.assertIn("source: Interview A.mov (original) file 3.000s-5.000s; 48000 Hz, 2 ch pooled, "
                       "40 slices of 50 ms", text)
+        # channels are pooled, never mixed, and the header says what that means (QA run 3: the
+        # earlier mono mixdown read +3 dB on dual-mono files)
+        self.assertIn("Channels are pooled, not mixed: a slice's peak is the loudest sample in any channel", text)
+        self.assertNotIn("ch mixdownMono", text)     # no clip fell back to the mixdown
         self.assertIn("end: 0.300s below threshold, last window RMS -80.0 dB (peak -70.0 dB); window 100 ms", text)
         self.assertIn("slices at full scale (peak >= -0.1 dBFS) 1", text)
         self.assertIn('Clip obj_3 "Music"  lane -1 (connected clip)', text)
@@ -253,6 +258,34 @@ class GetAudioLevelsTests(unittest.TestCase):
         # the neighbour has no slices: exactly one sparkline pair, and the cut is still reported
         self.assertEqual(sum(1 for l in text.splitlines() if l.startswith("  RMS  ")), 1)
         self.assertIn("jump +60.0 dB", text)
+
+    def test_per_channel_figures_and_multi_track_pooling_are_rendered(self):
+        r = _response()
+        r["perChannel"] = True
+        clip = r["clips"][0]
+        clip["audio"].update({"channels": 4, "audioTrackCount": 2, "tracksDecoded": 2})
+        clip["slices"]["perChannel"] = [
+            {"peakDb": clip["slices"]["peakDb"], "rmsDb": clip["slices"]["rmsDb"],
+             "maxPeakDb": -8.0, "meanRmsDb": -18.5, "clippedSlices": 0},
+            {"peakDb": clip["slices"]["peakDb"], "rmsDb": clip["slices"]["rmsDb"],
+             "maxPeakDb": -11.0, "meanRmsDb": -21.5, "clippedSlices": 2},
+        ]
+        self.response = r
+        text = self._run(channels="separate", include_image=False)
+        self.assertIn("4 ch pooled over 2 of 2 audio tracks", text)
+        # the pooled summary line stays, and each channel gets its own figures (QA run 3, bug 3)
+        self.assertIn("peak max -8.0 dB at 0.500s; RMS mean -18.5 dB; slices at full scale (peak >= -0.1 dBFS) 0", text)
+        self.assertIn("ch1: peak max -8.0 dB; RMS mean -18.5 dB; slices at full scale 0", text)
+        self.assertIn("ch2: peak max -11.0 dB; RMS mean -21.5 dB; slices at full scale 2", text)
+        self.assertIn("ch2 RMS ", text)
+
+    def test_mixdown_fallback_is_named_with_its_caveat(self):
+        r = _response()
+        r["clips"][0]["audio"].update({"channels": 1, "channelsMode": "mixdownMono"})
+        self.response = r
+        text = self._run(include_image=False)
+        self.assertIn("1 ch mixdownMono (the decoder's mono mixdown, the fallback", text)
+        self.assertIn("reads up to 3 dB above the per-channel level when the channels carry the same signal", text)
 
     def test_errors_are_counted_separately_and_retimed_true_prints_the_note_once(self):
         bad = {"handle": "obj_7", "name": "Broken", "connected": False, "lane": 0, "startSeconds": 6.0,

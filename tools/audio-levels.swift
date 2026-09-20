@@ -13,6 +13,16 @@
 //  volume, fades, effects, retiming and the mix of all concurrent clips are not
 //  applied. -100 dB is the floor reported for a slice with no sample above 1e-5.
 //
+//  Channels are pooled, never mixed: every audio track is decoded at its own
+//  channel count, the peak of a slice is the loudest sample in any channel and
+//  its RMS is taken over all channels' samples (the figures ffmpeg's volumedetect
+//  reports for the same range). QA run 3 found the earlier mono mixdown reading
+//  3 dB above the per-channel level on dual-mono files (two channels carrying
+//  the same signal sum to +3 dB in a power-preserving mixdown), so no sample of
+//  one channel is added to another any more. The mixdown remains only as the
+//  fallback when no track decodes at its own channel count, and is named as
+//  such (channelsMode "mixdownMono").
+//
 //  Samples are sliced as they stream out of the reader, so memory stays at one
 //  slice plus one decoder buffer however long the range is.
 //
@@ -31,30 +41,40 @@ import Foundation
 
 let floorDb: Double = -100.0          // the floor: no sample above 1e-5
 let clipPeakLinear: Float = 0.98855   // -0.1 dBFS
+let maxTracks = 8                     // audio tracks decoded and pooled, at most
+let maxReportedChannels = 8           // channels of the first track reported separately, at most
 
 struct AudioLevelsResult: Codable {
     let filePath: String
     let fileDuration: Double
     let audioTrackCount: Int
+    let tracksDecoded: Int             // tracks pooled (all of them, capped at maxTracks; the mixdown counts them all)
     let sampleRate: Double
-    let channels: Int
-    let channelsMode: String           // "mixdownMono" or "perChannel"
+    let channels: Int                  // channels pooled over the decoded tracks (1 for the mixdown fallback)
+    let channelsMode: String           // "pooled" (no channel mixed with another) or "mixdownMono" (the fallback)
+    let videoFrameRate: Double?        // nominal frame rate of the file's first video track, when it has one
     let analysisRange: Range
     let sliceSeconds: Double
     let floorDb: Double
     let slices: Slices
-    let perChannel: [ChannelSlices]?
+    let perChannel: [ChannelSlices]?   // the first track's channels, with --per-channel
     let stats: Stats
 
     struct Range: Codable { let start: Double; let end: Double }
     struct Slices: Codable {
         let start: Double                // file time of the first slice
         let count: Int
-        let peakDb: [Double]             // per slice, max |sample| over all channels
-        let rmsDb: [Double]              // per slice, RMS over all channels
+        let peakDb: [Double]             // per slice, the loudest sample in any channel
+        let rmsDb: [Double]              // per slice, RMS over all channels' samples
         let clippedSliceIndices: [Int]   // slices whose peak reached -0.1 dBFS (at full scale; possible clipping); first 2000
     }
-    struct ChannelSlices: Codable { let peakDb: [Double]; let rmsDb: [Double] }
+    struct ChannelSlices: Codable {
+        let peakDb: [Double]
+        let rmsDb: [Double]
+        let maxPeakDb: Double
+        let meanRmsDb: Double            // power mean of the channel's slice RMS values
+        let clippedSlices: Int
+    }
     struct Stats: Codable {
         let maxPeakDb: Double
         let maxPeakAt: Double            // file time of the loudest slice
@@ -103,9 +123,10 @@ while i < cliArgs.count {
           --end <sec>          End of the analysed range (default: end of file)
           --slice <sec>        Slice length; peak and RMS are reported per slice (default: 0.05)
           --max-slices <n>     Lengthen the slice so at most n slices are reported (default: 4000)
-          --per-channel        Also report the first audio track's channels (up to two) separately
+          --per-channel        Also report each channel of the first audio track separately (up to eight)
 
-        Output: JSON to stdout with peak and RMS levels in dBFS per slice.
+        Output: JSON to stdout with peak and RMS levels in dBFS per slice, pooled over the
+        file's channels (peak: the loudest sample in any channel; RMS over all channels).
         """)
         exit(0)
     default:
@@ -141,6 +162,18 @@ guard !audioTracks.isEmpty else {
     exit(2)
 }
 
+// The video track's nominal frame rate, for the bridge's frame-rate-conform reading
+// (a media file whose frame rate differs from the project's is rate-conformed by FCP).
+let videoSemaphore = DispatchSemaphore(value: 0)
+var videoTracks: [AVAssetTrack] = []
+asset.loadTracks(withMediaType: .video) { tracks, _ in
+    videoTracks = tracks ?? []
+    videoSemaphore.signal()
+}
+videoSemaphore.wait()
+var videoFrameRate: Double = 0
+if let video = videoTracks.first { videoFrameRate = Double(video.nominalFrameRate) }
+
 let fileDuration = CMTimeGetSeconds(asset.duration)
 let rangeStart = max(0.0, startTime ?? 0.0)
 var rangeEnd = endTime ?? fileDuration
@@ -154,56 +187,60 @@ if rangeDuration / sliceSeconds > Double(maxSlices) {
     sliceSeconds = rangeDuration / Double(maxSlices)
 }
 
-// The first track's natural format: sample rate and channel count. formatDescriptions
-// is [Any] holding CMFormatDescription CF objects; Swift 6.4 rejects `as?` to a CF type
+// A track's natural format: sample rate and channel count. formatDescriptions is [Any]
+// holding CMFormatDescription CF objects; Swift 6.4 rejects `as?` to a CF type
 // ("conditional downcast ... will always succeed" is an error there), so the CF type ID
 // is compared and the reference bit-cast.
-var nativeRate: Double = 48000
-var nativeChannels: Int = 1
-if let fd = audioTracks[0].formatDescriptions.first,
-   CFGetTypeID(fd as CFTypeRef) == CMFormatDescriptionGetTypeID() {
-    let desc = unsafeBitCast(fd as AnyObject, to: CMFormatDescription.self)
-    if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
-        if asbd.mSampleRate > 0 { nativeRate = asbd.mSampleRate }
-        if asbd.mChannelsPerFrame > 0 { nativeChannels = Int(asbd.mChannelsPerFrame) }
+func nativeFormat(of track: AVAssetTrack) -> (rate: Double, channels: Int) {
+    var rate: Double = 0
+    var channels = 0
+    if let fd = track.formatDescriptions.first,
+       CFGetTypeID(fd as CFTypeRef) == CMFormatDescriptionGetTypeID() {
+        let desc = unsafeBitCast(fd as AnyObject, to: CMFormatDescription.self)
+        if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+            if asbd.mSampleRate > 0 { rate = asbd.mSampleRate }
+            if asbd.mChannelsPerFrame > 0 { channels = Int(asbd.mChannelsPerFrame) }
+        }
     }
+    return (rate, channels)
 }
+
+let firstFormat = nativeFormat(of: audioTracks[0])
+let nativeRate: Double = firstFormat.rate > 0 ? firstFormat.rate : 48000
+let rangeTimescale = Int32(max(1000, min(nativeRate, 192_000)))
+let analysisTimeRange = CMTimeRange(
+    start: CMTimeMakeWithSeconds(rangeStart, preferredTimescale: rangeTimescale),
+    end: CMTimeMakeWithSeconds(rangeEnd, preferredTimescale: rangeTimescale))
 
 // MARK: - Streaming analysis
 
-struct Analysis {
+/// Per-slice levels of one decoded stream, kept linear so streams can be pooled.
+struct TrackLevels {
     let sampleRate: Double
     let channels: Int
-    let mode: String
     let framesPerSlice: Int
     var framesTotal = 0
-    var peakDb = [Double]()
-    var rmsDb = [Double]()
-    var channelPeak: [[Double]]
-    var channelRms: [[Double]]
-    var maxPeak: Float = 0
-    var maxPeakSlice = 0
-    var meanSquareSum: Double = 0
-    var clipped = 0
-    var clippedIndices = [Int]()
+    var slicePeak = [Float]()            // per slice, the loudest sample in any channel
+    var sliceMeanSquare = [Double]()     // per slice, mean square over all channels' samples
+    var channelPeak: [[Float]]           // per channel, only when asked
+    var channelMeanSquare: [[Float]]
 
-    init(sampleRate: Double, channels: Int, mode: String, framesPerSlice: Int, perChannel: Bool) {
+    init(sampleRate: Double, channels: Int, framesPerSlice: Int, keepChannels: Bool) {
         self.sampleRate = sampleRate
         self.channels = channels
-        self.mode = mode
         self.framesPerSlice = framesPerSlice
-        let tracked = perChannel && channels > 1 ? channels : 0
-        channelPeak = [[Double]](repeating: [], count: tracked)
-        channelRms = [[Double]](repeating: [], count: tracked)
+        let tracked = keepChannels && channels > 1 ? min(channels, maxReportedChannels) : 0
+        channelPeak = [[Float]](repeating: [], count: tracked)
+        channelMeanSquare = [[Float]](repeating: [], count: tracked)
     }
 
-    var sliceCount: Int { peakDb.count }
+    var sliceCount: Int { slicePeak.count }
 
     /// One slice of `frames` interleaved frames starting at `base`.
     mutating func emit(_ base: UnsafePointer<Float>, frames: Int) {
         guard frames > 0 else { return }
-        var slicePeak: Float = 0
-        var sliceMeanSquare: Double = 0
+        var peakAll: Float = 0
+        var meanSquareAll: Double = 0
         for c in 0..<channels {
             let p = base + c
             var peak: Float = 0
@@ -211,81 +248,48 @@ struct Analysis {
             // Strided over the interleaved buffer: channel c of every frame in the slice.
             vDSP_maxmgv(p, vDSP_Stride(channels), &peak, vDSP_Length(frames))
             vDSP_measqv(p, vDSP_Stride(channels), &ms, vDSP_Length(frames))
-            if peak > slicePeak { slicePeak = peak }
-            sliceMeanSquare += Double(ms)
-            if !channelPeak.isEmpty {
-                channelPeak[c].append(round1(db(peak)))
-                channelRms[c].append(round1(db(sqrtf(ms))))
+            if peak > peakAll { peakAll = peak }
+            meanSquareAll += Double(ms)
+            if c < channelPeak.count {
+                channelPeak[c].append(peak)
+                channelMeanSquare[c].append(ms)
             }
         }
-        sliceMeanSquare /= Double(channels)
-        let s = peakDb.count
-        peakDb.append(round1(db(slicePeak)))
-        rmsDb.append(round1(db(Float(sliceMeanSquare.squareRoot()))))
-        if slicePeak > maxPeak { maxPeak = slicePeak; maxPeakSlice = s }
-        if slicePeak >= clipPeakLinear {
-            clipped += 1
-            if clippedIndices.count < 2000 { clippedIndices.append(s) }
-        }
-        meanSquareSum += sliceMeanSquare
+        slicePeak.append(peakAll)
+        sliceMeanSquare.append(meanSquareAll / Double(channels))
         framesTotal += frames
     }
 }
 
-/// Read the range with one reader and slice it as it streams. `channels == 1` uses the mono
-/// mixdown of every audio track (AVAssetReaderAudioMixOutput when there are several, else the
-/// silence-detector's proven track-output path); `channels > 1` keeps the first track's own
-/// channels.
-func analyze(channels: Int, sampleRate: Double) -> Analysis? {
-    let reader: AVAssetReader
-    do { reader = try AVAssetReader(asset: asset) } catch {
-        fputs("Error: creating AVAssetReader: \(error)\n", stderr)
-        return nil
-    }
-    let timescale = Int32(max(1000, min(sampleRate, 192_000)))
-    reader.timeRange = CMTimeRange(
-        start: CMTimeMakeWithSeconds(rangeStart, preferredTimescale: timescale),
-        end: CMTimeMakeWithSeconds(rangeEnd, preferredTimescale: timescale))
-
-    let settings: [String: Any] = [
-        AVFormatIDKey: kAudioFormatLinearPCM,
-        AVLinearPCMBitDepthKey: 32,
-        AVLinearPCMIsFloatKey: true,
-        AVLinearPCMIsBigEndianKey: false,
-        AVLinearPCMIsNonInterleaved: false,
-        AVSampleRateKey: sampleRate,
-        AVNumberOfChannelsKey: channels,
-    ]
-    let output: AVAssetReaderOutput
-    if channels == 1 && audioTracks.count > 1 {
-        let mix = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: settings)
-        mix.alwaysCopiesSampleData = false
-        output = mix
-    } else {
-        let track = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: settings)
-        track.alwaysCopiesSampleData = false
-        output = track
-    }
-    guard reader.canAdd(output) else {
-        fputs("note: reader cannot add output (channels=\(channels) rate=\(sampleRate))\n", stderr)
-        return nil
-    }
-    reader.add(output)
+/// Read `output` (already added to `reader`) and slice it as it streams. The channel
+/// count is what the reader really delivers, read from the first sample buffer's format
+/// description; `fallbackChannels` covers a buffer without one.
+func decode(reader: AVAssetReader, output: AVAssetReaderOutput, sampleRate: Double,
+            fallbackChannels: Int, keepChannels: Bool, label: String) -> TrackLevels? {
     guard reader.startReading() else {
-        fputs("note: reader did not start (channels=\(channels) rate=\(sampleRate)): \(reader.error?.localizedDescription ?? "unknown")\n", stderr)
+        fputs("note: reader did not start (\(label)): \(reader.error?.localizedDescription ?? "unknown")\n", stderr)
         return nil
     }
-
     let framesPerSlice = max(1, Int((sliceSeconds * sampleRate).rounded()))
-    let sliceSamples = framesPerSlice * channels
-    var analysis = Analysis(sampleRate: sampleRate, channels: channels,
-                            mode: channels == 1 ? "mixdownMono" : "perChannel",
-                            framesPerSlice: framesPerSlice, perChannel: perChannel)
+    var levels = TrackLevels(sampleRate: sampleRate, channels: max(1, fallbackChannels),
+                             framesPerSlice: framesPerSlice, keepChannels: keepChannels)
+    var formatChecked = false
     var carry = [Float]()
-    carry.reserveCapacity(2 * sliceSamples + 65_536)
+    carry.reserveCapacity(2 * framesPerSlice * levels.channels + 65_536)
 
     while let sampleBuffer = output.copyNextSampleBuffer() {
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+        if !formatChecked {
+            formatChecked = true
+            if let fd = CMSampleBufferGetFormatDescription(sampleBuffer),
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee,
+               asbd.mChannelsPerFrame > 0, Int(asbd.mChannelsPerFrame) != levels.channels {
+                // Nothing has been emitted yet: start over with the delivered channel count.
+                levels = TrackLevels(sampleRate: sampleRate, channels: Int(asbd.mChannelsPerFrame),
+                                     framesPerSlice: framesPerSlice, keepChannels: keepChannels)
+            }
+        }
+        let sliceSamples = framesPerSlice * levels.channels
         let length = CMBlockBufferGetDataLength(blockBuffer)
         let floatCount = length / MemoryLayout<Float>.size
         guard floatCount > 0 else { continue }
@@ -302,63 +306,220 @@ func analyze(channels: Int, sampleRate: Double) -> Analysis? {
         carry.withUnsafeBufferPointer { buf in
             guard let base = buf.baseAddress else { return }
             while carry.count - consumed >= sliceSamples {
-                analysis.emit(base + consumed, frames: framesPerSlice)
+                levels.emit(base + consumed, frames: framesPerSlice)
                 consumed += sliceSamples
             }
         }
         if consumed > 0 { carry.removeFirst(consumed) }
     }
     if reader.status == .failed {
-        fputs("Error: reader failed: \(reader.error?.localizedDescription ?? "unknown")\n", stderr)
+        fputs("note: reader failed (\(label)): \(reader.error?.localizedDescription ?? "unknown")\n", stderr)
         return nil
     }
     // The last, partial slice.
-    let remainingFrames = carry.count / channels
+    let remainingFrames = carry.count / levels.channels
     if remainingFrames > 0 {
         carry.withUnsafeBufferPointer { buf in
-            if let base = buf.baseAddress { analysis.emit(base, frames: remainingFrames) }
+            if let base = buf.baseAddress { levels.emit(base, frames: remainingFrames) }
         }
     }
-    return analysis
+    return levels
 }
 
-// Per-channel decoding first when asked (capped at two channels: a track output for more
-// channels needs a channel layout the helper does not pass), else the mono mixdown.
-var result: Analysis?
-if perChannel && nativeChannels > 1 {
-    result = analyze(channels: min(nativeChannels, 2), sampleRate: nativeRate)
-    if result == nil { fputs("note: per-channel decode failed, using the mono mixdown\n", stderr) }
+/// One decoded stream per audio track, each at the track's own channel count (no channel
+/// key in the output settings, so nothing is mixed), all at the first track's sample rate
+/// so the slices line up. At most `maxTracks` tracks.
+func decodeTracks(keepChannels: Bool) -> [TrackLevels] {
+    var out = [TrackLevels]()
+    for (index, track) in audioTracks.prefix(maxTracks).enumerated() {
+        let reader: AVAssetReader
+        do { reader = try AVAssetReader(asset: asset) } catch {
+            fputs("note: creating AVAssetReader for track \(index + 1): \(error)\n", stderr)
+            continue
+        }
+        reader.timeRange = analysisTimeRange
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVSampleRateKey: nativeRate,
+        ]
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else {
+            fputs("note: reader cannot add track \(index + 1)\n", stderr)
+            continue
+        }
+        reader.add(output)
+        let format = nativeFormat(of: track)
+        if let levels = decode(reader: reader, output: output, sampleRate: nativeRate,
+                               fallbackChannels: max(1, format.channels),
+                               keepChannels: keepChannels && index == 0, label: "track \(index + 1)") {
+            out.append(levels)
+        } else {
+            fputs("note: track \(index + 1) was not decoded\n", stderr)
+        }
+    }
+    if audioTracks.count > maxTracks {
+        fputs("note: \(audioTracks.count) audio tracks; only the first \(maxTracks) are pooled\n", stderr)
+    }
+    return out
 }
-if result == nil { result = analyze(channels: 1, sampleRate: nativeRate) }
-if result == nil && nativeRate != 44100 { result = analyze(channels: 1, sampleRate: 44100) }
-guard let audio = result else {
+
+/// The fallback: every audio track mixed down to one mono channel by AVFoundation
+/// (AVAssetReaderAudioMixOutput when there are several tracks). A power-preserving
+/// mixdown: two channels carrying the same signal read 3 dB above either channel alone.
+func decodeMixdown(sampleRate: Double) -> TrackLevels? {
+    let reader: AVAssetReader
+    do { reader = try AVAssetReader(asset: asset) } catch {
+        fputs("note: creating AVAssetReader for the mixdown: \(error)\n", stderr)
+        return nil
+    }
+    reader.timeRange = analysisTimeRange
+    let settings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVLinearPCMBitDepthKey: 32,
+        AVLinearPCMIsFloatKey: true,
+        AVLinearPCMIsBigEndianKey: false,
+        AVLinearPCMIsNonInterleaved: false,
+        AVSampleRateKey: sampleRate,
+        AVNumberOfChannelsKey: 1,
+    ]
+    let output: AVAssetReaderOutput
+    if audioTracks.count > 1 {
+        let mix = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: settings)
+        mix.alwaysCopiesSampleData = false
+        output = mix
+    } else {
+        let track = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: settings)
+        track.alwaysCopiesSampleData = false
+        output = track
+    }
+    guard reader.canAdd(output) else {
+        fputs("note: reader cannot add the mixdown output (rate=\(sampleRate))\n", stderr)
+        return nil
+    }
+    reader.add(output)
+    return decode(reader: reader, output: output, sampleRate: sampleRate, fallbackChannels: 1,
+                  keepChannels: false, label: "mixdown \(sampleRate) Hz")
+}
+
+/// Slices pooled over the decoded streams: peak = the loudest sample in any channel of any
+/// stream; mean square = over all channels' samples (each stream weighted by its channels).
+/// A stream shorter than the others simply drops out of the later slices.
+struct Pooled {
+    let sampleRate: Double
+    let framesPerSlice: Int
+    let framesTotal: Int
+    let channels: Int
+    let peak: [Float]
+    let meanSquare: [Double]
+}
+
+func pool(_ streams: [TrackLevels]) -> Pooled {
+    let count = streams.map { $0.sliceCount }.max() ?? 0
+    var peak = [Float](repeating: 0, count: count)
+    var meanSquare = [Double](repeating: 0, count: count)
+    for s in 0..<count {
+        var weight = 0
+        for stream in streams where s < stream.sliceCount {
+            if stream.slicePeak[s] > peak[s] { peak[s] = stream.slicePeak[s] }
+            meanSquare[s] += stream.sliceMeanSquare[s] * Double(stream.channels)
+            weight += stream.channels
+        }
+        if weight > 0 { meanSquare[s] /= Double(weight) }
+    }
+    return Pooled(sampleRate: streams[0].sampleRate,
+                  framesPerSlice: streams[0].framesPerSlice,
+                  framesTotal: streams.map { $0.framesTotal }.max() ?? 0,
+                  channels: streams.reduce(0) { $0 + $1.channels },
+                  peak: peak, meanSquare: meanSquare)
+}
+
+var channelsMode = "pooled"
+var streams = decodeTracks(keepChannels: perChannel)
+var tracksDecoded = streams.count
+if streams.isEmpty {
+    fputs("note: no audio track decoded at its own channel count; using the mono mixdown\n", stderr)
+    var mix = decodeMixdown(sampleRate: nativeRate)
+    if mix == nil && nativeRate != 44100 { mix = decodeMixdown(sampleRate: 44100) }
+    if let mixed = mix {
+        streams = [mixed]
+        channelsMode = "mixdownMono"
+        tracksDecoded = audioTracks.count
+    }
+}
+guard !streams.isEmpty else {
     fputs("Error: could not decode the audio of \(path)\n", stderr)
     exit(4)
 }
+let pooled = pool(streams)
 
 // MARK: - Output
 
-let effectiveSlice = Double(audio.framesPerSlice) / audio.sampleRate
-let sliceCount = audio.sliceCount
-let meanRms = sliceCount > 0 ? Float((audio.meanSquareSum / Double(sliceCount)).squareRoot()) : 0
+let sliceCount = pooled.peak.count
+var maxPeak: Float = 0
+var maxPeakSlice = 0
+var clipped = 0
+var clippedIndices = [Int]()
+var meanSquareSum: Double = 0
+for (s, p) in pooled.peak.enumerated() {
+    if p > maxPeak { maxPeak = p; maxPeakSlice = s }
+    if p >= clipPeakLinear {
+        clipped += 1
+        if clippedIndices.count < 2000 { clippedIndices.append(s) }
+    }
+    meanSquareSum += pooled.meanSquare[s]
+}
+let meanRms = sliceCount > 0 ? Float((meanSquareSum / Double(sliceCount)).squareRoot()) : 0
+let effectiveSlice = Double(pooled.framesPerSlice) / pooled.sampleRate
+
+var perChannelOut: [AudioLevelsResult.ChannelSlices]? = nil
+if perChannel, let first = streams.first, !first.channelPeak.isEmpty {
+    perChannelOut = (0..<first.channelPeak.count).map { (c: Int) -> AudioLevelsResult.ChannelSlices in
+        let peaks = first.channelPeak[c]
+        let meanSquares = first.channelMeanSquare[c]
+        var channelMax: Float = 0
+        var channelClipped = 0
+        var channelSum: Double = 0
+        for (s, p) in peaks.enumerated() {
+            if p > channelMax { channelMax = p }
+            if p >= clipPeakLinear { channelClipped += 1 }
+            channelSum += Double(meanSquares[s])
+        }
+        let channelMean = peaks.isEmpty ? Float(0) : Float((channelSum / Double(peaks.count)).squareRoot())
+        return AudioLevelsResult.ChannelSlices(
+            peakDb: peaks.map { round1(db($0)) },
+            rmsDb: meanSquares.map { round1(db(sqrtf($0))) },
+            maxPeakDb: round1(db(channelMax)),
+            meanRmsDb: round1(db(channelMean)),
+            clippedSlices: channelClipped)
+    }
+}
+
 let out = AudioLevelsResult(
     filePath: path,
     fileDuration: fileDuration.isFinite ? round1(fileDuration * 1000) / 1000 : 0,
     audioTrackCount: audioTracks.count,
-    sampleRate: audio.sampleRate,
-    channels: audio.channels,
-    channelsMode: audio.mode,
-    analysisRange: .init(start: rangeStart, end: rangeStart + Double(audio.framesTotal) / audio.sampleRate),
+    tracksDecoded: tracksDecoded,
+    sampleRate: pooled.sampleRate,
+    channels: pooled.channels,
+    channelsMode: channelsMode,
+    videoFrameRate: videoFrameRate > 0 ? videoFrameRate : nil,
+    analysisRange: .init(start: rangeStart, end: rangeStart + Double(pooled.framesTotal) / pooled.sampleRate),
     sliceSeconds: effectiveSlice,
     floorDb: floorDb,
-    slices: .init(start: rangeStart, count: sliceCount, peakDb: audio.peakDb, rmsDb: audio.rmsDb,
-                  clippedSliceIndices: audio.clippedIndices),
-    perChannel: audio.channelPeak.isEmpty ? nil
-        : (0..<audio.channels).map { .init(peakDb: audio.channelPeak[$0], rmsDb: audio.channelRms[$0]) },
-    stats: .init(maxPeakDb: round1(db(audio.maxPeak)),
-                 maxPeakAt: rangeStart + Double(audio.maxPeakSlice) * effectiveSlice,
+    slices: .init(start: rangeStart, count: sliceCount,
+                  peakDb: pooled.peak.map { round1(db($0)) },
+                  rmsDb: pooled.meanSquare.map { round1(db(Float($0.squareRoot()))) },
+                  clippedSliceIndices: clippedIndices),
+    perChannel: perChannelOut,
+    stats: .init(maxPeakDb: round1(db(maxPeak)),
+                 maxPeakAt: rangeStart + Double(maxPeakSlice) * effectiveSlice,
                  meanRmsDb: round1(db(meanRms)),
-                 clippedSlices: audio.clipped))
+                 clippedSlices: clipped))
 
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.sortedKeys]

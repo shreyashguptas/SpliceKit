@@ -575,15 +575,22 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
             NSDictionary *hs = [r[@"stats"] isKindOfClass:[NSDictionary class]] ? r[@"stats"] : @{};
             double maxPeakAtFile = SKAL_number(hs[@"maxPeakAt"], sliceFileStart);
 
-            entry[@"audio"] = @{
+            // channelsMode "pooled": the peak of a slice is the loudest sample in any channel and
+            // its RMS is over all channels' samples, no channel mixed with another (QA run 3: the
+            // decoder's mono mixdown read +3 dB on dual-mono files); "mixdownMono" is the fallback.
+            double mediaFps = SKAL_number(r[@"videoFrameRate"], 0.0);
+            NSMutableDictionary *audioOut = [@{
                 @"sampleRate": @(SKAL_number(r[@"sampleRate"], 0)),
                 @"channels": @((NSInteger)SKAL_number(r[@"channels"], 1)),
-                @"channelsMode": r[@"channelsMode"] ?: @"mixdownMono",
+                @"channelsMode": r[@"channelsMode"] ?: @"unknown",
                 @"audioTrackCount": @((NSInteger)SKAL_number(r[@"audioTrackCount"], 1)),
+                @"tracksDecoded": @((NSInteger)SKAL_number(r[@"tracksDecoded"], SKAL_number(r[@"audioTrackCount"], 1))),
                 @"fileDuration": @(SKAL_number(r[@"fileDuration"], 0)),
                 @"sliceSeconds": @(helperSlice),
                 @"sliceCount": @(n),
-            };
+            } mutableCopy];
+            if (mediaFps > 0) audioOut[@"videoFrameRate"] = @(mediaFps);
+            entry[@"audio"] = audioOut;
             if (includeSlices && !isNeighbor) {
                 NSMutableDictionary *sl = [NSMutableDictionary dictionary];
                 sl[@"startSeconds"] = SKAL_round3(timelineSliceStart);
@@ -613,13 +620,36 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 @"edgeSeconds": SKAL_round3((double)edgeSlices * helperSlice),
             };
             if ([entry[@"retimed"] isKindOfClass:[NSNumber class]] && [entry[@"retimed"] boolValue]) {
-                // The flag is FCP's; what it covers beyond a speed change (a frame-rate
-                // conform, for one) SpliceKit cannot tell, so the note says what was read.
-                [notes addObject:[NSString stringWithFormat:
-                    @"FCP's clip object answers %@ = true (a speed change, or possibly a frame-rate conform; SpliceKit "
-                    @"cannot tell which); the levels are mapped assuming normal speed (100%%), so for a clip that really "
-                    @"is retimed the levels and their times do not match what Final Cut Pro plays",
-                    entry[@"retimeSelector"] ?: @"its retime flag"]];
+                // The flag is FCP's; what it covers beyond a speed change SpliceKit cannot tell
+                // from the flag alone. What it can read: the media file's video frame rate
+                // (from the helper) against the project's. A file at another frame rate is
+                // rate-conformed by FCP (Video inspector: Rate Conform), which QA run 3 found
+                // sets isRetimed by itself on a 30 fps file in a 29.97 fps project; a conform
+                // keeps the file-to-timeline mapping (frames are repeated or dropped, the
+                // audio is not stretched).
+                NSString *flagName = entry[@"retimeSelector"] ?: @"its retime flag";
+                if (mediaFps > 0 && frameRate > 0 && fabs(mediaFps - frameRate) / frameRate > 1e-4) {
+                    [notes addObject:[NSString stringWithFormat:
+                        @"FCP's clip object answers %@ = true; the media file's video runs at %.3f fps in a %.3f fps "
+                        @"project, which FCP rate-conforms (Rate Conform in the Video inspector), and a frame-rate conform "
+                        @"sets this flag by itself; whether the clip is also retimed (a speed change) SpliceKit cannot "
+                        @"tell. The levels are mapped assuming normal speed (100%%): right for a conform alone, not for "
+                        @"a speed change",
+                        flagName, mediaFps, frameRate]];
+                } else if (mediaFps > 0 && frameRate > 0) {
+                    [notes addObject:[NSString stringWithFormat:
+                        @"FCP's clip object answers %@ = true, and the media file's video runs at the project's frame "
+                        @"rate (%.3f fps), so a frame-rate conform is not what set it: the clip is most likely retimed "
+                        @"(a speed change), and the levels, mapped assuming normal speed (100%%), then do not match what "
+                        @"Final Cut Pro plays",
+                        flagName, frameRate]];
+                } else {
+                    [notes addObject:[NSString stringWithFormat:
+                        @"FCP's clip object answers %@ = true (a speed change, or possibly a frame-rate conform; SpliceKit "
+                        @"cannot tell which); the levels are mapped assuming normal speed (100%%), so for a clip that really "
+                        @"is retimed the levels and their times do not match what Final Cut Pro plays",
+                        flagName]];
+                }
             }
             if (notes.count > 0) entry[@"note"] = [notes componentsJoinedByString:@" | "];
             analyzed++;

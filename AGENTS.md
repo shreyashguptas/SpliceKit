@@ -213,7 +213,10 @@ get_clip_info("obj_12")                   # Info inspector fields + (SpliceKit) 
 capture_clip_frame("obj_12")              # the clip as rendered in the Viewer (effects included); moves the playhead and restores it
 ```
 `get_clip_info` never moves the playhead: its frame is decoded from the source media file (no effects), and the
-tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so.
+tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so; a
+compound, multicam or synchronized clip (FCP: reference clip) has no single one, so `get_clip_info` reports no
+source file and no frame for it (`capture_clip_frame` shows it as the Viewer plays it) and `get_timeline_clips`
+marks it [reference clip].
 `kind`, handles and `timings` are SpliceKit bookkeeping, not FCP terms.
 
 `capture_viewer`, `capture_timeline` and `capture_inspector` return their PNG inline as MCP image content too
@@ -242,8 +245,12 @@ Not Final Cut Pro's audio meters (the mix during playback) and not its timeline 
 follow the clip's volume and effects): the levels are those of the source media file as decoded by
 SpliceKit's `audio-levels` helper (`tools/audio-levels.swift`, built by `make install`), so FCP's
 volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied, the same way
-`get_clip_info`'s frame is the raw footage. The mapping assumes normal speed (100%); `retimed` is
-FCP's own flag (`isRetimed`, which a frame-rate conform may also set) when the clip object answers
+`get_clip_info`'s frame is the raw footage. Channels are pooled, never mixed: a slice's peak is the
+loudest sample in any channel and its RMS is over all channels' samples (the figures ffmpeg's
+volumedetect gives; a clip line saying mixdownMono fell back to the decoder's mono mixdown, which
+reads up to 3 dB high on dual-mono files). The mapping assumes normal speed (100%); `retimed` is
+FCP's own flag (`isRetimed`, which a frame-rate conform also sets: the note compares the media
+file's frame rate with the project's to say when that explains it) when the clip object answers
 one, and "unknown" otherwise. The clip's start point in its source media is read from FCP's
 `clippedRange` (else `trimStartTime` / `trimmedOffset`) against the media's start timecode
 (`unclippedRange.start`), the same reading the transcript panel uses; when none answers, the levels start

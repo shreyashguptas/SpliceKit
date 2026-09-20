@@ -68,6 +68,52 @@ that this fork has removed.
   an unfinished install, and no longer swallows Ctrl-C after a menu.
 
 ### Fixed
+- **`get_clip_info` invented a source media file for a compound clip** (QA run 3, the surviving
+  half of run 2's compound-clip bug): for a compound, multicam or synchronized clip on the
+  timeline (FCP: reference clip) it named the first media file found inside, read the compound's
+  own inner range as that file's start timecode, and decoded frames from it, which at some times
+  showed footage the Viewer never plays there. The bridge now applies the same
+  `isCompoundClip` / `isReferenceClip` reading `get_audio_levels` uses (plus the nested-source
+  depth check): such a clip reports `containerKind`, no `sourceMedia`, no start point and no
+  frame, with a `sourceMediaError` / `frameError` saying why and pointing at
+  `capture_clip_frame`. Connected clips now carry the same `isReferenceClip` / `isCompound`
+  flags as spine items, `get_timeline_clips` marks them `[reference clip]` / `[compound clip]`
+  in its text with a one-line legend, and `tests/live_timeline_reads_check.py --clip-info-check`
+  now picks an ordinary clip first, checks a second frame at 80% into it (file time = file start
+  + offset; the midpoint alone had hidden the wrong mapping) and fails when a container clip is
+  given a source file or a media-file frame.
+- **`get_audio_levels` read 3 dB high on dual-mono files** (QA run 3: every figure exactly
+  +3.0 dB above ffmpeg's volumedetect on three files; a file whose true peak is -2.9 dBFS would
+  have been counted as at full scale). The helper decoded a mono mixdown, and AVFoundation's
+  mixdown is power-preserving, so two channels carrying the same signal summed to +3 dB. The
+  helper (`tools/audio-levels.swift`) now decodes every audio track at its own channel count and
+  pools the channels: a slice's peak is the loudest sample in any channel and its RMS is over all
+  channels' samples, the figures volumedetect gives for the same range (`channelsMode:
+  "pooled"`; files with several audio tracks are pooled over up to eight of them, each decoded
+  in turn). The mono mixdown remains only as the fallback when no track decodes that way, is
+  named `mixdownMono` in the answer with its +3 dB caveat, and the header now says how channels
+  are treated. `channels="separate"` now reports each channel of the first track (up to eight,
+  no longer two) with its own peak max, RMS mean and full-scale count next to the pooled line;
+  the QA report's "summary line missing in separate mode" could not be reproduced offline (the
+  renderer prints it unconditionally), so this round adds the per-channel figures instead.
+- **`get_audio_levels` can now say when a frame-rate conform explains the retime flag.** The
+  helper reports the media file's video frame rate; when FCP's `isRetimed` is true and that rate
+  differs from the project's, the note says the file is rate-conformed (FCP's Rate Conform),
+  that a conform sets the flag by itself and keeps the mapping, and that a speed change on top of
+  it cannot be told apart; when the rates match, that a conform is not the reason and the clip is
+  most likely retimed. QA run 3 established the case: a 30 fps .mp4 in a 29.97 fps project
+  answered `isRetimed` = true at 100% speed, both 29.97 fps .mov files answered false.
+- **A trim inside a `begin_edit` group logged no `[Trim]` line** (QA run 3); one line per trim
+  now, naming the group, its own closed undo step, or why none could be opened.
+- **The pending-dialog note named the Compound Clip Name sheet "Window"** (QA run 3): AppKit's
+  placeholder title. `detect_dialog` and the `dialogPending` note now carry a `summary` built
+  from the sheet's field labels ("sheet with the fields Compound Clip Name: / In Event: /
+  Starting Timecode:") when the title is a placeholder.
+- **`list_menus` could not show a validated title such as Edit > "Undo Trim"** (QA run 3): it
+  read the static titles. `list_menus(validate=True)` (RPC `menu.list` `validate`) now runs
+  each listed menu's validation first, what AppKit does when the menu opens, so titles set on
+  validation and the enabled states are current. Off by default. Not yet run against a live
+  Final Cut Pro.
 - **`get_audio_levels` skipped every clip whose media file carries a start timecode** ("the
   clip lies entirely before the start of its media file"; QA run 2: three of five clips, the
   ones with audio). The clip's start point in its source media was read from

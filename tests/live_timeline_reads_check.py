@@ -33,7 +33,10 @@ and prints, without changing the timeline:
      transcript status + word count and the frame (written to
      /tmp/splicekit_clip_info_frame.jpg so a human can look at it). FAIL when the
      response errors or reports neither sourceMedia nor sourceMediaError; a frameError
-     is a WARN, not a FAIL.
+     is a WARN, not a FAIL. Then a second frame at 80% into the clip (its file time must
+     be fileStart + offset) and, when the primary storyline holds a compound / reference
+     clip, getClipInfo on it: FAIL when a source media file or a media-file frame is
+     reported for it (QA run 3: the first file inside a compound was served as its source).
   7. Optional --viewer-frame-check (CHANGES STATE: moves the playhead, restored):
      timeline.captureClipFrame on that clip, verifies playheadRestored and that the
      playhead really is back, writes /tmp/splicekit_clip_viewer_frame.jpg.
@@ -606,15 +609,95 @@ CLIP_INFO_FRAME_PATH = "/tmp/splicekit_clip_info_frame.jpg"
 VIEWER_FRAME_PATH = "/tmp/splicekit_clip_viewer_frame.jpg"
 
 
+def _is_container_clip(c):
+    """A compound, multicam or synchronized clip on the timeline (FCP: reference clip)."""
+    return bool(c.get("isReferenceClip") or c.get("isCompound"))
+
+
+def _container_clips(st):
+    return [c for c in _spine_clips(st) if _is_container_clip(c)]
+
+
 def _first_media_clip(st):
-    """First spine clip that is a video or audio clip (not a gap, generator or title)."""
+    """First spine clip that is a video or audio clip (not a gap, generator or title): an
+    ordinary clip before a compound / reference clip, which has no single source file."""
+    container = None
     for c in _spine_clips(st):
         cls = str(c.get("class", ""))
         if "Gap" in cls or "Generator" in cls or "Title" in cls:
             continue
         if c.get("hasVideo") or c.get("hasAudio") or "MediaComponent" in cls:
+            if _is_container_clip(c):
+                container = container or c
+                continue
             return c
-    return None
+    return container
+
+
+def _clip_info_frame_at(c, s0, e0, sm):
+    """A second frame at 80% into the clip: the requested time must come back and the file
+    time must move with it (QA run 3: the midpoint alone hid a wrong mapping)."""
+    t = round(s0 + 0.8 * (e0 - s0), 3)
+    r = rpc("timeline.getClipInfo", {"handle": c["handle"], "frameTime": t, "includeTranscript": False,
+                                     "includeEffects": False, "includeMarkers": False}, timeout=60)
+    if "error" in r:
+        print(f"FAIL  getClipInfo frameTime={t}: {r['error']}")
+        return 1, 0
+    frame = r.get("frame")
+    if not isinstance(frame, dict):
+        print(f"WARN  no frame at frameTime={t}: {r.get('frameError')}")
+        return 0, 1
+    fails = 0
+    tt = frame.get("timelineTime")
+    if not isinstance(tt, (int, float)) or abs(tt - t) > 0.01:
+        fails += 1
+        print(f"FAIL  frame asked at {t:.3f}s came back for timelineTime={tt}")
+    file_time = frame.get("fileTime")
+    if (isinstance(sm, dict) and sm.get("sourceStartKnown") is not False
+            and isinstance(sm.get("fileStart"), (int, float)) and isinstance(file_time, (int, float))
+            and not frame.get("frameTimeClamped")):
+        expected = sm["fileStart"] + (t - s0)
+        if abs(file_time - expected) > 0.01:
+            fails += 1
+            print(f"FAIL  file time {file_time:.3f}s at timeline {t:.3f}s; expected fileStart + offset = {expected:.3f}s")
+        else:
+            print(f"OK    frame at {t:.3f}s maps to file {file_time:.3f}s (fileStart {sm['fileStart']} + {t - s0:.3f})")
+    else:
+        print(f"OK    frame at {t:.3f}s: timelineTime={tt} fileTime={file_time}")
+    return fails, 0
+
+
+def _clip_info_container_check(c):
+    """A compound / multicam / synchronized clip (FCP: reference clip) has no single source
+    media file: getClipInfo must say so and must not decode a frame from one (QA run 3 saw
+    the first file inside the compound presented as its source, with frames from the wrong
+    footage)."""
+    r = rpc("timeline.getClipInfo", {"handle": c["handle"], "includeTranscript": False,
+                                     "includeEffects": False, "includeMarkers": False}, timeout=60)
+    if "error" in r:
+        print(f"FAIL  getClipInfo on the container {c.get('handle')}: {r['error']}")
+        return 1
+    fails = 0
+    print(f"container: {c.get('name')!r} handle={c.get('handle')} class={c.get('class')} kind={r.get('kind')!r} "
+          f"containerKind={r.get('containerKind')!r} isReferenceClip={r.get('isReferenceClip')} "
+          f"isCompound={r.get('isCompound')}")
+    if isinstance(r.get("sourceMedia"), dict):
+        fails += 1
+        print(f"FAIL  a source media file is reported for a container clip: {r['sourceMedia'].get('path')}")
+    elif "no single source media file" in str(r.get("sourceMediaError", "")):
+        print(f"OK    {str(r['sourceMediaError'])[:150]}")
+    else:
+        fails += 1
+        print(f"FAIL  expected sourceMediaError saying 'no single source media file', got {r.get('sourceMediaError')!r}")
+    if isinstance(r.get("frame"), dict):
+        fails += 1
+        print("FAIL  a frame was decoded from a media file for a container clip")
+    else:
+        print(f"OK    no media-file frame: {str(r.get('frameError', ''))[:120]}")
+    if not r.get("containerKind"):
+        fails += 1
+        print("FAIL  containerKind missing: the bridge did not classify the clip as a container")
+    return fails
 
 
 def _write_frame(frame, path):
@@ -804,6 +887,16 @@ def clip_info_check(st):
     else:
         print("frame: (not requested)")
     print(f"timings={json.dumps(r.get('timings'))}")
+
+    if not _is_container_clip(c):
+        f2, w2 = _clip_info_frame_at(c, s0, e0, sm)
+        fails += f2
+        warns += w2
+    containers = _container_clips(st)
+    if containers:
+        fails += _clip_info_container_check(containers[0])
+    else:
+        print("INFO  no compound / reference clip on the primary storyline: the container refusal is not exercised")
 
     pos_after = rpc("playback.getPosition").get("seconds")
     if isinstance(pos_before, (int, float)) and isinstance(pos_after, (int, float)):

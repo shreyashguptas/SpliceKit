@@ -185,6 +185,21 @@ class TimelineReadToolTests(unittest.TestCase):
         # Parent column still points at the spine index the chain hangs from
         self.assertIn(" 1 ", nested_row)
 
+    def test_get_timeline_clips_marks_reference_and_compound_clips(self):
+        state = _detailed_state()
+        state["items"][0]["isReferenceClip"] = True
+        state["connectedItems"][0]["isCompound"] = True
+        self._install_bridge(lambda method, params: state)
+        out = self.module.get_timeline_clips()
+        spine_line = next(l for l in out.splitlines() if l.startswith("0 ") and "FFAnchored" in l)
+        self.assertTrue(spine_line.rstrip().endswith("[reference clip]"), spine_line)
+        self.assertIn("[compound clip]", out)
+        self.assertIn("[reference clip] = a compound, multicam or synchronized clip", out)
+        self.assertIn("get_clip_info reports no single source media file for it and get_audio_levels skips it", out)
+        # no legend when nothing is a container
+        self._install_bridge(lambda method, params: _detailed_state())
+        self.assertNotIn("[reference clip]", self.module.get_timeline_clips())
+
     def test_get_timeline_clips_prints_walk_errors_as_warnings(self):
         def responder(method, params):
             state = _detailed_state()

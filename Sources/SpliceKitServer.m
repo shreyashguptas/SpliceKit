@@ -1627,6 +1627,10 @@ static void SpliceKit_collectConnectedItems(id item,
             info[@"isConnectedStoryline"] = @(isConnectedStoryline);
             info[@"isGap"] = @([cls containsString:@"Gap"]);
             info[@"isTransition"] = @([cls containsString:@"Transition"]);
+            // The same container flags the spine items carry (FCP's isCompoundClip / isReferenceClip).
+            NSString *childContainerKind = SpliceKit_itemContainerKind(child);
+            if ([childContainerKind isEqualToString:@"compound clip"]) info[@"isCompound"] = @YES;
+            if ([childContainerKind isEqualToString:@"reference clip"]) info[@"isReferenceClip"] = @YES;
 
             BOOL enabledFlag = NO;
             if (SpliceKit_tryReadBoolSelector(child, @"isEnabled", &enabledFlag) ||
@@ -3513,11 +3517,13 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
     NSMutableDictionary *out = [result mutableCopy];
     out[@"dialogPending"] = @YES;
     out[@"dialog"] = dialog;
-    NSString *title = [dialog[@"title"] isKindOfClass:[NSString class]] ? dialog[@"title"] : @"";
+    NSString *title = [dialog[@"summary"] isKindOfClass:[NSString class]] && [dialog[@"summary"] length] > 0
+        ? dialog[@"summary"]
+        : ([dialog[@"title"] isKindOfClass:[NSString class]] ? dialog[@"title"] : @"");
     out[@"note"] = [NSString stringWithFormat:
         @"Final Cut Pro has a %@ open%@ after this action; nothing changes on the timeline until it is answered. "
         @"detect_dialog() shows its fields and buttons; fill_dialog_field / click_dialog_button / dismiss_dialog answer it.",
-        dialog[@"type"], title.length ? [NSString stringWithFormat:@" (\"%@\")", title] : @""];
+        dialog[@"type"], title.length ? [NSString stringWithFormat:@" (%@)", title] : @""];
     SpliceKit_log(@"[Action] %@: a %@ is open afterwards (%@)", action, dialog[@"type"], title);
     return out;
 }
@@ -7582,10 +7588,18 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                     undoStepError = e.reason ?: @"actionEnd:save:error: raised an exception";
                 }
                 if (undoEndErr) undoStepError = undoEndErr.localizedDescription ?: [undoEndErr description];
-                SpliceKit_log(@"[Trim] %@ %@ edge %+.4fs: operationTrimEdit %@; undo step \"%@\" closed%@",
-                              handle, edge, delta, ok ? @"OK" : @"failed", undoStepName,
-                              undoStepError ? [NSString stringWithFormat:@" with error: %@", undoStepError] : @"");
             }
+            // One log line per trim whichever undo step covers it (QA run 3: a trim inside
+            // a begin_edit group left no [Trim] line, only the group's).
+            NSString *undoStepLog = openedUndoStep
+                ? [NSString stringWithFormat:@"undo step \"%@\" closed%@", undoStepName,
+                   undoStepError ? [NSString stringWithFormat:@" with error: %@", undoStepError] : @""]
+                : (sOpenEditGroupName
+                   ? [NSString stringWithFormat:@"inside the open begin_edit group \"%@\"", sOpenEditGroupName]
+                   : [NSString stringWithFormat:@"no undo step of its own (%@)", undoStepUnavailable ?: @"unknown reason"]);
+            SpliceKit_log(@"[Trim] %@ %@ edge %+.4fs: operationTrimEdit %@%@; %@",
+                          handle, edge, delta, ok ? @"OK" : @"failed",
+                          invokeError ? [NSString stringWithFormat:@" (%@)", invokeError] : @"", undoStepLog);
 
             // Re-read the clip's absolute range and judge the result by its duration.
             SpliceKit_CMTimeRange afterRange;
@@ -8282,6 +8296,8 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
     __block BOOL sourceStartKnown = NO;
     __block BOOL haveRange = NO;
     __block BOOL sourceExists = NO;
+    __block NSString *noSingleSourceOut = nil;        // why no source media file is reported (set below)
+    __block NSString *noSingleSourceFrameOut = nil;   // the same, worded for the frame
 
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -8372,11 +8388,52 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
 
             // The object that carries the source media (the item itself for a
             // plain clip; the first media component inside a collection).
-            id mediaComp = SpliceKit_clipInfoMediaComponent(item);
+            int mediaDepth = -1;
+            id mediaComp = SpliceKit_clipInfoMediaComponentWithDepth(item, &mediaDepth);
             NSMutableArray *probeTargets = [NSMutableArray arrayWithObject:item];
             if (mediaComp && mediaComp != item) [probeTargets addObject:mediaComp];
             if (mediaComp && mediaComp != item) {
                 local[@"mediaComponentClass"] = NSStringFromClass([mediaComp class]) ?: @"";
+                local[@"mediaComponentDepth"] = @(mediaDepth);
+            }
+
+            // A compound, multicam or synchronized clip on the timeline (FCP: reference
+            // clip; isCompoundClip / isReferenceClip answer YES) has no single source
+            // media file: its contents are clips of their own. QA run 3: the first file
+            // found inside one was presented as the clip's source, the compound's own
+            // range was read as the media origin, and the frame came from the wrong
+            // footage. The same holds when the first media file sits two or more
+            // containers down. No source file and no frame are reported for these;
+            // timeline.captureClipFrame renders them from the Viewer.
+            NSString *containerKind = SpliceKit_itemContainerKind(item);
+            if (!containerKind && SpliceKit_itemIsMulticamClip(item)) containerKind = @"multicam clip";
+            if ([containerKind isEqualToString:@"compound clip"]) local[@"isCompound"] = @YES;
+            if ([containerKind isEqualToString:@"reference clip"]) local[@"isReferenceClip"] = @YES;
+            if (containerKind) local[@"containerKind"] = containerKind;
+            NSString *noSingleSource = nil;
+            if (containerKind) {
+                noSingleSource = [NSString stringWithFormat:
+                    @"no single source media file: this is a %@, whose contents are clips of their own, each with "
+                    @"its own media file (Final Cut Pro opens it in its own timeline: select it and "
+                    @"timeline_action(\"openClip\")); timeline.captureClipFrame renders it as the Viewer plays it",
+                    containerKind];
+            } else if (mediaDepth >= 2) {
+                noSingleSource = [NSString stringWithFormat:
+                    @"no single source media file: the first media file inside this clip was found %d levels down "
+                    @"inside nested containers, and nothing says which part of this clip that file is; "
+                    @"timeline.captureClipFrame renders it as the Viewer plays it",
+                    mediaDepth];
+            }
+            noSingleSourceOut = noSingleSource;
+            if (containerKind) {
+                noSingleSourceFrameOut = [NSString stringWithFormat:
+                    @"no single source media file to decode a frame from: this is a %@ whose contents are clips "
+                    @"of their own; timeline.captureClipFrame renders it as the Viewer plays it", containerKind];
+            } else if (noSingleSource) {
+                noSingleSourceFrameOut = [NSString stringWithFormat:
+                    @"no single source media file to decode a frame from: the first media file inside this clip sits "
+                    @"%d levels down inside nested containers; timeline.captureClipFrame renders it as the Viewer plays it",
+                    mediaDepth];
             }
 
             // Notes (Info inspector: Notes). Unverified selectors, guarded.
@@ -8386,34 +8443,43 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 if (note.length > 0) { local[@"notes"] = note; break; }
             }
 
-            // Source media file.
+            // Source media file (not looked up for a container: see above).
             NSString *representation = nil;
             NSString *urlSource = nil;
-            NSURL *mediaURL = SpliceKit_clipInfoMediaURL(mediaComp ?: item, &representation, &urlSource);
-            if (!mediaURL && mediaComp && mediaComp != item) {
-                mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
+            NSURL *mediaURL = nil;
+            if (!noSingleSource) {
+                mediaURL = SpliceKit_clipInfoMediaURL(mediaComp ?: item, &representation, &urlSource);
+                if (!mediaURL && mediaComp && mediaComp != item) {
+                    mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
+                }
             }
 
             // Source start point (clippedRange.start, else trimStartTime, else trimmedOffset;
             // see SpliceKit_readSourceStart) and where the source media starts
-            // (unclippedRange.start, media component first).
+            // (unclippedRange.start, media component first). Not read for a container:
+            // its clippedRange / unclippedRange describe its own inner timeline.
             SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
             NSString *sourceStartSelector = @"none";
-            BOOL haveSourceStart = SpliceKit_readSourceStart(probeTargets, &sourceStart, &sourceStartSelector);
+            BOOL haveSourceStart = noSingleSource ? NO
+                : SpliceKit_readSourceStart(probeTargets, &sourceStart, &sourceStartSelector);
             sourceStartKnown = haveSourceStart;
             sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
             SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *mediaOriginSelector = @"none";
             mediaOriginSeconds = 0.0;
-            for (id target in [[probeTargets reverseObjectEnumerator] allObjects]) {
-                if (SpliceKit_tryReadCMTimeRangeSelector(target, @"unclippedRange", &unclipped)) {
-                    mediaOriginSelector = @"unclippedRange";
-                    mediaOriginSeconds = SpliceKit_secondsFromTime(unclipped.start);
-                    break;
+            if (!noSingleSource) {
+                for (id target in [[probeTargets reverseObjectEnumerator] allObjects]) {
+                    if (SpliceKit_tryReadCMTimeRangeSelector(target, @"unclippedRange", &unclipped)) {
+                        mediaOriginSelector = @"unclippedRange";
+                        mediaOriginSeconds = SpliceKit_secondsFromTime(unclipped.start);
+                        break;
+                    }
                 }
             }
 
-            if (mediaURL) {
+            if (noSingleSource) {
+                local[@"sourceMediaError"] = noSingleSource;
+            } else if (mediaURL) {
                 frameURL = mediaURL;
                 NSString *path = mediaURL.path ?: (mediaURL.absoluteString ?: @"");
                 BOOL exists = path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:path];
@@ -8526,7 +8592,8 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
         if (clamped) request[@"frameTimeClamped"] = @YES;
 
         if (!frameURL) {
-            info[@"frameError"] = @"no source media file to read a frame from (title, generator or gap clip); use timeline.captureClipFrame for the Viewer";
+            info[@"frameError"] = noSingleSourceFrameOut
+                ?: @"no source media file to read a frame from (title, generator or gap clip); use timeline.captureClipFrame for the Viewer";
             info[@"frameRequest"] = request;
         } else {
             NSString *frameError = nil;
@@ -17737,6 +17804,10 @@ NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params) {
 static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
     NSString *menuName = params[@"menu"]; // optional: specific top-level menu
     NSNumber *depth = params[@"depth"] ?: @(2);
+    // validate: run each listed menu's validation first (-[NSMenu update], what AppKit
+    // does when the menu opens), so titles set on validation (Edit > Undo <name>) and
+    // the enabled states are current. Off by default: it validates every listed item.
+    BOOL validate = [params[@"validate"] respondsToSelector:@selector(boolValue)] && [params[@"validate"] boolValue];
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -17754,6 +17825,9 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
             __block id (^buildMenu)(NSMenu *, int);
             weakBuildMenu = buildMenu = ^id(NSMenu *menu, int maxDepth) {
                 NSMutableArray *items = [NSMutableArray array];
+                if (validate) {
+                    @try { [menu update]; } @catch (NSException *e) {}
+                }
                 for (NSInteger i = 0; i < [menu numberOfItems]; i++) {
                     NSMenuItem *item = [menu itemAtIndex:i];
                     if ([item isSeparatorItem]) continue;
@@ -17791,14 +17865,15 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
                 for (NSInteger i = 0; i < [mainMenu numberOfItems]; i++) {
                     NSMenuItem *item = [mainMenu itemAtIndex:i];
                     if ([[item title] caseInsensitiveCompare:menuName] == NSOrderedSame && [item hasSubmenu]) {
-                        result = @{@"menu": menuName, @"items": buildMenu([item submenu], depth.intValue)};
+                        result = @{@"menu": menuName, @"items": buildMenu([item submenu], depth.intValue),
+                                   @"validated": @(validate)};
                         return;
                     }
                 }
                 result = @{@"error": [NSString stringWithFormat:@"Menu '%@' not found", menuName]};
             } else {
                 // List all top-level menus
-                result = @{@"menus": buildMenu(mainMenu, depth.intValue)};
+                result = @{@"menus": buildMenu(mainMenu, depth.intValue), @"validated": @(validate)};
             }
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
@@ -23771,6 +23846,34 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
     info[@"labels"] = labels;
     info[@"checkboxes"] = checkboxes;
     info[@"popups"] = popups;
+
+    // A name for the dialog when its title is a placeholder (QA run 3: the Compound Clip
+    // Name sheet is titled "Window"): the labels of its fields, else its buttons.
+    NSString *title = info[@"title"];
+    NSString *summary = title;
+    if (title.length == 0 || [title isEqualToString:@"Window"] || [title isEqualToString:@"Untitled"]
+        || [title isEqualToString:@"Panel"]) {
+        NSString *what = [window isSheet] ? @"sheet" : @"dialog";
+        NSMutableArray *texts = [NSMutableArray array];
+        for (NSDictionary *label in labels) {
+            NSString *t = label[@"text"];
+            if ([t isKindOfClass:[NSString class]] && t.length > 0) [texts addObject:t];
+            if (texts.count >= 3) break;
+        }
+        if (texts.count > 0) {
+            summary = [NSString stringWithFormat:@"%@ with the fields %@", what, [texts componentsJoinedByString:@" / "]];
+        } else {
+            for (NSDictionary *button in buttons) {
+                NSString *t = button[@"title"];
+                if ([t isKindOfClass:[NSString class]] && t.length > 0) [texts addObject:t];
+                if (texts.count >= 3) break;
+            }
+            summary = texts.count > 0
+                ? [NSString stringWithFormat:@"%@ with the buttons %@", what, [texts componentsJoinedByString:@" / "]]
+                : [NSString stringWithFormat:@"%@ (%@)", what, NSStringFromClass([window class])];
+        }
+    }
+    info[@"summary"] = summary ?: @"";
 
     return info;
 }
