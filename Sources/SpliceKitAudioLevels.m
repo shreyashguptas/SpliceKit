@@ -630,18 +630,18 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
                 NSString *flagName = entry[@"retimeSelector"] ?: @"its retime flag";
                 if (mediaFps > 0 && frameRate > 0 && fabs(mediaFps - frameRate) / frameRate > 1e-4) {
                     [notes addObject:[NSString stringWithFormat:
-                        @"FCP's clip object answers %@ = true; the media file's video runs at %.3f fps in a %.3f fps "
-                        @"project, which FCP rate-conforms (Rate Conform in the Video inspector), and a frame-rate conform "
-                        @"sets this flag by itself; whether the clip is also retimed (a speed change) SpliceKit cannot "
-                        @"tell. The levels are mapped assuming normal speed (100%%): right for a conform alone, not for "
-                        @"a speed change",
+                        @"FCP's clip object answers %@ = true; the media file's video is nominally %.3f fps in a %.3f fps "
+                        @"project, which FCP rate-conforms (Rate Conform in the Video inspector); a frame-rate conform on "
+                        @"its own can set this flag (seen on 12.3 with a 30 fps file in a 29.97 fps project); whether the "
+                        @"clip is also retimed (a speed change) SpliceKit cannot tell. The levels are mapped assuming normal "
+                        @"speed (100%%): right for a conform alone, not for a speed change",
                         flagName, mediaFps, frameRate]];
                 } else if (mediaFps > 0 && frameRate > 0) {
                     [notes addObject:[NSString stringWithFormat:
-                        @"FCP's clip object answers %@ = true, and the media file's video runs at the project's frame "
-                        @"rate (%.3f fps), so a frame-rate conform is not what set it: the clip is most likely retimed "
-                        @"(a speed change), and the levels, mapped assuming normal speed (100%%), then do not match what "
-                        @"Final Cut Pro plays",
+                        @"FCP's clip object answers %@ = true, and the media file's nominal video frame rate matches the "
+                        @"project's (%.3f fps), so a frame-rate conform is unlikely to be what set it: the clip is most "
+                        @"likely retimed (a speed change), and the levels, mapped assuming normal speed (100%%), then do "
+                        @"not match what Final Cut Pro plays",
                         flagName, frameRate]];
                 } else {
                     [notes addObject:[NSString stringWithFormat:

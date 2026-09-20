@@ -69,8 +69,9 @@ that this fork has removed.
 
 ### Fixed
 - **`get_clip_info` invented a source media file for a compound clip** (QA run 3, the surviving
-  half of run 2's compound-clip bug): for a compound, multicam or synchronized clip on the
-  timeline (FCP: reference clip) it named the first media file found inside, read the compound's
+  half of run 2's compound-clip bug): for a compound clip on the timeline (FCP: reference clip,
+  its `isReferenceClip` flag; a multicam or synchronized clip answers the same flag) it named the
+  first media file found inside, read the compound's
   own inner range as that file's start timecode, and decoded frames from it, which at some times
   showed footage the Viewer never plays there. The bridge now applies the same
   `isCompoundClip` / `isReferenceClip` reading `get_audio_levels` uses (plus the nested-source
@@ -79,18 +80,21 @@ that this fork has removed.
   `capture_clip_frame`. Connected clips now carry the same `isReferenceClip` / `isCompound`
   flags as spine items, `get_timeline_clips` marks them `[reference clip]` / `[compound clip]`
   in its text with a one-line legend, and `tests/live_timeline_reads_check.py --clip-info-check`
-  now picks an ordinary clip first, checks a second frame at 80% into it (file time = file start
-  + offset; the midpoint alone had hidden the wrong mapping) and fails when a container clip is
-  given a source file or a media-file frame.
+  now picks an ordinary clip first, checks a second frame at 80% into it (the requested time, the
+  file time and the decoder's actual time must agree) and fails when a container clip is given a
+  source file or a media-file frame.
 - **`get_audio_levels` read 3 dB high on dual-mono files** (QA run 3: every figure exactly
   +3.0 dB above ffmpeg's volumedetect on three files; a file whose true peak is -2.9 dBFS would
-  have been counted as at full scale). The helper decoded a mono mixdown, and AVFoundation's
-  mixdown is power-preserving, so two channels carrying the same signal summed to +3 dB. The
-  helper (`tools/audio-levels.swift`) now decodes every audio track at its own channel count and
-  pools the channels: a slice's peak is the loudest sample in any channel and its RMS is over all
-  channels' samples, the figures volumedetect gives for the same range (`channelsMode:
-  "pooled"`; files with several audio tracks are pooled over up to eight of them, each decoded
-  in turn). The mono mixdown remains only as the fallback when no track decodes that way, is
+  have been counted as at full scale). The helper decoded a mono mixdown; an exact +3.0 dB is
+  what a power-preserving mixdown gives for two channels carrying the same signal. The helper
+  (`tools/audio-levels.swift`) now decodes up to eight audio tracks, each at its own channel
+  count, and pools the channels: a slice's peak is the loudest sample in any channel and its RMS
+  is over all channels' samples, by construction the figures volumedetect gives for the same range
+  of a file with one audio track (not yet re-measured against ffmpeg on a Mac) (`channelsMode:
+  "pooled"`; several audio tracks are pooled, each weighted by its channels). On ordinary stereo
+  files the peak now reads the true per-channel maximum, up to 3 dB above the old mixdown's peak
+  where the two channels' peaks do not coincide, so full-scale counts can rise there; the RMS is
+  unchanged. The mono mixdown remains only as the fallback when no track decodes that way, is
   named `mixdownMono` in the answer with its +3 dB caveat, and the header now says how channels
   are treated. `channels="separate"` now reports each channel of the first track (up to eight,
   no longer two) with its own peak max, RMS mean and full-scale count next to the pooled line;
@@ -99,9 +103,9 @@ that this fork has removed.
 - **`get_audio_levels` can now say when a frame-rate conform explains the retime flag.** The
   helper reports the media file's video frame rate; when FCP's `isRetimed` is true and that rate
   differs from the project's, the note says the file is rate-conformed (FCP's Rate Conform),
-  that a conform sets the flag by itself and keeps the mapping, and that a speed change on top of
-  it cannot be told apart; when the rates match, that a conform is not the reason and the clip is
-  most likely retimed. QA run 3 established the case: a 30 fps .mp4 in a 29.97 fps project
+  that a conform on its own was seen to set the flag (QA run 3) and that FCP's conform keeps the
+  mapping, and that a speed change on top of it cannot be told apart; when the rates match, that
+  a conform is unlikely to be the reason and the clip is most likely retimed. QA run 3 established the case: a 30 fps .mp4 in a 29.97 fps project
   answered `isRetimed` = true at 100% speed, both 29.97 fps .mov files answered false.
 - **A trim inside a `begin_edit` group logged no `[Trim]` line** (QA run 3); one line per trim
   now, naming the group, its own closed undo step, or why none could be opened.

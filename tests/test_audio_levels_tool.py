@@ -225,6 +225,7 @@ class GetAudioLevelsTests(unittest.TestCase):
         # earlier mono mixdown read +3 dB on dual-mono files)
         self.assertIn("Channels are pooled, not mixed: a slice's peak is the loudest sample in any channel", text)
         self.assertNotIn("ch mixdownMono", text)     # no clip fell back to the mixdown
+        self.assertNotIn("ch1:", text)               # per-channel figures only with channels="separate"
         self.assertIn("end: 0.300s below threshold, last window RMS -80.0 dB (peak -70.0 dB); window 100 ms", text)
         self.assertIn("slices at full scale (peak >= -0.1 dBFS) 1", text)
         self.assertIn('Clip obj_3 "Music"  lane -1 (connected clip)', text)
@@ -279,13 +280,29 @@ class GetAudioLevelsTests(unittest.TestCase):
         self.assertIn("ch2: peak max -11.0 dB; RMS mean -21.5 dB; slices at full scale 2", text)
         self.assertIn("ch2 RMS ", text)
 
+    def test_older_bridge_response_still_renders(self):
+        # a helper/bridge from before the pooled decode: mode "perChannel", legacy per-channel
+        # entries without figures, no tracksDecoded / videoFrameRate -> renders, no chN figures
+        r = _response()
+        clip = r["clips"][0]
+        clip["audio"] = {"sampleRate": 48000, "channels": 2, "channelsMode": "perChannel", "audioTrackCount": 1,
+                         "fileDuration": 120.0, "sliceSeconds": 0.05, "sliceCount": 40}
+        clip["slices"]["perChannel"] = [{"peakDb": clip["slices"]["peakDb"], "rmsDb": clip["slices"]["rmsDb"]}]
+        r["clips"][1]["audio"] = {}
+        self.response = r
+        text = self._run(include_image=False)
+        self.assertIn("2 ch decoded (perChannel)", text)
+        self.assertIn("? ch decoded (None)", text)
+        self.assertIn("ch1 RMS ", text)
+        self.assertNotIn("ch1: peak max", text)
+
     def test_mixdown_fallback_is_named_with_its_caveat(self):
         r = _response()
         r["clips"][0]["audio"].update({"channels": 1, "channelsMode": "mixdownMono"})
         self.response = r
         text = self._run(include_image=False)
         self.assertIn("1 ch mixdownMono (the decoder's mono mixdown, the fallback", text)
-        self.assertIn("reads up to 3 dB above the per-channel level when the channels carry the same signal", text)
+        self.assertIn("reads 3 dB above either channel on a dual-mono file", text)
 
     def test_errors_are_counted_separately_and_retimed_true_prints_the_note_once(self):
         bad = {"handle": "obj_7", "name": "Broken", "connected": False, "lane": 0, "startSeconds": 6.0,

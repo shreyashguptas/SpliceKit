@@ -1631,6 +1631,7 @@ static void SpliceKit_collectConnectedItems(id item,
             NSString *childContainerKind = SpliceKit_itemContainerKind(child);
             if ([childContainerKind isEqualToString:@"compound clip"]) info[@"isCompound"] = @YES;
             if ([childContainerKind isEqualToString:@"reference clip"]) info[@"isReferenceClip"] = @YES;
+            if (!childContainerKind && SpliceKit_itemIsMulticamClip(child)) info[@"isMulticamClip"] = @YES;
 
             BOOL enabledFlag = NO;
             if (SpliceKit_tryReadBoolSelector(child, @"isEnabled", &enabledFlag) ||
@@ -1922,6 +1923,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                         BOOL isCompound = (containerKind != nil);
                         if ([containerKind isEqualToString:@"compound clip"]) info[@"isCompound"] = @YES;
                         if ([containerKind isEqualToString:@"reference clip"]) info[@"isReferenceClip"] = @YES;
+                        if (!containerKind && SpliceKit_itemIsMulticamClip(item)) info[@"isMulticamClip"] = @YES;
                         if (isCompound && [item respondsToSelector:@selector(primaryObject)]) {
                             id innerPrimary = ((id (*)(id, SEL))objc_msgSend)(item, @selector(primaryObject));
                             if (innerPrimary && [innerPrimary respondsToSelector:@selector(containedItems)]) {
@@ -3517,14 +3519,17 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
     NSMutableDictionary *out = [result mutableCopy];
     out[@"dialogPending"] = @YES;
     out[@"dialog"] = dialog;
-    NSString *title = [dialog[@"summary"] isKindOfClass:[NSString class]] && [dialog[@"summary"] length] > 0
-        ? dialog[@"summary"]
-        : ([dialog[@"title"] isKindOfClass:[NSString class]] ? dialog[@"title"] : @"");
+    // Named by its title when it has a real one, else by the summary describeWindow built
+    // from its fields or buttons (QA run 3: the Compound Clip Name sheet is titled "Window").
+    NSString *title = [dialog[@"title"] isKindOfClass:[NSString class]] ? dialog[@"title"] : @"";
+    NSString *summary = [dialog[@"summary"] isKindOfClass:[NSString class]] ? dialog[@"summary"] : @"";
+    NSString *label = (summary.length > 0 && ![summary isEqualToString:title]) ? summary
+        : (title.length > 0 ? [NSString stringWithFormat:@"\"%@\"", title] : @"");
     out[@"note"] = [NSString stringWithFormat:
         @"Final Cut Pro has a %@ open%@ after this action; nothing changes on the timeline until it is answered. "
         @"detect_dialog() shows its fields and buttons; fill_dialog_field / click_dialog_button / dismiss_dialog answer it.",
-        dialog[@"type"], title.length ? [NSString stringWithFormat:@" (%@)", title] : @""];
-    SpliceKit_log(@"[Action] %@: a %@ is open afterwards (%@)", action, dialog[@"type"], title);
+        dialog[@"type"], label.length ? [NSString stringWithFormat:@" (%@)", label] : @""];
+    SpliceKit_log(@"[Action] %@: a %@ is open afterwards (%@)", action, dialog[@"type"], label);
     return out;
 }
 
@@ -8296,8 +8301,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
     __block BOOL sourceStartKnown = NO;
     __block BOOL haveRange = NO;
     __block BOOL sourceExists = NO;
-    __block NSString *noSingleSourceOut = nil;        // why no source media file is reported (set below)
-    __block NSString *noSingleSourceFrameOut = nil;   // the same, worded for the frame
+    __block NSString *noSingleSourceFrameOut = nil;   // why no frame comes from a media file (set below)
 
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -8405,34 +8409,40 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
             // footage. The same holds when the first media file sits two or more
             // containers down. No source file and no frame are reported for these;
             // timeline.captureClipFrame renders them from the Viewer.
-            NSString *containerKind = SpliceKit_itemContainerKind(item);
-            if (!containerKind && SpliceKit_itemIsMulticamClip(item)) containerKind = @"multicam clip";
-            if ([containerKind isEqualToString:@"compound clip"]) local[@"isCompound"] = @YES;
-            if ([containerKind isEqualToString:@"reference clip"]) local[@"isReferenceClip"] = @YES;
+            // The kind is decided once, by SpliceKit_clipInfoKindForItem (class-name kinds
+            // first, then FCP's flags), so the container decision and the reported kind agree.
+            NSString *kind = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio);
+            NSString *flagKind = SpliceKit_itemContainerKind(item);   // FCP's flags, as getDetailedState reports them
+            if ([flagKind isEqualToString:@"compound clip"]) local[@"isCompound"] = @YES;
+            if ([flagKind isEqualToString:@"reference clip"]) local[@"isReferenceClip"] = @YES;
+            NSString *containerKind = ([kind isEqualToString:@"compound clip"] || [kind isEqualToString:@"reference clip"]
+                                       || [kind isEqualToString:@"multicam clip"]) ? kind : nil;
             if (containerKind) local[@"containerKind"] = containerKind;
             NSString *noSingleSource = nil;
             if (containerKind) {
                 noSingleSource = [NSString stringWithFormat:
                     @"no single source media file: this is a %@, whose contents are clips of their own, each with "
                     @"its own media file (Final Cut Pro opens it in its own timeline: select it and "
-                    @"timeline_action(\"openClip\")); timeline.captureClipFrame renders it as the Viewer plays it",
+                    @"timeline_action(\"openClip\")); timeline.captureClipFrame renders it as the Viewer shows it",
                     containerKind];
             } else if (mediaDepth >= 2) {
                 noSingleSource = [NSString stringWithFormat:
                     @"no single source media file: the first media file inside this clip was found %d levels down "
                     @"inside nested containers, and nothing says which part of this clip that file is; "
-                    @"timeline.captureClipFrame renders it as the Viewer plays it",
+                    @"timeline.captureClipFrame renders it as the Viewer shows it",
                     mediaDepth];
             }
-            noSingleSourceOut = noSingleSource;
+            // Nothing inside a container is read as the container's own (its first inner
+            // clip's Notes included): only the item itself is probed from here on.
+            if (noSingleSource && mediaComp && mediaComp != item) [probeTargets removeObject:mediaComp];
             if (containerKind) {
                 noSingleSourceFrameOut = [NSString stringWithFormat:
                     @"no single source media file to decode a frame from: this is a %@ whose contents are clips "
-                    @"of their own; timeline.captureClipFrame renders it as the Viewer plays it", containerKind];
+                    @"of their own; timeline.captureClipFrame renders it as the Viewer shows it", containerKind];
             } else if (noSingleSource) {
                 noSingleSourceFrameOut = [NSString stringWithFormat:
                     @"no single source media file to decode a frame from: the first media file inside this clip sits "
-                    @"%d levels down inside nested containers; timeline.captureClipFrame renders it as the Viewer plays it",
+                    @"%d levels down inside nested containers; timeline.captureClipFrame renders it as the Viewer shows it",
                     mediaDepth];
             }
 
@@ -8516,8 +8526,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 if (fx[@"error"]) local[@"effectsError"] = fx[@"error"];
             }
 
-            // Title text + kind.
-            NSString *kind = SpliceKit_clipInfoKindForItem(item, hasVideo, hasAudio);
+            // Title text (kind was decided above).
             NSArray *channels = SpliceKit_clipInfoTitleText(item);
             if (channels.count > 0) {
                 NSMutableDictionary *title = [NSMutableDictionary dictionary];
@@ -23848,20 +23857,21 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
     info[@"popups"] = popups;
 
     // A name for the dialog when its title is a placeholder (QA run 3: the Compound Clip
-    // Name sheet is titled "Window"): the labels of its fields, else its buttons.
+    // Name sheet is titled "Window"): the labels of its fields, else its buttons, else
+    // its class. The pseudo-labels collectUIElements adds ("[slider]", "[segmented
+    // control]") are not labels.
     NSString *title = info[@"title"];
     NSString *summary = title;
     if (title.length == 0 || [title isEqualToString:@"Window"] || [title isEqualToString:@"Untitled"]
         || [title isEqualToString:@"Panel"]) {
-        NSString *what = [window isSheet] ? @"sheet" : @"dialog";
         NSMutableArray *texts = [NSMutableArray array];
         for (NSDictionary *label in labels) {
             NSString *t = label[@"text"];
-            if ([t isKindOfClass:[NSString class]] && t.length > 0) [texts addObject:t];
+            if ([t isKindOfClass:[NSString class]] && t.length > 0 && ![t hasPrefix:@"["]) [texts addObject:t];
             if (texts.count >= 3) break;
         }
         if (texts.count > 0) {
-            summary = [NSString stringWithFormat:@"%@ with the fields %@", what, [texts componentsJoinedByString:@" / "]];
+            summary = [NSString stringWithFormat:@"fields %@", [texts componentsJoinedByString:@" / "]];
         } else {
             for (NSDictionary *button in buttons) {
                 NSString *t = button[@"title"];
@@ -23869,8 +23879,8 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
                 if (texts.count >= 3) break;
             }
             summary = texts.count > 0
-                ? [NSString stringWithFormat:@"%@ with the buttons %@", what, [texts componentsJoinedByString:@" / "]]
-                : [NSString stringWithFormat:@"%@ (%@)", what, NSStringFromClass([window class])];
+                ? [NSString stringWithFormat:@"buttons %@", [texts componentsJoinedByString:@" / "]]
+                : NSStringFromClass([window class]);
         }
     }
     info[@"summary"] = summary ?: @"";

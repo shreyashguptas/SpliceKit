@@ -217,13 +217,13 @@ class ClipInfoToolTests(unittest.TestCase):
                                     isReferenceClip=True,
                                     frameError="no single source media file to decode a frame from: this is a "
                                                "reference clip whose contents are clips of their own; "
-                                               "timeline.captureClipFrame renders it as the Viewer plays it")
+                                               "timeline.captureClipFrame renders it as the Viewer shows it")
             r.pop("sourceMedia")
             r.pop("frame")
             r["sourceMediaError"] = ("no single source media file: this is a reference clip, whose contents are "
                                      "clips of their own, each with its own media file (Final Cut Pro opens it in "
                                      "its own timeline: select it and timeline_action(\"openClip\")); "
-                                     "timeline.captureClipFrame renders it as the Viewer plays it")
+                                     "timeline.captureClipFrame renders it as the Viewer shows it")
             return r
 
         self._install_bridge(responder)

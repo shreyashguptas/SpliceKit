@@ -13,18 +13,21 @@
 //  volume, fades, effects, retiming and the mix of all concurrent clips are not
 //  applied. -100 dB is the floor reported for a slice with no sample above 1e-5.
 //
-//  Channels are pooled, never mixed: every audio track is decoded at its own
-//  channel count, the peak of a slice is the loudest sample in any channel and
-//  its RMS is taken over all channels' samples (the figures ffmpeg's volumedetect
-//  reports for the same range). QA run 3 found the earlier mono mixdown reading
-//  3 dB above the per-channel level on dual-mono files (two channels carrying
-//  the same signal sum to +3 dB in a power-preserving mixdown), so no sample of
-//  one channel is added to another any more. The mixdown remains only as the
-//  fallback when no track decodes at its own channel count, and is named as
-//  such (channelsMode "mixdownMono").
+//  Channels are pooled, never mixed: up to eight audio tracks are decoded, each
+//  at its own channel count; the peak of a slice is the loudest sample in any
+//  channel and its RMS is taken over all channels' samples (for a file with one
+//  audio track, the figures ffmpeg's volumedetect reports for the same range;
+//  with several tracks each is weighted by its channels). QA run 3 found the
+//  earlier mono mixdown reading exactly 3 dB above the per-channel level on
+//  dual-mono files, consistent with a power-preserving mixdown (two channels
+//  carrying the same signal sum to +3 dB), so no sample of one channel is added
+//  to another any more. The mixdown remains only as the fallback when no track
+//  decodes at its own channel count, and is named as such (channelsMode
+//  "mixdownMono").
 //
 //  Samples are sliced as they stream out of the reader, so memory stays at one
-//  slice plus one decoder buffer however long the range is.
+//  decoder buffer plus the per-slice figures (at most --max-slices of them per
+//  track) however long the range is.
 //
 //  Usage: audio-levels <file> [--start sec] [--end sec] [--slice 0.05]
 //                             [--max-slices 4000] [--per-channel]
@@ -123,7 +126,8 @@ while i < cliArgs.count {
           --end <sec>          End of the analysed range (default: end of file)
           --slice <sec>        Slice length; peak and RMS are reported per slice (default: 0.05)
           --max-slices <n>     Lengthen the slice so at most n slices are reported (default: 4000)
-          --per-channel        Also report each channel of the first audio track separately (up to eight)
+          --per-channel        Also report each channel of the first audio track separately
+                               (when it has more than one; up to eight)
 
         Output: JSON to stdout with peak and RMS levels in dBFS per slice, pooled over the
         file's channels (peak: the loudest sample in any channel; RMS over all channels).
@@ -136,7 +140,7 @@ while i < cliArgs.count {
 }
 
 guard let path = filePath else {
-    fputs("Error: usage: audio-levels <file> [--start sec] [--end sec] [--slice 0.05] [--per-channel]\n", stderr)
+    fputs("Error: usage: audio-levels <file> [--start sec] [--end sec] [--slice 0.05] [--max-slices 4000] [--per-channel]\n", stderr)
     exit(1)
 }
 guard FileManager.default.fileExists(atPath: path) else {
@@ -298,8 +302,20 @@ func decode(reader: AVAssetReader, output: AVAssetReaderOutput, sampleRate: Doub
         let status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset,
                                                  totalLengthOut: nil, dataPointerOut: &dataPointer)
         guard status == kCMBlockBufferNoErr, let rawPtr = dataPointer else { continue }
-        rawPtr.withMemoryRebound(to: Float.self, capacity: floatCount) { floatPtr in
-            carry.append(contentsOf: UnsafeBufferPointer(start: floatPtr, count: floatCount))
+        if lengthAtOffset >= length {
+            rawPtr.withMemoryRebound(to: Float.self, capacity: floatCount) { floatPtr in
+                carry.append(contentsOf: UnsafeBufferPointer(start: floatPtr, count: floatCount))
+            }
+        } else {
+            // A block buffer held in several pieces (not seen from AVAssetReader, but the
+            // pointer above is only valid for lengthAtOffset bytes): copy it out whole.
+            var whole = [Float](repeating: 0, count: floatCount)
+            let copied = whole.withUnsafeMutableBytes { raw -> OSStatus in
+                CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: floatCount * MemoryLayout<Float>.size,
+                                           destination: raw.baseAddress!)
+            }
+            guard copied == kCMBlockBufferNoErr else { continue }
+            carry.append(contentsOf: whole)
         }
         // Emit every complete slice now held; keep the remainder for the next buffer.
         var consumed = 0

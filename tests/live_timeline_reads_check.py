@@ -27,8 +27,9 @@ and prints, without changing the timeline:
      --trim-check    ripple-trims the last spine clip's end by one frame via
                      timeline.trimClip (dry run first), verifies, then undoes and
                      verifies the clip's end is back where it was.
-  6. Optional --clip-info-check (READ-ONLY): timeline.getClipInfo on the first spine
-     clip that is a video or audio clip; prints kind, source media file (path, exists,
+  6. Optional --clip-info-check (READ-ONLY): timeline.getClipInfo on the first ordinary
+     video or audio spine clip (a compound / reference clip only when there is no other);
+     prints kind, source media file (path, exists,
      representation), source start / media origin / file time, effects, title text,
      transcript status + word count and the frame (written to
      /tmp/splicekit_clip_info_frame.jpg so a human can look at it). FAIL when the
@@ -634,9 +635,11 @@ def _first_media_clip(st):
     return container
 
 
-def _clip_info_frame_at(c, s0, e0, sm):
-    """A second frame at 80% into the clip: the requested time must come back and the file
-    time must move with it (QA run 3: the midpoint alone hid a wrong mapping)."""
+def _clip_info_frame_at(c, s0, e0, sm, frame_s):
+    """A second frame at 80% into the clip: the requested time must come back, the file time
+    must move with it, and the decoder's actual time must be within a frame of it. The
+    file-time check only proves the response's own fields agree (both come from the same
+    readings); whether the footage is right is what the container check below is for."""
     t = round(s0 + 0.8 * (e0 - s0), 3)
     r = rpc("timeline.getClipInfo", {"handle": c["handle"], "frameTime": t, "includeTranscript": False,
                                      "includeEffects": False, "includeMarkers": False}, timeout=60)
@@ -664,7 +667,13 @@ def _clip_info_frame_at(c, s0, e0, sm):
             print(f"OK    frame at {t:.3f}s maps to file {file_time:.3f}s (fileStart {sm['fileStart']} + {t - s0:.3f})")
     else:
         print(f"OK    frame at {t:.3f}s: timelineTime={tt} fileTime={file_time}")
-    return fails, 0
+    warns = 0
+    actual = frame.get("actualFileTime")
+    if isinstance(actual, (int, float)) and isinstance(file_time, (int, float)) and abs(actual - file_time) > frame_s + 1e-6:
+        warns += 1
+        print(f"WARN  the decoder returned the frame at file {actual:.3f}s, {abs(actual - file_time):.3f}s from the "
+              f"requested {file_time:.3f}s (more than one frame, {frame_s:.4f}s)")
+    return fails, warns
 
 
 def _clip_info_container_check(c):
@@ -889,7 +898,7 @@ def clip_info_check(st):
     print(f"timings={json.dumps(r.get('timings'))}")
 
     if not _is_container_clip(c):
-        f2, w2 = _clip_info_frame_at(c, s0, e0, sm)
+        f2, w2 = _clip_info_frame_at(c, s0, e0, sm, _frame_seconds(st))
         fails += f2
         warns += w2
     containers = _container_clips(st)
