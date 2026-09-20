@@ -982,6 +982,80 @@ def _fmt(r):
     return json.dumps(r, indent=2, default=str)
 
 
+_SECONDS_LIST_PARSE_HELP = (
+    "Accepted forms: JSON array of seconds (e.g. '[3.0, 6.0, 9.0]') or "
+    "comma-separated seconds (e.g. '3.0, 6.0, 9.0' or '25.0')."
+)
+
+
+def _parse_seconds_list(value: str) -> list[float]:
+    """Parse a JSON seconds array or a plain comma-separated list of numbers."""
+    text = (value or "").strip()
+    if not text:
+        raise ToolError(f"times is required. {_SECONDS_LIST_PARSE_HELP}")
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"Invalid times JSON: {exc}. {_SECONDS_LIST_PARSE_HELP}"
+            ) from exc
+        if isinstance(parsed, (int, float)):
+            return [float(parsed)]
+        if not isinstance(parsed, list):
+            raise ToolError(
+                f"times must be a JSON array of numbers. {_SECONDS_LIST_PARSE_HELP}"
+            )
+        try:
+            return [float(x) for x in parsed]
+        except (TypeError, ValueError) as exc:
+            raise ToolError(
+                f"times must contain only numbers. {_SECONDS_LIST_PARSE_HELP}"
+            ) from exc
+
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    try:
+        return [float(p) for p in parts]
+    except ValueError as exc:
+        raise ToolError(
+            f"Invalid comma-separated times: {exc}. {_SECONDS_LIST_PARSE_HELP}"
+        ) from exc
+
+
+_MARKERS_PARSE_HELP = (
+    "Accepted forms: JSON array of marker objects "
+    '(e.g. \'[{"time": 5.0, "name": "Scene 1"}]\') or comma-separated seconds '
+    "(e.g. '5.0, 12.0' — standard markers at those times)."
+)
+
+
+def _parse_markers_list(value: str) -> list:
+    """Parse marker specs from JSON or comma-separated time values."""
+    text = (value or "").strip()
+    if not text:
+        raise ToolError(f"markers is required. {_MARKERS_PARSE_HELP}")
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"Invalid markers JSON: {exc}. {_MARKERS_PARSE_HELP}"
+            ) from exc
+        if not isinstance(parsed, list):
+            raise ToolError(
+                f"markers must be a JSON array. {_MARKERS_PARSE_HELP}"
+            )
+        return parsed
+
+    try:
+        times = _parse_seconds_list(text)
+    except ToolError as exc:
+        raise ToolError(f"{exc}. {_MARKERS_PARSE_HELP}") from exc
+    return [{"time": t} for t in times]
+
+
 def _call_or_error(method: str, **params) -> str:
     """Call the bridge and return formatted JSON, or an error string.
 
@@ -1711,10 +1785,18 @@ def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
     r = bridge.call("timeline.setRange", startSeconds=start_seconds, endSeconds=end_seconds)
     if _err(r):
         return f"Error: {r.get('error', r)}"
+    if not r.get("rangeStartSet") or not r.get("rangeEndSet"):
+        return (
+            f"Error: failed to set timeline range "
+            f"{r.get('startSeconds', start_seconds):.3f}s–"
+            f"{r.get('endSeconds', end_seconds):.3f}s "
+            f"(mark in: {'OK' if r.get('rangeStartSet') else 'FAILED'}, "
+            f"mark out: {'OK' if r.get('rangeEndSet') else 'FAILED'})"
+        )
     return (
         f"Range set: {r.get('startSeconds', 0):.3f}s - {r.get('endSeconds', 0):.3f}s\n"
-        f"Mark in: {'OK' if r.get('rangeStartSet') else 'FAILED'}\n"
-        f"Mark out: {'OK' if r.get('rangeEndSet') else 'FAILED'}"
+        f"Mark in: OK\n"
+        f"Mark out: OK"
     )
 
 
@@ -2386,19 +2468,17 @@ def add_markers_at_times(markers: str) -> str:
     """Add multiple markers at specific times in a single batch call.
     Much faster than seeking + adding markers one at a time.
 
-    markers: JSON array of marker objects. Each marker:
-      {"time": 5.0, "name": "Scene 1", "kind": "standard"}
-      {"time": 15.5, "name": "Chapter 1", "kind": "chapter"}
-      {"time": 30.0, "name": "Review", "kind": "todo"}
+    markers accepts either:
+      - JSON array of marker objects, e.g.
+        [{"time": 5.0, "name": "Scene 1", "kind": "standard"},
+         {"time": 15.5, "name": "Chapter 1", "kind": "chapter"}]
+      - Comma-separated seconds for plain standard markers, e.g. "5.0, 12.0"
 
-    kind: "standard" (default), "chapter", or "todo"
+    kind (JSON form only): "standard" (default), "chapter", or "todo"
 
     Returns count of markers successfully added.
     """
-    try:
-        marker_list = json.loads(markers)
-    except json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+    marker_list = _parse_markers_list(markers)
 
     r = bridge.call("timeline.addMarkers", markers=marker_list)
     if _err(r):
@@ -2416,19 +2496,13 @@ def blade_at_times(times: str) -> str:
     """Blade (cut) the timeline at multiple specific times in a single batch call.
     Much faster than seeking + blading one at a time.
 
-    times: JSON array of times in seconds. Example:
-      [3.0, 6.0, 9.0, 12.0, 15.0]
-
-    For regular intervals, compute all times first:
-      To cut every 3 seconds across a 30-second timeline:
-      [3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0]
+    times accepts either:
+      - JSON array of seconds, e.g. [3.0, 6.0, 9.0, 12.0, 15.0]
+      - Comma-separated seconds, e.g. "3.0, 6.0, 9.0" or a single value "25.0"
 
     Returns count of cuts successfully applied.
     """
-    try:
-        time_list = json.loads(times)
-    except json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+    time_list = _parse_seconds_list(times)
 
     r = bridge.call("timeline.bladeAtTimes", times=time_list)
     if _err(r):
@@ -7931,7 +8005,6 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
             Keywords/Roles:
               addKeywords (keywords: comma-separated), removeKeywords
-              setRole
 
             Effects:
               removeEffectByID (effect_id), invertEffectMasks, toggleEnabled

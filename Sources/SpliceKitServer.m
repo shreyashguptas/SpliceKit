@@ -5199,18 +5199,6 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 return;
             }
 
-            if ([action isEqualToString:@"setRole"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionSetRole:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
-                return;
-            }
-
             // === Effects / Masks ===
             // Manipulate effects on selected clips: remove by ID, invert masks,
             // toggle enabled state.
@@ -6304,12 +6292,19 @@ static BOOL SpliceKit_seekAndMark(id timeline, SpliceKit_CMTime time, NSString *
     // Let FCP update playhead position
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 
-    // Send action via responder chain (works for setRangeStart:, setRangeEnd:, clearRange:, etc.)
-    id app = ((id (*)(id, SEL))objc_msgSend)(
-        objc_getClass("NSApplication"), @selector(sharedApplication));
+    // Prefer the active timeline module (same path as timeline_action); responder-chain
+    // sendAction often returns NO when Final Cut Pro is not the frontmost app.
     SEL actionSel = NSSelectorFromString(actionSelector);
-    BOOL sent = ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
-        app, @selector(sendAction:to:from:), actionSel, nil, nil);
+    BOOL sent = NO;
+    if ([timeline respondsToSelector:actionSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(timeline, actionSel, nil);
+        sent = YES;
+    } else {
+        id app = ((id (*)(id, SEL))objc_msgSend)(
+            objc_getClass("NSApplication"), @selector(sharedApplication));
+        sent = ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+            app, @selector(sendAction:to:from:), actionSel, nil, nil);
+    }
 
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     return sent;
@@ -9337,6 +9332,30 @@ static NSDictionary *SpliceKit_handleSetRange(NSDictionary *params) {
             // Seek to end, mark out
             BOOL outOk = SpliceKit_seekAndMark(timeline, endTime, @"setRangeEnd:");
 
+            if (!inOk || !outOk) {
+                NSMutableString *detail = [NSMutableString stringWithFormat:
+                    @"Failed to set timeline range %.3fs–%.3fs (mark in: %@, mark out: %@).",
+                    startVal, endVal, inOk ? @"ok" : @"failed", outOk ? @"ok" : @"failed"];
+                if (!inOk && !outOk &&
+                    ![timeline respondsToSelector:NSSelectorFromString(@"setRangeStart:")] &&
+                    ![timeline respondsToSelector:NSSelectorFromString(@"setRangeEnd:")]) {
+                    [detail appendString:
+                        @" FFAnchoredTimelineModule does not implement setRangeStart:/setRangeEnd:."];
+                } else if (!inOk || !outOk) {
+                    [detail appendString:
+                        @" Range marks use setRangeStart:/setRangeEnd: on the timeline module; "
+                        @"if playhead moved but marks did not stick, try bringing Final Cut Pro frontmost."];
+                }
+                result = @{
+                    @"error": detail,
+                    @"startSeconds": @(startVal),
+                    @"endSeconds": @(endVal),
+                    @"rangeStartSet": @(inOk),
+                    @"rangeEndSet": @(outOk),
+                };
+                return;
+            }
+
             result = @{
                 @"status": @"ok",
                 @"startSeconds": @(startVal),
@@ -11635,8 +11654,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                 if (t.timescale > 0) trimStart = (double)t.value / t.timescale;
             }
 
-            // Get media URL — try multiple chains
-            // The selected item may be a collection; dig into containedItems for the actual media component
+            // Same resolver as timeline.getClipInfo (handles FCP 12.3 clipRef / media chains).
             id clipForMedia = selectedClip;
             if ([selectedClip respondsToSelector:NSSelectorFromString(@"containedItems")]) {
                 NSArray *contained = ((id (*)(id, SEL))objc_msgSend)(selectedClip, NSSelectorFromString(@"containedItems"));
@@ -11650,71 +11668,11 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                     }
                 }
             }
-            // Chain 1: clip.media.originalMediaURL / originalMediaRep.fileURLs
-            @try {
-                id media = nil;
-                if ([clipForMedia respondsToSelector:NSSelectorFromString(@"media")]) {
-                    media = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, NSSelectorFromString(@"media"));
-                }
-                if (media) {
-                    SEL omSel = NSSelectorFromString(@"originalMediaURL");
-                    if ([media respondsToSelector:omSel]) {
-                        id url = ((id (*)(id, SEL))objc_msgSend)(media, omSel);
-                        if ([url isKindOfClass:[NSURL class]]) mediaURL = url;
-                    }
-                    if (!mediaURL) {
-                        SEL omrSel = NSSelectorFromString(@"originalMediaRep");
-                        if ([media respondsToSelector:omrSel]) {
-                            id rep = ((id (*)(id, SEL))objc_msgSend)(media, omrSel);
-                            if (rep) {
-                                SEL fuSel = NSSelectorFromString(@"fileURLs");
-                                if ([rep respondsToSelector:fuSel]) {
-                                    NSArray *urls = ((id (*)(id, SEL))objc_msgSend)(rep, fuSel);
-                                    if ([urls isKindOfClass:[NSArray class]] && urls.count > 0) {
-                                        id url = urls.firstObject;
-                                        if ([url isKindOfClass:[NSURL class]]) mediaURL = url;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (!mediaURL) {
-                        SEL crSel = NSSelectorFromString(@"currentRep");
-                        if ([media respondsToSelector:crSel]) {
-                            id rep = ((id (*)(id, SEL))objc_msgSend)(media, crSel);
-                            if (rep) {
-                                SEL fuSel = NSSelectorFromString(@"fileURLs");
-                                if ([rep respondsToSelector:fuSel]) {
-                                    NSArray *urls = ((id (*)(id, SEL))objc_msgSend)(rep, fuSel);
-                                    if ([urls isKindOfClass:[NSArray class]] && urls.count > 0) {
-                                        id url = urls.firstObject;
-                                        if ([url isKindOfClass:[NSURL class]]) mediaURL = url;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } @catch (NSException *e) {}
-            // Chain 2: assetMediaReference.resolvedURL
+            NSString *urlSource = nil;
+            NSString *representation = nil;
+            mediaURL = SpliceKit_clipInfoMediaURL(clipForMedia, &representation, &urlSource);
             if (!mediaURL) {
-                @try {
-                    SEL amrSel = NSSelectorFromString(@"assetMediaReference");
-                    if ([clipForMedia respondsToSelector:amrSel]) {
-                        id ref = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, amrSel);
-                        if (ref && [ref respondsToSelector:NSSelectorFromString(@"resolvedURL")]) {
-                            id url = ((id (*)(id, SEL))objc_msgSend)(ref, NSSelectorFromString(@"resolvedURL"));
-                            if ([url isKindOfClass:[NSURL class]]) mediaURL = url;
-                        }
-                    }
-                } @catch (NSException *e) {}
-            }
-            // Chain 3: KVC paths
-            if (!mediaURL) {
-                @try { id u = [clipForMedia valueForKeyPath:@"media.fileURL"]; if ([u isKindOfClass:[NSURL class]]) mediaURL = u; } @catch(NSException *e) {}
-            }
-            if (!mediaURL) {
-                @try { id u = [clipForMedia valueForKeyPath:@"clipInPlace.asset.originalMediaURL"]; if ([u isKindOfClass:[NSURL class]]) mediaURL = u; } @catch(NSException *e) {}
+                mediaURL = SpliceKit_clipInfoMediaURL(selectedClip, &representation, &urlSource);
             }
             SpliceKit_log(@"[Stabilize] Selected clip class: %@, mediaURL: %@",
                 NSStringFromClass([selectedClip class]), mediaURL ? mediaURL.path : @"nil");
@@ -19369,6 +19327,27 @@ static NSDictionary *SpliceKit_handleWorkspace(NSDictionary *params) {
 
 #pragma mark - Roles Handler
 
+static NSString *SpliceKit_formatRolesAssignMenuError(NSString *menuError,
+                                                      NSString *menuCategory,
+                                                      NSString *roleName) {
+    if (!menuError.length) return @"Failed to assign role via menu";
+
+    NSRange availRange = [menuError rangeOfString:@"Available: "];
+    if (availRange.location != NSNotFound) {
+        NSString *suffix = [menuError substringFromIndex:availRange.location + availRange.length];
+        NSString *trimmed = [suffix stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) {
+            return [NSString stringWithFormat:
+                @"Cannot assign role '%@' via Modify > %@: the submenu enumerated no items. "
+                @"Final Cut Pro only populates Assign Roles menus when it is the frontmost "
+                @"application. Bring Final Cut Pro to the front, keep a clip selected, and retry.",
+                roleName, menuCategory];
+        }
+    }
+    return menuError;
+}
+
 static NSDictionary *SpliceKit_handleRolesAssign(NSDictionary *params) {
     NSString *roleType = params[@"type"]; // "audio", "video", "caption"
     NSString *roleName = params[@"role"]; // e.g. "Dialogue", "Music", "Effects"
@@ -19376,14 +19355,51 @@ static NSDictionary *SpliceKit_handleRolesAssign(NSDictionary *params) {
         return @{@"error": @"type and role parameters required"};
     }
 
-    // Build the menu path
     NSString *menuCategory;
     if ([roleType isEqualToString:@"audio"]) menuCategory = @"Assign Audio Roles";
     else if ([roleType isEqualToString:@"video"]) menuCategory = @"Assign Video Roles";
     else if ([roleType isEqualToString:@"caption"]) menuCategory = @"Assign Caption Roles";
     else return @{@"error": @"type must be 'audio', 'video', or 'caption'"};
 
-    return SpliceKit_handleMenuExecute(@{@"menuPath": @[@"Modify", menuCategory, roleName]});
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) {
+                result = @{@"error": @"No active timeline module"};
+                return;
+            }
+
+            SEL selectedSel = NSSelectorFromString(@"selectedItems");
+            id selectedItems = nil;
+            if ([timeline respondsToSelector:selectedSel]) {
+                selectedItems = ((id (*)(id, SEL))objc_msgSend)(timeline, selectedSel);
+            }
+            if (![selectedItems isKindOfClass:[NSArray class]] || [(NSArray *)selectedItems count] == 0) {
+                result = @{@"error": @"No clip selected. Select a clip first."};
+                return;
+            }
+
+            NSDictionary *menuResult = SpliceKit_handleMenuExecute(
+                @{@"menuPath": @[@"Modify", menuCategory, roleName]});
+            if (menuResult[@"error"]) {
+                result = @{
+                    @"error": SpliceKit_formatRolesAssignMenuError(
+                        menuResult[@"error"], menuCategory, roleName),
+                };
+                return;
+            }
+            result = @{
+                @"status": @"ok",
+                @"type": roleType,
+                @"role": roleName,
+                @"method": @"menu",
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result ?: @{@"error": @"Failed to assign role"};
 }
 
 #pragma mark - Mixer Handlers
