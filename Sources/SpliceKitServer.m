@@ -8818,10 +8818,15 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
                 return;
             }
             NSMutableDictionary *captureInfo = [NSMutableDictionary dictionary];
-            for (NSString *key in @[@"width", @"height", @"bytes", @"cropped"]) {
+            for (NSString *key in @[@"width", @"height", @"bytes", @"cropped", @"flat", @"flatColor", @"warning"]) {
                 if (capture[key]) captureInfo[key] = capture[key];
             }
             local[@"capture"] = captureInfo;
+            // A one-colour Viewer image is not a verified frame (QA run 4: screen locked).
+            if ([capture[@"flat"] boolValue]) {
+                local[@"flat"] = @YES;
+                if (capture[@"warning"]) local[@"warning"] = capture[@"warning"];
+            }
             local[@"status"] = @"ok";
             out = local;
         } @catch (NSException *e) {
@@ -17888,7 +17893,40 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
     });
-    return result ?: @{@"error": @"Menu list failed"};
+    if (!result) return @{@"error": @"Menu list failed"};
+    if (result[@"error"]) return result;
+    // The Edit menu's Undo / Redo titles and enabled states come from AppKit's menu
+    // validation, which resolves them through the key window; with Final Cut Pro not
+    // frontmost (QA run 4) they stay "Undo" / "Redo" and disabled, validate or not, while
+    // the library document's undo manager holds the real step. That manager is what
+    // Edit > Undo and history_action act on, so its state is reported alongside.
+    if (!menuName || [menuName caseInsensitiveCompare:@"Edit"] == NSOrderedSame) {
+        __block NSDictionary *undoState = nil;
+        SpliceKit_executeOnMainThread(^{
+            @try {
+                id um = SpliceKit_getUndoManager();
+                if (!um) return;
+                BOOL canUndo = ((BOOL (*)(id, SEL))objc_msgSend)(um, @selector(canUndo));
+                BOOL canRedo = ((BOOL (*)(id, SEL))objc_msgSend)(um, @selector(canRedo));
+                id undoName = canUndo ? ((id (*)(id, SEL))objc_msgSend)(um, @selector(undoActionName)) : nil;
+                id redoName = canRedo ? ((id (*)(id, SEL))objc_msgSend)(um, @selector(redoActionName)) : nil;
+                undoState = @{
+                    @"canUndo": @(canUndo),
+                    @"canRedo": @(canRedo),
+                    @"undoActionName": [undoName isKindOfClass:[NSString class]] ? undoName : @"",
+                    @"redoActionName": [redoName isKindOfClass:[NSString class]] ? redoName : @"",
+                    @"source": @"the library document's undo manager (what Edit > Undo and history_action act on)",
+                };
+            } @catch (NSException *e) { undoState = nil; }
+        });
+        NSMutableDictionary *r = [result mutableCopy];
+        if (undoState) r[@"undoState"] = undoState;
+        r[@"note"] = @"Undo / Redo titles and enabled states are AppKit's menu validation, resolved through the key "
+                     @"window: with Final Cut Pro not frontmost they read \"Undo\" / \"Redo\" and disabled even with "
+                     @"validate=true (QA run 4). undoState is the document's undo manager itself.";
+        result = r;
+    }
+    return result;
 }
 
 #pragma mark - Effect Parameter Helpers
@@ -22935,6 +22973,50 @@ static NSView *SpliceKit_findPlayerViewForCapture(NSWindow *mainWindow,
     return largestPlayerView;
 }
 
+// Is the captured image one flat colour? Drawn into a 32x32 RGBA bitmap (a flat image stays
+// flat under scaling; a real one does not) and every pixel compared with the first, within
+// 2/255. QA run 4: with the screen locked the window capture was a uniform grey field and
+// with the display asleep a black one, both returned as successful captures.
+static BOOL SpliceKit_imageIsFlat(CGImageRef image, unsigned char outRGB[3]) {
+    if (!image) return NO;
+    const int side = 32;
+    unsigned char *pixels = calloc((size_t)side * side * 4, 1);
+    if (!pixels) return NO;
+    BOOL flat = NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(pixels, side, side, 8, side * 4, cs,
+                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    if (ctx) {
+        CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+        CGContextDrawImage(ctx, CGRectMake(0, 0, side, side), image);
+        flat = YES;
+        for (int i = 1; i < side * side; i++) {
+            const unsigned char *p = pixels + i * 4;
+            if (abs((int)p[0] - (int)pixels[0]) > 2 || abs((int)p[1] - (int)pixels[1]) > 2
+                || abs((int)p[2] - (int)pixels[2]) > 2) { flat = NO; break; }
+        }
+        if (flat && outRGB) { outRGB[0] = pixels[0]; outRGB[1] = pixels[1]; outRGB[2] = pixels[2]; }
+        CGContextRelease(ctx);
+    }
+    CGColorSpaceRelease(cs);
+    free(pixels);
+    return flat;
+}
+
+// `flat`, and for a flat image `flatColor` + `warning`, on a capture answer. The status
+// stays "ok": a flat frame can be real (a black frame, an empty Viewer); the reader is told.
+static void SpliceKit_captureAnnotateFlat(NSMutableDictionary *r, BOOL flat, const unsigned char rgb[3]) {
+    r[@"flat"] = @(flat);
+    if (!flat) return;
+    r[@"flatColor"] = @[@(rgb[0]), @(rgb[1]), @(rgb[2])];
+    r[@"warning"] = [NSString stringWithFormat:
+        @"the captured image is one flat colour (RGB %d,%d,%d): either what Final Cut Pro shows there really is flat "
+        @"(a black frame, an empty Viewer) or the window rendered nothing. The Viewer's content needs the screen "
+        @"unlocked and the display awake (QA run 4: a locked screen gave a uniform grey field, a sleeping display a "
+        @"black one)", rgb[0], rgb[1], rgb[2]];
+    SpliceKit_log(@"[Capture] flat image (RGB %d,%d,%d) at %@", rgb[0], rgb[1], rgb[2], r[@"path"] ?: @"");
+}
+
 static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
     NSString *outputPath = params[@"path"] ?: @"/tmp/splicekit_viewer.png";
     NSString *requestedViewer = params[@"viewer"] ?: params[@"which"];
@@ -22986,6 +23068,8 @@ static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
             int outWidth = (int)CGImageGetWidth(fullImage);
             int outHeight = (int)CGImageGetHeight(fullImage);
             BOOL cropped = NO;
+            BOOL flat = NO;
+            unsigned char flatRGB[3] = {0, 0, 0};
 
             if (targetPlayerView) {
                 // Convert view frame to window coordinates (flipped for image)
@@ -23007,6 +23091,7 @@ static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
                     pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
                     outWidth = (int)CGImageGetWidth(croppedImage);
                     outHeight = (int)CGImageGetHeight(croppedImage);
+                    flat = SpliceKit_imageIsFlat(croppedImage, flatRGB);
                     CGImageRelease(croppedImage);
                     cropped = YES;
                 }
@@ -23016,6 +23101,7 @@ static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
             if (!pngData) {
                 NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:fullImage];
                 pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+                flat = SpliceKit_imageIsFlat(fullImage, flatRGB);
             }
 
             CGImageRelease(fullImage);
@@ -23031,7 +23117,7 @@ static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
                 return;
             }
 
-            result = @{
+            NSMutableDictionary *r = [@{
                 @"status": @"ok",
                 @"path": outputPath,
                 @"width": @(outWidth),
@@ -23039,7 +23125,9 @@ static NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
                 @"bytes": @(pngData.length),
                 @"cropped": @(cropped),
                 @"capture": captureDebug,
-            };
+            } mutableCopy];
+            SpliceKit_captureAnnotateFlat(r, flat, flatRGB);
+            result = r;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -23124,6 +23212,8 @@ static NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
             int outWidth = (int)CGImageGetWidth(fullImage);
             int outHeight = (int)CGImageGetHeight(fullImage);
             BOOL cropped = NO;
+            BOOL flat = NO;
+            unsigned char flatRGB[3] = {0, 0, 0};
 
             if (largestTimelineView) {
                 // Convert view frame to window coordinates (flipped for CG image)
@@ -23145,6 +23235,7 @@ static NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
                     pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
                     outWidth = (int)CGImageGetWidth(croppedImage);
                     outHeight = (int)CGImageGetHeight(croppedImage);
+                    flat = SpliceKit_imageIsFlat(croppedImage, flatRGB);
                     CGImageRelease(croppedImage);
                     cropped = YES;
                 }
@@ -23154,6 +23245,7 @@ static NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
             if (!pngData) {
                 NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:fullImage];
                 pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+                flat = SpliceKit_imageIsFlat(fullImage, flatRGB);
             }
 
             CGImageRelease(fullImage);
@@ -23169,14 +23261,16 @@ static NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
                 return;
             }
 
-            result = @{
+            NSMutableDictionary *r = [@{
                 @"status": @"ok",
                 @"path": outputPath,
                 @"width": @(outWidth),
                 @"height": @(outHeight),
                 @"bytes": @(pngData.length),
                 @"cropped": @(cropped),
-            };
+            } mutableCopy];
+            SpliceKit_captureAnnotateFlat(r, flat, flatRGB);
+            result = r;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -23283,6 +23377,8 @@ static NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
             int outWidth = (int)CGImageGetWidth(fullImage);
             int outHeight = (int)CGImageGetHeight(fullImage);
             BOOL cropped = NO;
+            BOOL flat = NO;
+            unsigned char flatRGB[3] = {0, 0, 0};
 
             if (largestInspectorView) {
                 NSRect viewFrameInWindow = [largestInspectorView convertRect:[largestInspectorView bounds] toView:nil];
@@ -23303,6 +23399,7 @@ static NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
                     pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
                     outWidth = (int)CGImageGetWidth(croppedImage);
                     outHeight = (int)CGImageGetHeight(croppedImage);
+                    flat = SpliceKit_imageIsFlat(croppedImage, flatRGB);
                     CGImageRelease(croppedImage);
                     cropped = YES;
                 }
@@ -23312,6 +23409,7 @@ static NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
             if (!pngData) {
                 NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:fullImage];
                 pngData = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+                flat = SpliceKit_imageIsFlat(fullImage, flatRGB);
             }
 
             CGImageRelease(fullImage);
@@ -23336,6 +23434,7 @@ static NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
                 @"cropped": @(cropped),
             } mutableCopy];
             if (matchedClassName) r[@"matchedClass"] = matchedClassName;
+            SpliceKit_captureAnnotateFlat(r, flat, flatRGB);
             result = r;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
@@ -23865,10 +23964,19 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
     if (title.length == 0 || [title isEqualToString:@"Window"] || [title isEqualToString:@"Untitled"]
         || [title isEqualToString:@"Panel"]) {
         NSMutableArray *texts = [NSMutableArray array];
-        for (NSDictionary *label in labels) {
+        for (NSDictionary *label in labels) {              // field labels first ("Compound Clip Name:")
             NSString *t = label[@"text"];
-            if ([t isKindOfClass:[NSString class]] && t.length > 0 && ![t hasPrefix:@"["]) [texts addObject:t];
+            if ([t isKindOfClass:[NSString class]] && t.length > 0 && ![t hasPrefix:@"["] && [t hasSuffix:@":"]) {
+                [texts addObject:t];
+            }
             if (texts.count >= 3) break;
+        }
+        for (NSDictionary *label in labels) {              // other text only when fewer than two of those
+            if (texts.count >= 2) break;
+            NSString *t = label[@"text"];
+            if ([t isKindOfClass:[NSString class]] && t.length > 0 && ![t hasPrefix:@"["] && ![t hasSuffix:@":"]) {
+                [texts addObject:t];
+            }
         }
         if (texts.count > 0) {
             summary = [NSString stringWithFormat:@"fields %@", [texts componentsJoinedByString:@" / "]];

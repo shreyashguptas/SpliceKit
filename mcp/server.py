@@ -189,7 +189,8 @@ HEAR it: get_audio_levels(handle) (its primary-storyline neighbours come along, 
   cut between two analysed primary-storyline clips. Not FCP's audio meters or waveforms: FCP's
   volume, fades, effects, retiming and the mix of all concurrent clips are not applied. Read-only.
 SEE it: capture_timeline, capture_viewer, capture_inspector, capture_clip_frame(handle) (the clip
-  as rendered in the Viewer, effects included; moves the playhead and restores it).
+  as rendered in the Viewer, effects included; moves the playhead and restores it). The display must
+  be awake and, for the Viewer, the screen unlocked; a one-colour capture comes back with a WARNING.
 SOURCE CLIPS (browser -> timeline): browser_list_clips() then
   add_clip_to_timeline(handle, edit="insert"|"connect"|"append", start_seconds, end_seconds,
   at_seconds, backtimed, dry_run): a range of a source clip (seconds from its first frame)
@@ -3767,11 +3768,15 @@ def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
               If empty, lists all top-level menus.
         depth: How deep to recurse into submenus (default 2).
         validate: run each listed menu's validation first (what AppKit does when the menu
-              opens), so titles set on validation, such as Edit > "Undo <action>", and the
-              enabled states are current. Off by default: without it the titles are the
-              static ones ("Undo") and the enabled states those of the last validation.
+              opens). Off by default. It resolves the Undo / Redo titles only when Final
+              Cut Pro is frontmost: validation goes through the key window, and with FCP in
+              the background (QA run 4) the items stay "Undo" / "Redo" and disabled even
+              while the document holds an undoable step.
 
-    Returns structured list of menu items with shortcuts and enabled status.
+    Returns the menu items with shortcuts and enabled status. For the Edit menu (or all
+    menus) the answer also carries `undoState`: canUndo / canRedo and the action names
+    read from the library document's undo manager, which is what Edit > Undo and
+    history_action act on, and a `note` on the validation limit above.
     """
     params = {"depth": depth}
     if menu:
@@ -4975,6 +4980,14 @@ def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | N
     return _maybe_with_image(text, image)
 
 
+def _capture_flat_note(r: dict) -> str:
+    """One WARNING line when the bridge found the captured image to be one flat colour
+    (QA run 4: a locked screen gives a grey field, a sleeping display a black one)."""
+    if not isinstance(r, dict) or not r.get("flat"):
+        return ""
+    return "\nWARNING: " + str(r.get("warning") or "the captured image is one flat colour: the window may have rendered nothing")
+
+
 @splicekit_tool("capture_clip_frame")
 def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960):
     """The clip as rendered in the Viewer: effects, color correction and transforms
@@ -4985,7 +4998,10 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
     FCP's File > Share > Save Current Frame export) and puts the playhead back where
     it was (the selection is not touched). The frame is returned inline as MCP image
     content and the PNG path is reported. The Viewer shows the playhead frame only
-    while the pointer is not skimming over the timeline.
+    while the pointer is not skimming over the timeline, and renders only with the
+    screen unlocked and the display awake: a one-colour image (QA run 4: uniform grey
+    with the screen locked) is reported with `flat: true` and a WARNING line, and is
+    not a verified frame unless the frame really is flat (black).
 
     Prefer get_clip_info() when the raw footage is enough: it reads the frame from the
     source media file without moving the playhead. Use this tool to see what the clip
@@ -5031,6 +5047,9 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
         where = ("as rendered in the Viewer (effects included)" if capture.get("cropped", True)
                  else "of the whole FCP window (the Viewer could not be isolated; effects included)")
         lines.append(f"  frame: {frame.get('width')}x{frame.get('height')} JPEG {where}")
+    if capture.get("flat") or r.get("flat"):
+        lines.append("  WARNING: " + str(capture.get("warning") or r.get("warning")
+                                         or "the Viewer image is one flat colour: not a verified frame"))
     failure = r.get("failure") or r.get("error")
     if failure:
         lines.append(f"  failure: {failure}")
@@ -5055,8 +5074,11 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool =
     """Capture the FCP viewer/canvas as a PNG screenshot.
 
     Screenshots the viewer area only (cropped from the FCP window, not the
-    whole screen). Captures GPU/Metal content directly — FCP does not need
-    to be in the foreground.
+    whole screen). Captures the window's content directly (CGWindowListCreateImage),
+    so FCP need not be frontmost; the display must be awake and, for the Viewer's
+    content, the screen unlocked (QA run 4: a locked screen gave a flat grey field, a
+    sleeping display a black one). A one-colour capture is reported with `flat: true`
+    and a WARNING line; it can also be a genuinely black frame.
 
     Use after: applying effects, color correction, titles, captions, or
     any change visible in the canvas. Read the resulting PNG to visually
@@ -5077,7 +5099,7 @@ def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool =
 
     if r.get("status") == "ok":
         text = (f"Viewer captured: {r.get('path')}\n"
-                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)" + _capture_flat_note(r))
         return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 
@@ -5484,10 +5506,12 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     footage). The file-to-timeline mapping always assumes normal speed (100%): for a
     retimed clip the levels and their times do not correspond to what FCP plays. `retimed`
     is FCP's own flag (`isRetimed` on 12.3) and "unknown" when the clip object answers
-    none. When the flag is set the note compares the media file's nominal video frame rate
-    with the project's: a file at another frame rate is rate-conformed by FCP (Rate Conform
-    in the Video inspector); a conform was seen to set the flag by itself on 12.3 (a 30 fps
-    file in a 29.97 fps project), and FCP's conform repeats or drops frames without a speed
+    none. When the flag is set the note compares the media file's video frame rate with
+    the project's, reading the file's frame grid (1 / the shortest frame duration) and its
+    average rate over the file, and naming a variable-frame-rate recording when the two
+    differ: a file at another frame rate is rate-conformed by FCP (Rate Conform in the
+    Video inspector); a conform was seen to set the flag by itself on 12.3 (a 30 fps-grid
+    screen recording in a 29.97 fps project), and FCP's conform repeats or drops frames without a speed
     change, so the mapping holds for a conform alone; whether a speed change sits on top of
     it SpliceKit cannot tell. Check the clip's Retime state yourself before trusting a
     retimed clip's levels. Channels are pooled, never mixed: up to eight audio tracks of the
@@ -5606,8 +5630,10 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bo
     """Capture the FCP timeline as a PNG screenshot.
 
     Screenshots the timeline area only (cropped from the FCP window, not the
-    whole screen). Captures GPU/Metal content directly — FCP does not need
-    to be in the foreground.
+    whole screen). Captures the window's content directly (CGWindowListCreateImage),
+    so FCP need not be frontmost; the display must be awake (QA run 4: a sleeping
+    display gave a black capture; a locked screen still rendered the timeline). A
+    one-colour capture is reported with `flat: true` and a WARNING line.
 
     Use after: blade cuts, clip rearrangement, adding/removing markers,
     transitions, trim edits, or any structural timeline change. Read the
@@ -5629,7 +5655,7 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bo
 
     if r.get("status") == "ok":
         text = (f"Timeline captured: {r.get('path')}\n"
-                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)" + _capture_flat_note(r))
         return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 
@@ -5674,7 +5700,7 @@ def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: st
         matched = r.get("matchedClass", "(full window fallback)")
         text = (f"Inspector captured: {r.get('path')}\n"
                 f"Matched class: {matched}\n"
-                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)")
+                f"Size: {r.get('width')}x{r.get('height')} ({r.get('bytes', 0)} bytes)" + _capture_flat_note(r))
         return _maybe_with_image(text, _image_content(path=r.get("path")) if return_image else None)
     return _fmt(r)
 

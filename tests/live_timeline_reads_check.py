@@ -919,6 +919,9 @@ def clip_info_check(st):
     return fails, 1, warns
 
 
+VIEWER_FRAME_FLAT = False
+
+
 def viewer_frame_check(st):
     section("timeline.captureClipFrame (CHANGES STATE: moves the playhead, restored)")
     clips = _spine_clips(st)
@@ -964,8 +967,18 @@ def viewer_frame_check(st):
     else:
         fails += 1
         print("FAIL  no frame in the response")
-    if fails == 0:
+    cap = r.get("capture") if isinstance(r.get("capture"), dict) else {}
+    flat = bool(cap.get("flat") or r.get("flat"))
+    if flat:
+        global VIEWER_FRAME_FLAT
+        VIEWER_FRAME_FLAT = True
+        print(f"WARN  the Viewer image is one flat colour {cap.get('flatColor') or r.get('flatColor')}: "
+              f"{cap.get('warning') or r.get('warning')}")
+    if fails == 0 and not flat:
         print("OK    Viewer frame captured and playhead restored")
+    elif fails == 0:
+        print("NOTE  playhead restored, but the Viewer image is flat: the frame is NOT verified "
+              "(screen locked or display asleep? QA run 4)")
     return fails, 1
 
 
@@ -1032,7 +1045,9 @@ def main():
                            + (f" ({ci_warns} warning(s))" if ran and ci_warns else ""))
         if args.viewer_frame_check:
             fails, ran = viewer_frame_check(st)
-            verdict.append(f"viewer-frame-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}")
+            verdict.append(f"viewer-frame-check: {'not run' if not ran else ('OK' if fails == 0 else f'{fails} failure(s)')}"
+                           + (" (frame NOT verified: one flat colour; screen locked or display asleep?)"
+                              if ran and VIEWER_FRAME_FLAT else ""))
     section("Verdict")
     print("; ".join(verdict) if verdict else "no project open — vocabulary section is still valid evidence")
     failed = any(("failure" in v) or ("mismatches" in v and not v.endswith("0 mismatches")) for v in verdict)

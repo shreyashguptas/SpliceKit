@@ -499,8 +499,11 @@ the spine index they are anchored to) and markers; raw RPC: `timeline.getDetaile
 ## Screenshots & Visual Verification
 
 Use `capture_viewer()` and `capture_timeline()` to take screenshots of FCP without
-bringing it to the foreground. These capture GPU/Metal content directly — no `screencapture`
-needed. The resulting PNGs can be read by Claude to visually verify edits.
+bringing it to the foreground. These capture the window's content directly — no `screencapture`
+needed. The resulting PNGs can be read by Claude to visually verify edits. The display must be
+awake, and the Viewer's content needs the screen unlocked: a locked screen gives a flat grey Viewer
+and a sleeping display a black capture (QA run 4). A one-colour capture is reported with `flat: true`
+and a WARNING line (it can also be a genuinely black frame).
 
 **When to use:**
 - After applying effects, color corrections, titles, or captions → `capture_viewer()`

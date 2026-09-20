@@ -285,6 +285,38 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertEqual(image.format, "jpeg")
         self.assertIn("at 4.000s", out_custom[0])
 
+    def test_capture_tools_warn_on_a_flat_image(self):
+        # QA run 4: with the screen locked every window capture was a uniform grey field that
+        # looked like a successful capture; the bridge now reports `flat` + `warning`.
+        with tempfile.TemporaryDirectory() as tmp:
+            png_path = os.path.join(tmp, "viewer.png")
+            with open(png_path, "wb") as f:
+                f.write(TINY_PNG)
+            warning = ("the captured image is one flat colour (RGB 35,35,35): either what Final Cut Pro shows "
+                       "there really is flat (a black frame, an empty Viewer) or the window rendered nothing")
+
+            def responder(method, params):
+                return {"status": "ok", "path": params["path"], "width": 1, "height": 1, "bytes": len(TINY_PNG),
+                        "cropped": True, "flat": True, "flatColor": [35, 35, 35], "warning": warning}
+
+            self._install_bridge(responder)
+            for tool in ("capture_viewer", "capture_timeline", "capture_inspector"):
+                out = getattr(self.module, tool)(path=png_path, return_image=False)
+                self.assertIsInstance(out, str, tool)
+                self.assertIn("WARNING: the captured image is one flat colour (RGB 35,35,35)", out, tool)
+
+            def clip_frame_responder(method, params):
+                r = _capture_clip_frame_response(params)
+                r["flat"] = True
+                r["warning"] = warning
+                r["capture"] = dict(r.get("capture") or {}, flat=True, flatColor=[35, 35, 35], warning=warning)
+                return r
+
+            self._install_bridge(clip_frame_responder)
+            text = self.module.capture_clip_frame("obj_1")[0]
+            self.assertIn("frame: 960x540 JPEG as rendered in the Viewer (effects included)", text)
+            self.assertIn("WARNING: the captured image is one flat colour (RGB 35,35,35)", text)
+
     def test_capture_clip_frame_warns_when_playhead_not_restored_and_reports_failure(self):
         self._install_bridge(lambda m, p: _capture_clip_frame_response(p, playheadRestored=False, playheadAfter=3.0))
         out = self.module.capture_clip_frame("obj_1")

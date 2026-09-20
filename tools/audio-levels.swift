@@ -55,7 +55,9 @@ struct AudioLevelsResult: Codable {
     let sampleRate: Double
     let channels: Int                  // channels pooled over the decoded tracks (1 for the mixdown fallback)
     let channelsMode: String           // "pooled" (no channel mixed with another) or "mixdownMono" (the fallback)
-    let videoFrameRate: Double?        // nominal frame rate of the file's first video track, when it has one
+    let videoFrameRate: Double?        // the first video track's frame grid (1 / shortest frame duration), else its average
+    let videoFrameRateAverage: Double? // the first video track's average rate over the file (AVAssetTrack.nominalFrameRate)
+    let videoFrameRateSource: String?  // "minFrameDuration" or "nominalFrameRate": which reading videoFrameRate is
     let analysisRange: Range
     let sliceSeconds: Double
     let floorDb: Double
@@ -166,8 +168,14 @@ guard !audioTracks.isEmpty else {
     exit(2)
 }
 
-// The video track's nominal frame rate, for the bridge's frame-rate-conform reading
-// (a media file whose frame rate differs from the project's is rate-conformed by FCP).
+// The first video track's frame rate, for the bridge's frame-rate-conform reading (a media
+// file whose frame rate differs from the project's is rate-conformed by FCP). Two readings:
+// the frame grid, the reciprocal of the shortest frame duration in the track (30.000 for a
+// recording on a 30 fps grid), and the average over the file (AVAssetTrack.nominalFrameRate,
+// frame count over duration). They agree for a constant-frame-rate file; QA run 4 found a
+// variable-frame-rate screen recording on a 30 fps grid averaging 29.74 fps, which the
+// average alone had presented as "nominally 29.740 fps". A grid above 240 fps (one glitch
+// frame would give that) is not trusted and the average is reported instead.
 let videoSemaphore = DispatchSemaphore(value: 0)
 var videoTracks: [AVAssetTrack] = []
 asset.loadTracks(withMediaType: .video) { tracks, _ in
@@ -176,7 +184,23 @@ asset.loadTracks(withMediaType: .video) { tracks, _ in
 }
 videoSemaphore.wait()
 var videoFrameRate: Double = 0
-if let video = videoTracks.first { videoFrameRate = Double(video.nominalFrameRate) }
+var videoFrameRateAverage: Double = 0
+var videoFrameRateSource = ""
+if let video = videoTracks.first {
+    videoFrameRateAverage = Double(video.nominalFrameRate)
+    let shortest = video.minFrameDuration
+    if shortest.isValid && shortest.value > 0 && shortest.timescale > 0 {
+        let grid = Double(shortest.timescale) / Double(shortest.value)
+        if grid > 0 && grid <= 240 {
+            videoFrameRate = grid
+            videoFrameRateSource = "minFrameDuration"
+        }
+    }
+    if videoFrameRate <= 0 && videoFrameRateAverage > 0 {
+        videoFrameRate = videoFrameRateAverage
+        videoFrameRateSource = "nominalFrameRate"
+    }
+}
 
 let fileDuration = CMTimeGetSeconds(asset.duration)
 let rangeStart = max(0.0, startTime ?? 0.0)
@@ -524,6 +548,8 @@ let out = AudioLevelsResult(
     channels: pooled.channels,
     channelsMode: channelsMode,
     videoFrameRate: videoFrameRate > 0 ? videoFrameRate : nil,
+    videoFrameRateAverage: videoFrameRateAverage > 0 ? videoFrameRateAverage : nil,
+    videoFrameRateSource: videoFrameRate > 0 ? videoFrameRateSource : nil,
     analysisRange: .init(start: rangeStart, end: rangeStart + Double(pooled.framesTotal) / pooled.sampleRate),
     sliceSeconds: effectiveSlice,
     floorDb: floorDb,

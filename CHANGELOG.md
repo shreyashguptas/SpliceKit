@@ -68,6 +68,33 @@ that this fork has removed.
   an unfinished install, and no longer swallows Ctrl-C after a menu.
 
 ### Fixed
+- **The retime note called a variable-frame-rate file's average rate its nominal rate** (QA run
+  4: a 30 fps screen recording with dropped frames, averaging 29.74 fps, was reported as
+  "nominally 29.740 fps"). `AVAssetTrack.nominalFrameRate` is frame count over duration. The
+  helper now also reads the file's frame grid (1 / the shortest frame duration in the track,
+  `minFrameDuration`; not trusted above 240 fps) and reports both (`videoFrameRate`,
+  `videoFrameRateAverage`, `videoFrameRateSource`); the note names the grid, the average when
+  it differs (so a variable-frame-rate recording is called one), and compares the grid with the
+  project's rate. Not yet re-run against that file.
+- **`list_menus(validate=True)` did not resolve the Edit > Undo title, and reported the item
+  disabled while an undoable step existed** (QA run 4): AppKit resolves Undo / Redo through the
+  key window, and with Final Cut Pro in the background, the state SpliceKit is normally driven
+  in, validation leaves them "Undo" / "Redo" and disabled. `menu.list` now also returns
+  `undoState` (canUndo / canRedo and the action names, read from the library document's undo
+  manager, which is what Edit > Undo and `history_action` act on) for the Edit menu or the whole
+  menu bar, and a `note` stating the limit. Whether validation resolves the title with FCP
+  frontmost was not tested (the QA Mac's screen was locked).
+- **Window captures reported success on a one-colour image** (QA run 4: a locked screen gave a
+  uniform grey Viewer, a sleeping display a black timeline, both returned as captures; the live
+  check's viewer-frame section passed on the grey frame). `viewer.capture`, `timeline.capture`,
+  `inspector.capture` and `timeline.captureClipFrame` now test the captured image for a single
+  flat colour (a 32 x 32 downscale, every pixel within 2/255 of the first) and answer `flat`,
+  `flatColor` and a `warning`; the status stays ok because a flat frame can be real (a black
+  frame). The MCP tools print the warning, the live check says the frame is not verified, and
+  the docs say what a capture needs: the display awake, and for the Viewer the screen unlocked.
+- **The dialog summary picked up a popup's value as a field** (QA run 4: "Compound Clip Name: /
+  Library: / Item 1"): labels ending in a colon are taken first now, other text only when fewer
+  than two of those exist.
 - **`get_clip_info` invented a source media file for a compound clip** (QA run 3, the surviving
   half of run 2's compound-clip bug): for a compound clip on the timeline (FCP: reference clip,
   its `isReferenceClip` flag; a multicam or synchronized clip answers the same flag) it named the
@@ -105,8 +132,10 @@ that this fork has removed.
   differs from the project's, the note says the file is rate-conformed (FCP's Rate Conform),
   that a conform on its own was seen to set the flag (QA run 3) and that FCP's conform keeps the
   mapping, and that a speed change on top of it cannot be told apart; when the rates match, that
-  a conform is unlikely to be the reason and the clip is most likely retimed. QA run 3 established the case: a 30 fps .mp4 in a 29.97 fps project
-  answered `isRetimed` = true at 100% speed, both 29.97 fps .mov files answered false.
+  a conform is unlikely to be the reason and the clip is most likely retimed. QA run 3
+  established the case: a 30 fps-grid .mp4 screen recording in a 29.97 fps project answered
+  `isRetimed` = true at 100% speed, both 29.97 fps .mov files answered false (QA run 4: that
+  .mp4 is variable-frame-rate, averaging 29.74 fps; see above).
 - **A trim inside a `begin_edit` group logged no `[Trim]` line** (QA run 3); one line per trim
   now, naming the group, its own closed undo step, or why none could be opened.
 - **The pending-dialog note named the Compound Clip Name sheet "Window"** (QA run 3): AppKit's
@@ -116,8 +145,8 @@ that this fork has removed.
 - **`list_menus` could not show a validated title such as Edit > "Undo Trim"** (QA run 3): it
   read the static titles. `list_menus(validate=True)` (RPC `menu.list` `validate`) now runs
   each listed menu's validation first, what AppKit does when the menu opens, so titles set on
-  validation and the enabled states are current. Off by default. Not yet run against a live
-  Final Cut Pro.
+  validation and the enabled states are current. Off by default. QA run 4: with Final Cut Pro in
+  the background this does not resolve Undo / Redo (see the run-4 entry above).
 - **`get_audio_levels` skipped every clip whose media file carries a start timecode** ("the
   clip lies entirely before the start of its media file"; QA run 2: three of five clips, the
   ones with audio). The clip's start point in its source media was read from
