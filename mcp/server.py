@@ -4489,9 +4489,8 @@ def open_project(name: str, event: str = "") -> str:
 # ============================================================
 # Floating secondary timeline window backed by a second
 # PEEditorContainerModule. Commands route to the focused pane.
-# Opening the secondary pane is disabled (FCP 12.3): teardown leaves observers
-# inside FCP and has reproduced three distinct crash signatures; close/status
-# still work for containers left open from older builds.
+# Close hides the window (-orderOut:) and retains the container for the app session;
+# open reuses the cached module instead of tearing it down.
 
 @splicekit_tool("dual_timeline_status")
 def dual_timeline_status() -> str:
@@ -4501,12 +4500,10 @@ def dual_timeline_status() -> str:
 
 @splicekit_tool("dual_timeline_open")
 def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
-    """Open a floating secondary timeline window (DISABLED).
+    """Open a floating secondary timeline window.
 
-    Disabled on FCP 12.3: tearing down the secondary container leaves KVO and
-    NSNotificationCenter observers registered inside Final Cut Pro and crashes
-    the app. Re-enable when teardown is proven complete. Use dual_timeline_close
-    if a secondary window is still open from an older build.
+    Creates the secondary PEEditorContainerModule at most once per app run; closing
+    hides the window without destroying the module. Re-open reuses the cached container.
 
     Args:
         source: Which pane to copy the sequence from.
@@ -4520,22 +4517,14 @@ def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
 
 @splicekit_tool("dual_timeline_sync_root")
 def dual_timeline_sync_root(source: str = "primary", focus: bool = False) -> str:
-    """Clone the source pane's root into the secondary timeline (DISABLED).
-
-    Same disablement as dual_timeline_open: creates the secondary container,
-    which cannot be torn down safely on FCP 12.3.
-    """
+    """Clone the source pane's root into the secondary timeline."""
     params = {"source": source, "focus": focus}
     return _call_or_error("dualTimeline.syncRoot", **params)
 
 
 @splicekit_tool("dual_timeline_open_selected_in_secondary")
 def dual_timeline_open_selected_in_secondary(source: str = "primary", focus: bool = True) -> str:
-    """Open the selection in the secondary timeline (DISABLED).
-
-    Same disablement as dual_timeline_open: creates the secondary container,
-    which cannot be torn down safely on FCP 12.3.
-    """
+    """Open the selection in the secondary timeline."""
     params = {"source": source, "focus": focus}
     return _call_or_error("dualTimeline.openSelectedInSecondary", **params)
 
@@ -4552,7 +4541,7 @@ def dual_timeline_focus(pane: str) -> str:
 
 @splicekit_tool("dual_timeline_close")
 def dual_timeline_close(focus_primary: bool = True) -> str:
-    """Close the floating secondary timeline window.
+    """Hide the floating secondary timeline window (does not destroy the container).
 
     Args:
         focus_primary: When true, move focus back to the primary timeline after closing.
