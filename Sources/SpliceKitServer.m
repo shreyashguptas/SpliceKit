@@ -17923,7 +17923,7 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
         if (undoState) r[@"undoState"] = undoState;
         r[@"note"] = @"Undo / Redo titles and enabled states are AppKit's menu validation, resolved through the key "
                      @"window: with Final Cut Pro not frontmost they read \"Undo\" / \"Redo\" and disabled even with "
-                     @"validate=true (QA run 4). undoState is the document's undo manager itself.";
+                     @"validate=true (QA run 4). undoState is read from the document's undo manager.";
         result = r;
     }
     return result;
@@ -22974,9 +22974,10 @@ static NSView *SpliceKit_findPlayerViewForCapture(NSWindow *mainWindow,
 }
 
 // Is the captured image one flat colour? Drawn into a 32x32 RGBA bitmap (a flat image stays
-// flat under scaling; a real one does not) and every pixel compared with the first, within
-// 2/255. QA run 4: with the screen locked the window capture was a uniform grey field and
-// with the display asleep a black one, both returned as successful captures.
+// flat under scaling; a real one does not) and every pixel inside the outer ring compared
+// with the centre one, within 2/255 (the ring is skipped: a full-window capture has
+// transparent rounded corners). QA run 4: with the screen locked the window capture was a
+// uniform grey field and with the display asleep a black one, both returned as captures.
 static BOOL SpliceKit_imageIsFlat(CGImageRef image, unsigned char outRGB[3]) {
     if (!image) return NO;
     const int side = 32;
@@ -22989,13 +22990,16 @@ static BOOL SpliceKit_imageIsFlat(CGImageRef image, unsigned char outRGB[3]) {
     if (ctx) {
         CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
         CGContextDrawImage(ctx, CGRectMake(0, 0, side, side), image);
+        const unsigned char *ref = pixels + ((side / 2) * side + side / 2) * 4;
         flat = YES;
-        for (int i = 1; i < side * side; i++) {
-            const unsigned char *p = pixels + i * 4;
-            if (abs((int)p[0] - (int)pixels[0]) > 2 || abs((int)p[1] - (int)pixels[1]) > 2
-                || abs((int)p[2] - (int)pixels[2]) > 2) { flat = NO; break; }
+        for (int y = 1; y < side - 1 && flat; y++) {
+            for (int x = 1; x < side - 1; x++) {
+                const unsigned char *p = pixels + (y * side + x) * 4;
+                if (abs((int)p[0] - (int)ref[0]) > 2 || abs((int)p[1] - (int)ref[1]) > 2
+                    || abs((int)p[2] - (int)ref[2]) > 2) { flat = NO; break; }
+            }
         }
-        if (flat && outRGB) { outRGB[0] = pixels[0]; outRGB[1] = pixels[1]; outRGB[2] = pixels[2]; }
+        if (flat && outRGB) { outRGB[0] = ref[0]; outRGB[1] = ref[1]; outRGB[2] = ref[2]; }
         CGContextRelease(ctx);
     }
     CGColorSpaceRelease(cs);

@@ -923,6 +923,7 @@ VIEWER_FRAME_FLAT = False
 
 
 def viewer_frame_check(st):
+    global VIEWER_FRAME_FLAT
     section("timeline.captureClipFrame (CHANGES STATE: moves the playhead, restored)")
     clips = _spine_clips(st)
     c = _first_media_clip(st) or (clips[0] if clips else None)
@@ -970,7 +971,6 @@ def viewer_frame_check(st):
     cap = r.get("capture") if isinstance(r.get("capture"), dict) else {}
     flat = bool(cap.get("flat") or r.get("flat"))
     if flat:
-        global VIEWER_FRAME_FLAT
         VIEWER_FRAME_FLAT = True
         print(f"WARN  the Viewer image is one flat colour {cap.get('flatColor') or r.get('flatColor')}: "
               f"{cap.get('warning') or r.get('warning')}")

@@ -3774,9 +3774,9 @@ def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
               while the document holds an undoable step.
 
     Returns the menu items with shortcuts and enabled status. For the Edit menu (or all
-    menus) the answer also carries `undoState`: canUndo / canRedo and the action names
-    read from the library document's undo manager, which is what Edit > Undo and
-    history_action act on, and a `note` on the validation limit above.
+    menus) the answer also carries `undoState` when a library is open: canUndo / canRedo
+    and the action names read from the library document's undo manager, which is what
+    Edit > Undo and history_action act on, and a `note` on the validation limit above.
     """
     params = {"depth": depth}
     if menu:
@@ -5506,12 +5506,15 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     footage). The file-to-timeline mapping always assumes normal speed (100%): for a
     retimed clip the levels and their times do not correspond to what FCP plays. `retimed`
     is FCP's own flag (`isRetimed` on 12.3) and "unknown" when the clip object answers
-    none. When the flag is set the note compares the media file's video frame rate with
-    the project's, reading the file's frame grid (1 / the shortest frame duration) and its
-    average rate over the file, and naming a variable-frame-rate recording when the two
-    differ: a file at another frame rate is rate-conformed by FCP (Rate Conform in the
-    Video inspector); a conform was seen to set the flag by itself on 12.3 (a 30 fps-grid
-    screen recording in a 29.97 fps project), and FCP's conform repeats or drops frames without a speed
+    none. When the flag is set the note compares two readings of the media file's video,
+    its average frame rate over the file and the rate its shortest frame duration
+    corresponds to (neither is a "nominal" rate), with the project's rate, naming a
+    variable-frame-rate recording when they differ; a conform is asserted only when both
+    differ from the project's rate, and left open when they straddle it, since which one
+    FCP's Rate Conform goes by SpliceKit does not know. A file at another frame rate is
+    rate-conformed by FCP (Rate Conform in the Video inspector); a conform was seen to set
+    the flag by itself on 12.3 (a 30 fps, variable-frame-rate screen recording in a 29.97
+    fps project), and FCP's conform repeats or drops frames without a speed
     change, so the mapping holds for a conform alone; whether a speed change sits on top of
     it SpliceKit cannot tell. Check the clip's Retime state yourself before trusting a
     retimed clip's levels. Channels are pooled, never mixed: up to eight audio tracks of the

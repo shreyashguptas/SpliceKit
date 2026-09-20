@@ -267,8 +267,9 @@ loudest sample in any channel and its RMS is over all channels' samples (for a f
 track, the figures ffmpeg's volumedetect gives; a clip line saying mixdownMono fell back to the
 decoder's mono mixdown, which reads 3 dB high on dual-mono files). The mapping assumes normal speed
 (100%); `retimed` is FCP's own flag (`isRetimed`; a frame-rate conform was seen to set it by itself
-on 12.3, and the note compares the media file's nominal frame rate with the project's to say when
-that explains it) when the clip object answers
+on 12.3, and the note compares two readings of the media file's video, its average frame rate and the
+rate its shortest frame duration corresponds to, with the project's rate, saying when it cannot tell
+which one FCP's Rate Conform goes by) when the clip object answers
 one, and "unknown" otherwise. The clip's start point in its source media is read from FCP's
 `clippedRange` (else `trimStartTime` / `trimmedOffset`) against the media's start timecode
 (`unclippedRange.start`), the same reading the transcript panel uses; when none answers, the levels start
