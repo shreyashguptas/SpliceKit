@@ -22,6 +22,7 @@
 #import "SpliceKitURLImport.h"
 #import "SpliceKitBRAWExports.h"
 #import "SpliceKitImmersivePreviewPanel.h"
+#import "SpliceKitVisionPro.h"
 #import "SpliceKitAudioLevels.h"
 #import <sys/socket.h>
 #import <sys/un.h>
@@ -10768,16 +10769,7 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                                 mediaObj = [(NSArray *)innerItems objectAtIndex:0];
                             }
                         }
-                        id media = [mediaObj valueForKey:@"media"];
-                        if (media) {
-                            id rep = [media valueForKey:@"originalMediaRep"];
-                            if (rep) {
-                                id url = [rep valueForKey:@"fileURL"];
-                                if (url && [url isKindOfClass:[NSURL class]]) {
-                                    mediaURL = url;
-                                }
-                            }
-                        }
+                        mediaURL = SpliceKit_clipInfoMediaURL(mediaObj, NULL, NULL);
                     } @catch (NSException *e) {}
                 }
             } @catch (NSException *e) {
@@ -23424,8 +23416,9 @@ static void SpliceKit_captureAnnotateFlat(NSMutableDictionary *r, BOOL flat, con
     r[@"warning"] = [NSString stringWithFormat:
         @"the captured image is one flat colour (RGB %d,%d,%d): either what Final Cut Pro shows there really is flat "
         @"(a black frame, a gap, an empty Viewer) or nothing rendered in that area. Captures are drawn in-process "
-        @"from Final Cut Pro's views and a locked screen does not blank them; a sleeping display has been reported "
-        @"to give a black frame but that is unconfirmed", rgb[0], rgb[1], rgb[2]];
+        @"from Final Cut Pro's views and a locked screen does not blank them; when the display is asleep Final Cut "
+        @"Pro renders a black frame, so a flat black capture with the display asleep is expected and is not a failure",
+        rgb[0], rgb[1], rgb[2]];
     SpliceKit_log(@"[Capture] flat image (RGB %d,%d,%d) at %@", rgb[0], rgb[1], rgb[2], r[@"path"] ?: @"");
 }
 
@@ -29300,16 +29293,34 @@ static NSDictionary *SpliceKit_classMetadata(Class cls) {
     };
 }
 
+static const NSTimeInterval SpliceKit_debugScanTimeBudgetSeconds = 2.0;
+
+static BOOL SpliceKit_debugScanBudgetExpired(NSDate *deadline) {
+    return deadline && [deadline timeIntervalSinceNow] <= 0;
+}
+
+static NSInteger SpliceKit_debugScanLimit(NSDictionary *params) {
+    NSInteger limit = [params[@"limit"] integerValue];
+    if (limit < 1) limit = 200;
+    return limit;
+}
+
 static NSDictionary *SpliceKit_handleDumpRuntimeMetadata(NSDictionary *params) {
     NSString *binaryFilter = params[@"binary"]; // optional: filter to one binary
     NSArray *includeFields = params[@"include"]; // optional: subset of fields
     BOOL classesOnly = [params[@"classesOnly"] boolValue]; // just class names, no details
+    NSInteger limit = SpliceKit_debugScanLimit(params);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:SpliceKit_debugScanTimeBudgetSeconds];
+    BOOL truncated = NO;
+    NSString *stopReason = nil;
+    NSUInteger classesScanned = 0;
+    NSUInteger totalClassesInFilter = 0;
 
     NSMutableArray *images = [NSMutableArray array];
     NSMutableDictionary *classesByImage = [NSMutableDictionary dictionary];
 
     uint32_t imageCount = _dyld_image_count();
-    for (uint32_t i = 0; i < imageCount; i++) {
+    for (uint32_t i = 0; i < imageCount && !truncated; i++) {
         const char *imageName = _dyld_get_image_name(i);
         if (!imageName) continue;
 
@@ -29341,16 +29352,39 @@ static NSDictionary *SpliceKit_handleDumpRuntimeMetadata(NSDictionary *params) {
             if (classNames) free(classNames);
             continue; // skip images with no ObjC classes
         }
+        totalClassesInFilter += classCount;
 
         NSMutableArray *classData = [NSMutableArray array];
         if (classesOnly) {
             // Fast path: just class names
             for (unsigned int j = 0; j < classCount; j++) {
+                if ((NSInteger)classData.count >= limit) {
+                    truncated = YES;
+                    stopReason = @"limit";
+                    break;
+                }
+                if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                    truncated = YES;
+                    stopReason = @"timeBudget";
+                    break;
+                }
+                classesScanned++;
                 [classData addObject:@(classNames[j])];
             }
         } else {
             // Full metadata for each class
             for (unsigned int j = 0; j < classCount; j++) {
+                if ((NSInteger)classData.count >= limit) {
+                    truncated = YES;
+                    stopReason = @"limit";
+                    break;
+                }
+                if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                    truncated = YES;
+                    stopReason = @"timeBudget";
+                    break;
+                }
+                classesScanned++;
                 @try {
                     Class cls = objc_getClass(classNames[j]);
                     if (!cls) continue;
@@ -29363,6 +29397,14 @@ static NSDictionary *SpliceKit_handleDumpRuntimeMetadata(NSDictionary *params) {
             }
         }
         free(classNames);
+        if (truncated) {
+            NSMutableDictionary *entry = [imageInfo mutableCopy];
+            entry[@"classCount"] = @(classCount);
+            entry[@"classesReturned"] = @(classData.count);
+            [images addObject:entry];
+            classesByImage[shortName] = classData;
+            break;
+        }
 
         NSMutableDictionary *entry = [imageInfo mutableCopy];
         entry[@"classCount"] = @(classCount);
@@ -29375,12 +29417,18 @@ static NSDictionary *SpliceKit_handleDumpRuntimeMetadata(NSDictionary *params) {
         totalClasses += arr.count;
     }
 
-    return @{
+    NSMutableDictionary *response = [@{
         @"images": images,
         @"classes": classesByImage,
         @"imageCount": @(images.count),
-        @"totalClasses": @(totalClasses)
-    };
+        @"totalClasses": @(totalClasses),
+        @"truncated": @(truncated),
+        @"limit": @(limit),
+        @"classesScanned": @(classesScanned),
+        @"totalClassesInFilter": @(totalClassesInFilter)
+    } mutableCopy];
+    if (truncated && stopReason) response[@"stopReason"] = stopReason;
+    return response;
 }
 
 // Lightweight: just list loaded images with addresses/slides (no class enumeration)
@@ -29440,6 +29488,10 @@ static BOOL SpliceKit_isInSharedCache(const struct mach_header_64 *header) {
 static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
     NSString *binaryName = params[@"binary"];
     if (!binaryName) return @{@"error": @"binary parameter required"};
+    NSInteger limit = SpliceKit_debugScanLimit(params);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:SpliceKit_debugScanTimeBudgetSeconds];
+    BOOL truncated = NO;
+    NSString *stopReason = nil;
 
     uint32_t imageCount = _dyld_image_count();
     const struct mach_header_64 *foundHeader = NULL;
@@ -29477,8 +29529,16 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
         const char **classNames = objc_copyClassNamesForImage([foundPath UTF8String], &classCount);
         NSMutableSet *selectors = [NSMutableSet set];
         NSMutableSet *classRefs = [NSMutableSet set];
+        unsigned int classesScanned = 0;
+        unsigned int totalClassesInImage = classCount;
         if (classNames) {
             for (unsigned int j = 0; j < classCount; j++) {
+                classesScanned = j + 1;
+                if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                    truncated = YES;
+                    stopReason = @"timeBudget";
+                    break;
+                }
                 Class cls = objc_getClass(classNames[j]);
                 if (!cls) continue;
                 // Collect selectors from methods
@@ -29486,6 +29546,18 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
                 Method *methods = class_copyMethodList(cls, &mCount);
                 if (methods) {
                     for (unsigned int m = 0; m < mCount; m++) {
+                        if ((NSInteger)selectors.count >= limit) {
+                            truncated = YES;
+                            stopReason = @"limit";
+                            free(methods);
+                            goto sections_cache_done;
+                        }
+                        if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                            truncated = YES;
+                            stopReason = @"timeBudget";
+                            free(methods);
+                            goto sections_cache_done;
+                        }
                         [selectors addObject:NSStringFromSelector(method_getName(methods[m]))];
                     }
                     free(methods);
@@ -29494,6 +29566,7 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
                 Class super = class_getSuperclass(cls);
                 if (super) [classRefs addObject:NSStringFromClass(super)];
             }
+sections_cache_done:
             free(classNames);
         }
         result[@"selectorRefs"] = [selectors allObjects];
@@ -29502,6 +29575,11 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
         result[@"classRefCount"] = @(classRefs.count);
         result[@"superclassRefs"] = @[];
         result[@"note"] = @"Shared cache image — used ObjC runtime APIs instead of raw section reads";
+        result[@"truncated"] = @(truncated);
+        result[@"limit"] = @(limit);
+        result[@"classesScanned"] = @(classesScanned);
+        result[@"totalClassesInImage"] = @(totalClassesInImage);
+        if (truncated && stopReason) result[@"stopReason"] = stopReason;
         return result;
     }
 
@@ -29511,9 +29589,23 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
         SEL *selrefs = (SEL *)getsectiondata(foundHeader, "__DATA_CONST", "__objc_selrefs", &selrefsSize);
         if (!selrefs) selrefs = (SEL *)getsectiondata(foundHeader, "__DATA", "__objc_selrefs", &selrefsSize);
         NSMutableArray *selectorRefs = [NSMutableArray array];
+        unsigned long selCountTotal = 0;
+        unsigned long selEntriesScanned = 0;
         if (selrefs) {
             unsigned long selCount = selrefsSize / sizeof(SEL);
+            selCountTotal = selCount;
             for (unsigned long j = 0; j < selCount; j++) {
+                selEntriesScanned = j + 1;
+                if ((NSInteger)selectorRefs.count >= limit) {
+                    truncated = YES;
+                    stopReason = @"limit";
+                    break;
+                }
+                if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                    truncated = YES;
+                    stopReason = @"timeBudget";
+                    break;
+                }
                 @try {
                     NSString *selName = NSStringFromSelector(selrefs[j]);
                     if (selName) [selectorRefs addObject:selName];
@@ -29522,15 +29614,31 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
         }
         result[@"selectorRefs"] = selectorRefs;
         result[@"selectorRefCount"] = @(selectorRefs.count);
+        result[@"selectorRefTotalInSection"] = @(selCountTotal);
+        result[@"selectorRefEntriesScanned"] = @(selEntriesScanned);
 
         unsigned long classrefsSize = 0;
         void *classrefsRaw = (void *)getsectiondata(foundHeader, "__DATA_CONST", "__objc_classrefs", &classrefsSize);
         if (!classrefsRaw) classrefsRaw = (void *)getsectiondata(foundHeader, "__DATA", "__objc_classrefs", &classrefsSize);
         NSMutableArray *classRefNames = [NSMutableArray array];
-        if (classrefsRaw) {
+        unsigned long crCountTotal = 0;
+        unsigned long crEntriesScanned = 0;
+        if (classrefsRaw && !truncated) {
             void **classrefs = (void **)classrefsRaw;
             unsigned long crCount = classrefsSize / sizeof(void *);
+            crCountTotal = crCount;
             for (unsigned long j = 0; j < crCount; j++) {
+                crEntriesScanned = j + 1;
+                if ((NSInteger)classRefNames.count >= limit) {
+                    truncated = YES;
+                    stopReason = @"limit";
+                    break;
+                }
+                if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                    truncated = YES;
+                    stopReason = @"timeBudget";
+                    break;
+                }
                 @try {
                     if (classrefs[j]) {
                         const char *name = class_getName((__bridge Class)classrefs[j]);
@@ -29538,14 +29646,21 @@ static NSDictionary *SpliceKit_handleGetImageSections(NSDictionary *params) {
                     }
                 } @catch (NSException *e) { /* skip */ }
             }
+        } else if (classrefsRaw) {
+            crCountTotal = classrefsSize / sizeof(void *);
         }
         result[@"classRefs"] = classRefNames;
         result[@"classRefCount"] = @(classRefNames.count);
+        result[@"classRefTotalInSection"] = @(crCountTotal);
+        result[@"classRefEntriesScanned"] = @(crEntriesScanned);
         result[@"superclassRefs"] = @[];
     } @catch (NSException *e) {
         result[@"error"] = [NSString stringWithFormat:@"Section read failed: %@", e.reason];
     }
 
+    result[@"truncated"] = @(truncated);
+    result[@"limit"] = @(limit);
+    if (truncated && stopReason) result[@"stopReason"] = stopReason;
     return result;
 }
 
@@ -29555,6 +29670,10 @@ static NSDictionary *SpliceKit_handleGetImageSymbols(NSDictionary *params) {
     if (!binaryName) return @{@"error": @"binary parameter required"};
     NSString *filter = params[@"filter"]; // optional name filter
     BOOL demangleSwift = ![params[@"demangle"] isEqual:@NO]; // default YES
+    NSInteger limit = SpliceKit_debugScanLimit(params);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:SpliceKit_debugScanTimeBudgetSeconds];
+    BOOL truncated = NO;
+    NSString *stopReason = nil;
 
     // Find the image
     uint32_t imageCount = _dyld_image_count();
@@ -29604,19 +29723,40 @@ static NSDictionary *SpliceKit_handleGetImageSymbols(NSDictionary *params) {
     // Enumerate all classes in this image and collect their method symbols via dladdr
     unsigned int classCount = 0;
     const char **classNames = objc_copyClassNamesForImage([foundPath UTF8String], &classCount);
+    unsigned int classesScanned = 0;
+    unsigned int totalClassesInImage = classCount;
     if (classNames) {
         for (unsigned int j = 0; j < classCount; j++) {
+            classesScanned = j + 1;
+            if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                truncated = YES;
+                stopReason = @"timeBudget";
+                break;
+            }
             Class cls = objc_getClass(classNames[j]);
             if (!cls) continue;
 
             // Instance + class methods
-            for (int pass = 0; pass < 2; pass++) {
+            for (int pass = 0; pass < 2 && !truncated; pass++) {
                 Class target = (pass == 0) ? cls : object_getClass(cls);
                 unsigned int mCount = 0;
                 Method *methods = class_copyMethodList(target, &mCount);
                 if (!methods) continue;
 
                 for (unsigned int m = 0; m < mCount; m++) {
+                    if ((NSInteger)symbols.count >= limit) {
+                        truncated = YES;
+                        stopReason = @"limit";
+                        free(methods);
+                        goto image_symbols_done;
+                    }
+                    if (SpliceKit_debugScanBudgetExpired(deadline)) {
+                        truncated = YES;
+                        stopReason = @"timeBudget";
+                        free(methods);
+                        goto image_symbols_done;
+                    }
+
                     IMP imp = method_getImplementation(methods[m]);
                     NSString *addrStr = [NSString stringWithFormat:@"0x%lx", (unsigned long)imp];
                     if ([seenAddresses containsObject:addrStr]) continue;
@@ -29647,21 +29787,34 @@ static NSDictionary *SpliceKit_handleGetImageSymbols(NSDictionary *params) {
                     }
 
                     [symbols addObject:symInfo];
+                    if ((NSInteger)symbols.count >= limit) {
+                        truncated = YES;
+                        stopReason = @"limit";
+                        free(methods);
+                        goto image_symbols_done;
+                    }
                 }
                 free(methods);
             }
         }
+image_symbols_done:
         free(classNames);
     }
 
-    return @{
+    NSMutableDictionary *response = [@{
         @"binary": [foundPath lastPathComponent],
         @"path": foundPath,
         @"slide": [NSString stringWithFormat:@"0x%lx", (unsigned long)foundSlide],
         @"symbols": symbols,
         @"exportedCount": @(symbols.count),
-        @"swiftDemangledCount": @(swiftCount)
-    };
+        @"swiftDemangledCount": @(swiftCount),
+        @"truncated": @(truncated),
+        @"limit": @(limit),
+        @"classesScanned": @(classesScanned),
+        @"totalClassesInImage": @(totalClassesInImage)
+    } mutableCopy];
+    if (truncated && stopReason) response[@"stopReason"] = stopReason;
+    return response;
 }
 
 // Enumerate notification name constants from exported symbols
@@ -29815,11 +29968,14 @@ static NSDictionary *SpliceKit_handleDebugGetConfig(NSDictionary *params) {
 }
 
 static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
     NSString *key = params[@"key"];
     id value = params[@"value"];
 
     if (!key) {
-        return @{@"error": @"'key' parameter required"};
+        result = @{@"error": @"'key' parameter required"};
+        return;
     }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -29837,8 +29993,9 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
             ((void (*)(id, SEL))objc_msgSend)(tlkClass, NSSelectorFromString(@"_loadUserDefaults"));
         }
 
-        return @{@"status": @"ok", @"key": key, @"value": @(boolVal), @"type": @"tlk_debug",
+        result = @{@"status": @"ok", @"key": key, @"value": @(boolVal), @"type": @"tlk_debug",
                  @"note": @"TLKUserDefaults reloaded"};
+        return;
     }
 
     // Check if it's a CFPreferences key
@@ -29856,8 +30013,9 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
                 kCFPreferencesCurrentApplication);
         }
         CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
-        return @{@"status": @"ok", @"key": key, @"value": value, @"type": @"cfpreferences",
+        result = @{@"status": @"ok", @"key": key, @"value": value, @"type": @"cfpreferences",
                  @"note": @"CFPreferences set (may need restart for some flags)"};
+        return;
     }
 
     // Check if it's a ProAppSupport log key
@@ -29871,37 +30029,40 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
             level = [value integerValue];
         }
         if (level < 0 || level >= (NSInteger)names.count) {
-            return @{@"error": [NSString stringWithFormat:@"Invalid log level. Use one of: %@",
+            result = @{@"error": [NSString stringWithFormat:@"Invalid log level. Use one of: %@",
                                 [names componentsJoinedByString:@", "]]};
+            return;
         }
         [defaults setInteger:level forKey:@"LogLevel"];
         [defaults synchronize];
-        return @{@"status": @"ok", @"key": @"LogLevel", @"value": names[level],
+        result = @{@"status": @"ok", @"key": @"LogLevel", @"value": names[level],
                  @"rawValue": @(level), @"type": @"proapp_log"};
+        return;
     }
 
     if ([key isEqualToString:@"LogUI"]) {
         BOOL boolVal = [value boolValue];
         [defaults setBool:boolVal forKey:@"LogUI"];
         [defaults synchronize];
-        SpliceKit_executeOnMainThread(^{
-            if (boolVal) [[SpliceKitLogPanel sharedPanel] showPanel];
-            else [[SpliceKitLogPanel sharedPanel] hidePanel];
-        });
-        return @{@"status": @"ok", @"key": @"LogUI", @"value": @(boolVal), @"type": @"proapp_log"};
+        if (boolVal) [[SpliceKitLogPanel sharedPanel] showPanel];
+        else [[SpliceKitLogPanel sharedPanel] hidePanel];
+        result = @{@"status": @"ok", @"key": @"LogUI", @"value": @(boolVal), @"type": @"proapp_log"};
+        return;
     }
 
     if ([key isEqualToString:@"LogThread"]) {
         BOOL boolVal = [value boolValue];
         [defaults setBool:boolVal forKey:@"LogThread"];
         [defaults synchronize];
-        return @{@"status": @"ok", @"key": @"LogThread", @"value": @(boolVal), @"type": @"proapp_log"};
+        result = @{@"status": @"ok", @"key": @"LogThread", @"value": @(boolVal), @"type": @"proapp_log"};
+        return;
     }
 
     if ([key isEqualToString:@"LogCategory"]) {
         [defaults setObject:value forKey:@"LogCategory"];
         [defaults synchronize];
-        return @{@"status": @"ok", @"key": @"LogCategory", @"value": value, @"type": @"proapp_log"};
+        result = @{@"status": @"ok", @"key": @"LogCategory", @"value": value, @"type": @"proapp_log"};
+        return;
     }
 
     // FCP flags
@@ -29910,7 +30071,8 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
         BOOL boolVal = [value boolValue];
         [defaults setBool:boolVal forKey:key];
         [defaults synchronize];
-        return @{@"status": @"ok", @"key": key, @"value": @(boolVal), @"type": @"fcp_flag"};
+        result = @{@"status": @"ok", @"key": key, @"value": @(boolVal), @"type": @"fcp_flag"};
+        return;
     }
 
     // Allow setting arbitrary keys as a fallback
@@ -29920,11 +30082,15 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
         [defaults setBool:[value boolValue] forKey:key];
     }
     [defaults synchronize];
-    return @{@"status": @"ok", @"key": key, @"value": value, @"type": @"custom",
+    result = @{@"status": @"ok", @"key": key, @"value": value, @"type": @"custom",
              @"note": @"Set as custom UserDefaults key"};
+    });
+    return result ?: @{@"error": @"debug.setConfig failed"};
 }
 
 static NSDictionary *SpliceKit_handleDebugResetConfig(NSDictionary *params) {
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
     NSString *scope = params[@"scope"] ?: @"all";
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSMutableArray *removedKeys = [NSMutableArray array];
@@ -29954,14 +30120,14 @@ static NSDictionary *SpliceKit_handleDebugResetConfig(NSDictionary *params) {
             [defaults removeObjectForKey:key];
             [removedKeys addObject:key];
         }
-        SpliceKit_executeOnMainThread(^{
-            [[SpliceKitLogPanel sharedPanel] hidePanel];
-        });
+        [[SpliceKitLogPanel sharedPanel] hidePanel];
     }
 
     [defaults synchronize];
-    return @{@"status": @"ok", @"scope": scope, @"removedKeys": removedKeys,
+    result = @{@"status": @"ok", @"scope": scope, @"removedKeys": removedKeys,
              @"count": @(removedKeys.count)};
+    });
+    return result ?: @{@"error": @"debug.resetConfig failed"};
 }
 
 // Framerate monitor state
@@ -30025,11 +30191,14 @@ static NSDictionary *SpliceKit_handleDebugStopFramerateMonitor(NSDictionary *par
 }
 
 static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
     NSString *preset = params[@"preset"];
     if (!preset) {
-        return @{@"error": @"'preset' parameter required",
+        result = @{@"error": @"'preset' parameter required",
                  @"available": @[@"timeline_visual", @"timeline_logging",
                                  @"performance", @"render_debug", @"verbose_logging", @"all_off"]};
+        return;
     }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -30089,20 +30258,17 @@ static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
             [defaults removeObjectForKey:key];
             [changed addObject:@{@"key": key, @"value": @"removed"}];
         }
-        SpliceKit_executeOnMainThread(^{
-            [[SpliceKitLogPanel sharedPanel] hidePanel];
-        });
+        [[SpliceKitLogPanel sharedPanel] hidePanel];
     } else {
-        return @{@"error": [NSString stringWithFormat:@"Unknown preset: %@", preset],
+        result = @{@"error": [NSString stringWithFormat:@"Unknown preset: %@", preset],
                  @"available": @[@"timeline_visual", @"timeline_logging",
                                  @"performance", @"render_debug", @"verbose_logging", @"all_off"]};
+        return;
     }
 
     [defaults synchronize];
     if ([[defaults objectForKey:@"LogUI"] boolValue]) {
-        SpliceKit_executeOnMainThread(^{
-            [[SpliceKitLogPanel sharedPanel] showPanel];
-        });
+        [[SpliceKitLogPanel sharedPanel] showPanel];
     }
 
     // Reload TLK
@@ -30111,7 +30277,9 @@ static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
         ((void (*)(id, SEL))objc_msgSend)(tlkClass, NSSelectorFromString(@"_loadUserDefaults"));
     }
 
-    return @{@"status": @"ok", @"preset": preset, @"changed": changed, @"count": @(changed.count)};
+    result = @{@"status": @"ok", @"preset": preset, @"changed": changed, @"count": @(changed.count)};
+    });
+    return result ?: @{@"error": @"debug.enablePreset failed"};
 }
 
 #pragma mark - Debug: Method Tracing
@@ -31093,6 +31261,8 @@ static NSDictionary *SpliceKit_handleDebugObserveNotification(NSDictionary *para
     });
 
     NSString *act = params[@"action"] ?: @"add";
+    if ([act isEqualToString:@"start"]) act = @"add";
+    if ([act isEqualToString:@"stop"]) act = @"remove";
 
     if ([act isEqualToString:@"list"]) {
         return @{@"observers": [sNotificationObservers allKeys],
@@ -32078,6 +32248,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // audioBusDiagnostics.* namespace
     else if ([method hasPrefix:@"audioBusDiagnostics."]) {
         result = SpliceKit_handleAudioBusDiagnostics(method, params);
+    }
+    // visionpro.* namespace (IVT preview session + AIME metadata)
+    else if ([method hasPrefix:@"visionpro."]) {
+        result = SpliceKit_handleVisionPro(method, params);
     }
     // share.* namespace
     else if ([method isEqualToString:@"share.export"]) {

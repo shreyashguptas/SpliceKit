@@ -68,6 +68,26 @@ that this fork has removed.
   an unfinished install, and no longer swallows Ctrl-C after a menu.
 
 ### Fixed
+- **The Vision Pro RPC namespace was never wired into the request dispatcher**, so all 16
+  `visionpro.*` methods returned "Method not found" even though the handler was implemented and
+  compiled in. Requests whose method name starts with `visionpro.` are now dispatched by prefix.
+- **Scene detection could not resolve clip media on FCP 12.3**: it used only
+  `media.originalMediaRep.fileURL`, which is nil there, instead of the resolver
+  `timeline.getClipInfo` already uses. Scene detection now shares that resolver.
+- **`debug.setConfig`, `debug.resetConfig` and `debug.enablePreset` ran on the bridge's background
+  queue** and Final Cut Pro raised "Modifications to the layout engine must not be performed from
+  a background thread". All three now perform their work on the main thread.
+- **`debug.observeNotification` ignored stop/remove** and answered "Already observing". Start and
+  stop are normalised to add and remove like the other debug observe endpoints.
+- **`debug.getImageSymbols` ignored its `limit` parameter** and walked every class and method in
+  the image calling `dladdr` on each; on the 21 MB Flexo framework that timed out the bridge. It
+  now honours `limit`, enforces a 2 s budget, and reports `truncated`, `stopReason`, and
+  `classesScanned`. `debug.getImageSections` and `runtime.dumpMetadata` had the same unbounded
+  walk and received the same guards.
+- **Together, the fixes above stop `tests/test_mcp_endpoints.py` from crashing Final Cut Pro.**
+  That suite previously crashed FCP with SIGSEGV inside Apple's CoreAnimation layout (3/3 runs,
+  including on a clean tree at c7bd882 with none of these changes). It now completes 3/3 with
+  exit 0 and leaves the timeline unchanged.
 - **The retime note called a variable-frame-rate file's average rate its nominal rate** (QA run
   4: a 30 fps screen recording with dropped frames, averaging 29.74 fps, was reported as
   "nominally 29.740 fps"). `AVAssetTrack.nominalFrameRate` is frame count over duration. The
