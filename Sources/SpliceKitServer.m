@@ -3488,6 +3488,38 @@ static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
 // by the RPC dispatcher to timeline.action only: the handler itself stays free of the
 // run-loop turn, so batch actions, blade_at_times, the command palette and Lua, which
 // call it in loops on the main thread, neither pay for it nor yield between steps.
+static NSDictionary *SpliceKit_makeFilePanelDialogPendingDictionary(NSString *action, NSDictionary *base) {
+    NSMutableDictionary *out = base ? [base mutableCopy] : [NSMutableDictionary dictionary];
+    out[@"dialogPending"] = @YES;
+    out[@"dialog"] = @{
+        @"type": @"modal",
+        @"isFilePanel": @YES,
+        @"panelKind": @"save",
+        @"summary": @"modal save/open file panel"
+    };
+    out[@"note"] = [NSString stringWithFormat:
+        @"Final Cut Pro opened (or is opening) a modal save/open file panel after %@. "
+        @"While it is open the bridge cannot serve main-thread RPC (detect_dialog, timeline edits, etc.); "
+        @"bridge_alive still responds. Save/open panels cannot be confirmed from the bridge — only "
+        @"dismiss_dialog(action=\"cancel\") or click_dialog_button(\"Cancel\") closes them. "
+        @"Complete the panel in FCP, or cancel and use a tool that takes an explicit path instead.",
+        action ?: @"this action"];
+    return out;
+}
+
+static NSDictionary *SpliceKit_annotateCreateActionFilePanelPending(NSDictionary *result, NSString *action) {
+    if (![result isKindOfClass:[NSDictionary class]]) return result;
+    if (result[@"error"]) {
+        NSString *err = result[@"error"];
+        if ([err isKindOfClass:[NSString class]] &&
+            [err containsString:@"main thread may have timed out"]) {
+            return SpliceKit_makeFilePanelDialogPendingDictionary(action, nil);
+        }
+        return result;
+    }
+    return SpliceKit_makeFilePanelDialogPendingDictionary(action, result);
+}
+
 static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSString *action) {
     if (![result isKindOfClass:[NSDictionary class]] || result[@"error"]) return result;
     __block NSDictionary *dialog = nil;
@@ -3526,10 +3558,14 @@ static NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSStr
     NSString *summary = [dialog[@"summary"] isKindOfClass:[NSString class]] ? dialog[@"summary"] : @"";
     NSString *label = (summary.length > 0 && ![summary isEqualToString:title]) ? summary
         : (title.length > 0 ? [NSString stringWithFormat:@"\"%@\"", title] : @"");
+    NSString *filePanelHint = [dialog[@"isFilePanel"] boolValue]
+        ? @" Save/open panels cannot be confirmed from the bridge (only cancel: works); dismiss_dialog(action=\"cancel\") cancels. "
+        : @"";
     out[@"note"] = [NSString stringWithFormat:
-        @"Final Cut Pro has a %@ open%@ after this action; nothing changes on the timeline until it is answered. "
+        @"Final Cut Pro has a %@ open%@ after this action; nothing changes on the timeline until it is answered.%@ "
+        @"While a modal save/open panel is up, main-thread bridge calls may time out; bridge_alive still responds. "
         @"detect_dialog() shows its fields and buttons; fill_dialog_field / click_dialog_button / dismiss_dialog answer it.",
-        dialog[@"type"], label.length ? [NSString stringWithFormat:@" (%@)", label] : @""];
+        dialog[@"type"], label.length ? [NSString stringWithFormat:@" (%@)", label] : @"", filePanelHint];
     SpliceKit_log(@"[Action] %@: a %@ is open afterwards (%@)", action, dialog[@"type"], label);
     return out;
 }
@@ -5740,6 +5776,24 @@ id SpliceKit_getMasterAudioDest(void) {
     return nil;
 }
 
+// Fire sendAction on the main run loop without waiting — used when the action opens a modal
+// save/open panel that blocks the main thread until the user dismisses it.
+static NSDictionary *SpliceKit_sendAppActionAsyncNoWait(NSString *selectorName) {
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+        @try {
+            id app = ((id (*)(id, SEL))objc_msgSend)(
+                objc_getClass("NSApplication"), @selector(sharedApplication));
+            SEL sel = NSSelectorFromString(selectorName);
+            ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+                app, @selector(sendAction:to:from:), sel, nil, nil);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[AppAction] async %@ exception: %@", selectorName, e.reason);
+        }
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
+    return @{@"action": selectorName, @"status": @"ok"};
+}
+
 // Send action via NSApp.sendAction:to:from: (goes through responder chain)
 static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName) {
     __block NSDictionary *result = nil;
@@ -5762,7 +5816,19 @@ static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName) {
         }
     });
 
-    return result;
+    if (result) return result;
+    if ([selectorName isEqualToString:@"newLibrary:"]) {
+        return SpliceKit_makeFilePanelDialogPendingDictionary(@"createLibrary", nil);
+    }
+    if ([selectorName isEqualToString:@"newEvent:"]) {
+        return SpliceKit_makeFilePanelDialogPendingDictionary(@"createEvent", nil);
+    }
+    if ([selectorName isEqualToString:@"newProject:"]) {
+        return SpliceKit_makeFilePanelDialogPendingDictionary(@"createProject", nil);
+    }
+    return @{@"error": @"App action did not return a result (main thread may have timed out). "
+             @"A modal save/open panel may be open; while it is up the bridge cannot serve "
+             @"main-thread RPC. dismiss_dialog(action=\"cancel\") closes save/open panels."};
 }
 
 // Send action to the player module specifically
@@ -22896,16 +22962,15 @@ static NSDictionary *SpliceKit_handleShareExport(NSDictionary *params) {
 #pragma mark - Library/Project Management
 
 static NSDictionary *SpliceKit_handleProjectCreate(NSDictionary *params) {
-    // Trigger new project dialog - this opens the dialog
-    return SpliceKit_sendAppAction(@"newProject:");
+    return SpliceKit_sendAppActionAsyncNoWait(@"newProject:");
 }
 
 static NSDictionary *SpliceKit_handleEventCreate(NSDictionary *params) {
-    return SpliceKit_sendAppAction(@"newEvent:");
+    return SpliceKit_sendAppActionAsyncNoWait(@"newEvent:");
 }
 
 static NSDictionary *SpliceKit_handleLibraryCreate(NSDictionary *params) {
-    return SpliceKit_sendAppAction(@"newLibrary:");
+    return SpliceKit_sendAppActionAsyncNoWait(@"newLibrary:");
 }
 
 #pragma mark - Open Project by Name
@@ -24261,6 +24326,81 @@ static NSArray *SpliceKit_safeSubviews(NSView *view) {
     }
 }
 
+static BOOL SpliceKit_windowIsSaveOrOpenPanel(NSWindow *window) {
+    if (!window) return NO;
+    Class savePanelClass = [NSSavePanel class];
+    return savePanelClass && [window isKindOfClass:savePanelClass];
+}
+
+static void SpliceKit_enrichFilePanelDescription(NSWindow *window, NSMutableDictionary *info) {
+    if (!SpliceKit_windowIsSaveOrOpenPanel(window)) return;
+
+    BOOL isOpenPanel = [window isKindOfClass:[NSOpenPanel class]];
+    info[@"isFilePanel"] = @YES;
+    info[@"panelKind"] = isOpenPanel ? @"open" : @"save";
+    info[@"panelDismiss"] = @"cancel: on the panel only (confirm/Save/Open not supported from bridge)";
+
+    NSSavePanel *panel = (NSSavePanel *)window;
+    NSString *nameField = @"";
+    if ([panel respondsToSelector:@selector(nameFieldStringValue)]) {
+        NSString *n = panel.nameFieldStringValue;
+        if ([n isKindOfClass:[NSString class]]) nameField = n;
+    }
+    info[@"nameField"] = nameField;
+
+    NSString *directoryURL = @"";
+    NSString *directoryPath = @"";
+    if ([panel respondsToSelector:@selector(directoryURL)]) {
+        NSURL *dir = panel.directoryURL;
+        if ([dir isKindOfClass:[NSURL class]]) {
+            directoryURL = dir.absoluteString ?: @"";
+            directoryPath = dir.path ?: @"";
+        }
+    }
+    info[@"directoryURL"] = directoryURL;
+    info[@"directoryPath"] = directoryPath;
+}
+
+static NSDictionary *SpliceKit_filePanelConfirmUnsupportedError(NSWindow *window) {
+    NSMutableDictionary *panelInfo = [NSMutableDictionary dictionary];
+    SpliceKit_enrichFilePanelDescription(window, panelInfo);
+    NSString *nameField = [panelInfo[@"nameField"] isKindOfClass:[NSString class]]
+        ? panelInfo[@"nameField"] : @"";
+    NSString *directory = [panelInfo[@"directoryPath"] isKindOfClass:[NSString class]]
+        ? panelInfo[@"directoryPath"] : @"";
+    if (directory.length == 0 &&
+        [panelInfo[@"directoryURL"] isKindOfClass:[NSString class]]) {
+        directory = panelInfo[@"directoryURL"];
+    }
+    if (directory.length == 0) directory = @"(unknown)";
+    return @{@"error": [NSString stringWithFormat:
+        @"A save/open panel cannot be confirmed programmatically from the bridge on this Final Cut Pro build; "
+        @"only cancelling is supported (dismiss_dialog with action cancel, or click_dialog_button Cancel). "
+        @"A human must complete the panel, or cancel it and use a tool that takes an explicit path instead. "
+        @"Panel name field: \"%@\"; directory: %@.",
+        nameField, directory]};
+}
+
+static BOOL SpliceKit_dispatchFilePanelCancel(NSWindow *window) {
+    if (!SpliceKit_windowIsSaveOrOpenPanel(window)) return NO;
+    SEL sel = @selector(cancel:);
+    if (![window respondsToSelector:sel]) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(window, sel, nil);
+    return YES;
+}
+
+static BOOL SpliceKit_filePanelButtonTitleIsConfirm(NSString *title) {
+    NSString *t = [[title lowercaseString] stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [t isEqualToString:@"ok"] || [t isEqualToString:@"save"] || [t isEqualToString:@"open"];
+}
+
+static BOOL SpliceKit_filePanelButtonTitleIsCancel(NSString *title) {
+    NSString *t = [[title lowercaseString] stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [t isEqualToString:@"cancel"];
+}
+
 static void SpliceKit_collectUIElements(NSView *view, NSMutableArray *buttons,
                                          NSMutableArray *textFields, NSMutableArray *labels,
                                          NSMutableArray *checkboxes, NSMutableArray *popups,
@@ -24420,6 +24560,8 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
         }
     }
     info[@"summary"] = summary ?: @"";
+
+    SpliceKit_enrichFilePanelDescription(window, info);
 
     return info;
 }
@@ -24596,19 +24738,49 @@ static NSDictionary *SpliceKit_handleDialogClick(NSDictionary *params) {
                 }
             }
 
+            if (!targetButton && buttonTitle && SpliceKit_windowIsSaveOrOpenPanel(dialogWindow)) {
+                if (SpliceKit_filePanelButtonTitleIsConfirm(buttonTitle)) {
+                    result = SpliceKit_filePanelConfirmUnsupportedError(dialogWindow);
+                    return;
+                }
+                if (SpliceKit_filePanelButtonTitleIsCancel(buttonTitle) &&
+                    SpliceKit_dispatchFilePanelCancel(dialogWindow)) {
+                    NSMutableDictionary *answer = [@{
+                        @"status": @"ok",
+                        @"clicked": buttonTitle,
+                        @"dispatch": @"panelAction",
+                        @"panelAction": @"cancel:",
+                        @"dialog": [dialogWindow title] ?: @""
+                    } mutableCopy];
+                    SpliceKit_dialogApplySettle(answer, nil, NO);
+                    result = answer;
+                    return;
+                }
+            }
+
             if (!targetButton) {
                 NSMutableArray *available = [NSMutableArray array];
                 for (NSButton *btn in buttonObjects) {
                     [available addObject:[btn title]];
                 }
-                result = @{@"error": [NSString stringWithFormat:@"Button '%@' not found. Available: %@",
-                            buttonTitle ?: [buttonIndex stringValue],
-                            [available componentsJoinedByString:@", "]]};
+                if (SpliceKit_windowIsSaveOrOpenPanel(dialogWindow)) {
+                    result = SpliceKit_filePanelConfirmUnsupportedError(dialogWindow);
+                } else {
+                    result = @{@"error": [NSString stringWithFormat:@"Button '%@' not found. Available: %@",
+                                buttonTitle ?: [buttonIndex stringValue],
+                                [available componentsJoinedByString:@", "]]};
+                }
                 return;
             }
 
             if (![targetButton isEnabled]) {
                 result = @{@"error": [NSString stringWithFormat:@"Button '%@' is disabled", [targetButton title]]};
+                return;
+            }
+
+            if (SpliceKit_windowIsSaveOrOpenPanel(dialogWindow) &&
+                SpliceKit_filePanelButtonTitleIsConfirm([targetButton title])) {
+                result = SpliceKit_filePanelConfirmUnsupportedError(dialogWindow);
                 return;
             }
 
@@ -24967,6 +25139,20 @@ static NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params) {
                 return;
             }
 
+            if (SpliceKit_windowIsSaveOrOpenPanel(dialogWindow)) {
+                if (![action isEqualToString:@"cancel"]) {
+                    result = SpliceKit_filePanelConfirmUnsupportedError(dialogWindow);
+                    return;
+                }
+                if (SpliceKit_dispatchFilePanelCancel(dialogWindow)) {
+                    result = @{@"status": @"ok", @"action": @"cancel", @"dispatch": @"panelAction",
+                                 @"panelAction": @"cancel:"};
+                    return;
+                }
+                result = @{@"error": @"Save/open panel did not respond to cancel:"};
+                return;
+            }
+
             NSArray<NSButton *> *allButtons = SpliceKit_findButtonsInView([dialogWindow contentView]);
             NSMutableDictionary *answer = nil;
             NSDictionary *undoBefore = nil;
@@ -24977,6 +25163,10 @@ static NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params) {
                 if (cancelBtn) {
                     [cancelBtn performClick:nil];
                     answer = [@{@"status": @"ok", @"action": @"cancel", @"clicked": [cancelBtn title]} mutableCopy];
+                    waitForUndo = NO;
+                } else if (SpliceKit_dispatchFilePanelCancel(dialogWindow)) {
+                    answer = [@{@"status": @"ok", @"action": @"cancel", @"dispatch": @"panelAction",
+                                 @"panelAction": @"cancel:"} mutableCopy];
                     waitForUndo = NO;
                 } else {
                     [dialogWindow performClose:nil];
@@ -24993,6 +25183,10 @@ static NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params) {
                             answer = [@{@"status": @"ok", @"action": @"cancel", @"clicked": [defaultBtn title],
                                          @"fellBackToDefault": @YES} mutableCopy];
                             waitForUndo = YES;
+                        } else if (SpliceKit_dispatchFilePanelCancel(dialogWindow)) {
+                            answer = [@{@"status": @"ok", @"action": @"cancel", @"dispatch": @"panelAction",
+                                         @"panelAction": @"cancel:"} mutableCopy];
+                            waitForUndo = NO;
                         } else {
                             result = @{@"error": @"No Cancel or default button found"};
                             return;
@@ -32275,11 +32469,11 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     }
     // project.* namespace
     else if ([method isEqualToString:@"project.create"]) {
-        result = SpliceKit_handleProjectCreate(params);
+        result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleProjectCreate(params), @"createProject");
     } else if ([method isEqualToString:@"project.createEvent"]) {
-        result = SpliceKit_handleEventCreate(params);
+        result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleEventCreate(params), @"createEvent");
     } else if ([method isEqualToString:@"project.createLibrary"]) {
-        result = SpliceKit_handleLibraryCreate(params);
+        result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleLibraryCreate(params), @"createLibrary");
     } else if ([method isEqualToString:@"project.open"]) {
         result = SpliceKit_handleProjectOpen(params);
     }
@@ -32477,6 +32671,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 
     if (result[@"error"] && ![result[@"error"] isKindOfClass:[NSDictionary class]]) {
         return @{@"error": @{@"code": @(-32000), @"message": result[@"error"]}};
+    }
+
+    if (!result) {
+        return @{@"error": @{@"code": @(-32000), @"message": @"Handler returned no result"}};
     }
 
     return @{@"result": result};

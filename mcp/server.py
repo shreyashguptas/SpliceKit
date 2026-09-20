@@ -248,7 +248,7 @@ PROJECTS / LIBRARY / BROWSER: open_project, create_project, create_event, create
 FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_panel,
   set_workspace, select_tool, get_viewer_zoom / set_viewer_zoom, detect_dialog then
   click_dialog_button / fill_dialog_field / select_dialog_popup / toggle_dialog_checkbox /
-  dismiss_dialog (cancels by default; action='default' to confirm share/export sheets),
+  dismiss_dialog (cancels by default; save/open panels cannot be confirmed from the bridge),
   search_commands / execute_command (the Command
   Palette's commands).
 ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_object_property,
@@ -1805,6 +1805,11 @@ def batch_export(scope: str = "all", folder: str = "") -> str:
     """Batch export every clip from the active timeline as individual files.
     A folder picker appears once, then all clips are exported automatically
     with effects/color grading baked in. No further interaction needed.
+
+    If no folder path is given, FCP may open a modal save/open panel. While that
+    panel is open the bridge cannot serve main-thread RPC; bridge_alive still
+    responds. Save/open panels cannot be confirmed from the bridge — only
+    dismiss_dialog(action=\"cancel\") closes them.
 
     Args:
         scope: "all" exports every clip, "selected" exports only selected clips
@@ -4390,6 +4395,11 @@ def mixer_set_all_volumes(volumes: list) -> str:
 def share_project(destination: str = "") -> str:
     """Share/export the project using a specific or default destination.
 
+    May open FCP share or save panels. While a modal save/open panel is open the
+    bridge cannot serve main-thread RPC; bridge_alive still responds. Save/open
+    panels cannot be confirmed from the bridge — only dismiss_dialog(action=\"cancel\")
+    closes them.
+
     Args:
         destination: Share destination name (e.g. "Export File", "Apple Devices 1080p",
                      "YouTube & Facebook"). Leave empty for default destination.
@@ -4411,29 +4421,35 @@ def share_project(destination: str = "") -> str:
 
 @splicekit_tool("create_project")
 def create_project() -> str:
-    """Open the New Project dialog in FCP."""
-    r = bridge.call("project.create")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    """Open the New Project dialog in FCP.
+
+    Opens a modal save/open panel. While it is open the bridge cannot serve
+    main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
+    from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+    """
+    return _call_or_error("project.create")
 
 
 @splicekit_tool("create_event")
 def create_event() -> str:
-    """Create a new event in the current library."""
-    r = bridge.call("project.createEvent")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    """Create a new event in the current library.
+
+    Opens a modal save/open panel. While it is open the bridge cannot serve
+    main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
+    from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+    """
+    return _call_or_error("project.createEvent")
 
 
 @splicekit_tool("create_library")
 def create_library() -> str:
-    """Open the New Library dialog."""
-    r = bridge.call("project.createLibrary")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    """Open the New Library dialog.
+
+    Opens a modal save/open panel. While it is open the bridge cannot serve
+    main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
+    from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+    """
+    return _call_or_error("project.createLibrary")
 
 
 # ============================================================
@@ -5792,6 +5808,11 @@ def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
     and writes it to the specified path. Unlike timeline_action("exportXML")
     which opens FCP's save dialog, this writes directly.
 
+    timeline_action("exportXML") and some share/export flows can still open modal
+    save/open panels; while one is open the bridge cannot serve main-thread RPC.
+    Save/open panels cannot be confirmed from the bridge — only
+    dismiss_dialog(action=\"cancel\") closes them.
+
     Args:
         path: Output file path for the FCPXML.
               Default: /tmp/splicekit_export.fcpxml
@@ -6071,6 +6092,11 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
 
     Returns:
         JSON with status, output path, timeline name, track/clip counts, and duration.
+
+    Some export paths use FCP's native save dialog instead of writing directly.
+    While a modal save/open panel is open the bridge cannot serve main-thread RPC.
+    Save/open panels cannot be confirmed from the bridge — only
+    dismiss_dialog(action=\"cancel\") closes them.
     """
     try:
         import opentimelineio as otio
@@ -6453,6 +6479,9 @@ def click_dialog_button(button: str = "", index: int = -1) -> str:
 
     Finds the active dialog (modal window, sheet, or alert panel) and clicks
     the specified button. Use detect_dialog() first to see available buttons.
+
+    Save/open file panels cannot be confirmed (Save/OK/Open) from the bridge;
+    only Cancel is supported via click_dialog_button or dismiss_dialog(action=\"cancel\").
     """
     params = {}
     if button:
@@ -6521,13 +6550,14 @@ def dismiss_dialog(action: str = "cancel") -> str:
     """Dismiss the currently showing dialog without committing (by default).
 
     With no arguments, clicks Cancel (or equivalent) and does not confirm the
-    sheet. Pass action="default" or action="ok" only when you intend to commit
-    (OK, Share, Done, etc.).
+    sheet. Pass action="default" or action="ok" to confirm normal sheets
+    (OK, Share, Done, etc.) — not save/open file panels; those cannot be
+    confirmed from the bridge on current FCP builds.
 
     Args:
         action: How to dismiss (default "cancel"):
-                "cancel" - click Cancel / Don't Save; OK-only alerts fall back to
-                the default button and set fellBackToDefault in the response
+                "cancel" - click Cancel / Don't Save; for save/open panels uses
+                panel cancel: only
                 "default" - click the default button (usually OK/Share/Done)
                 "ok" - explicitly look for OK/Done/Share button
 
@@ -8711,6 +8741,10 @@ def export_captions_srt(path: str) -> str:
         path: Output file path (e.g. "/Users/you/Desktop/captions.srt")
 
     Requires captions to have been transcribed first.
+
+    If FCP shows a save panel for the path, while it is open the bridge cannot
+    serve main-thread RPC. Save/open panels cannot be confirmed from the bridge —
+    only dismiss_dialog(action=\"cancel\") closes them.
     """
     r = bridge.call("captions.exportSRT", path=path)
     if _err(r):
@@ -8724,6 +8758,10 @@ def export_captions_txt(path: str) -> str:
 
     Args:
         path: Output file path (e.g. "/Users/you/Desktop/captions.txt")
+
+    If FCP shows a save panel for the path, while it is open the bridge cannot
+    serve main-thread RPC. Save/open panels cannot be confirmed from the bridge —
+    only dismiss_dialog(action=\"cancel\") closes them.
     """
     r = bridge.call("captions.exportTXT", path=path)
     if _err(r):
