@@ -492,5 +492,78 @@ class ConnectedCompoundClipCycleTests(unittest.TestCase):
         self.assertAlmostEqual(duration.value / duration.rate, 10.01, places=2)
 
 
+# A connected compound clip that itself has something connected onto it — a title on a
+# connected B-roll compound clip, an ordinary shape. Replacing the outer <ref-clip> leaves
+# the original element intact with its own children, so a walk that held a reference to it
+# reached that detached subtree later and flattened it a second time, reporting a
+# duplicate "flattened" without the caveat the real one carries. Nothing wrong reached the
+# timeline; the answer just said content had landed that had not.
+NESTED_CONNECTED_FCPXML = """<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1920" height="1080"/>
+    <asset id="a1" name="A" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/a.mov"/>
+    </asset>
+    <media id="m_1" name="M1">
+      <sequence format="r1" duration="120120/30000s"><spine>
+        <asset-clip ref="a1" name="Inside1" offset="0s" start="0s" duration="120120/30000s" format="r1"/>
+      </spine></sequence>
+    </media>
+    <media id="m_2" name="M2">
+      <sequence format="r1" duration="60060/30000s"><spine>
+        <asset-clip ref="a1" name="Inside2" offset="0s" start="0s" duration="60060/30000s" format="r1"/>
+      </spine></sequence>
+    </media>
+  </resources>
+  <library><event name="E"><project name="Notes">
+    <sequence format="r1" duration="300300/30000s"><spine>
+      <asset-clip ref="a1" name="Main" offset="0s" start="0s" duration="300300/30000s" format="r1">
+        <ref-clip ref="m_1" name="R1" lane="1" offset="0s" start="0s" duration="120120/30000s">
+          <ref-clip ref="m_2" name="R2" lane="1" offset="0s" start="0s" duration="60060/30000s"/>
+        </ref-clip>
+      </asset-clip>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>
+"""
+
+
+class NotesDoNotOverstateWhatSurvivedTests(unittest.TestCase):
+    """`not_carried_across` is the whole point of the read reporting anything.
+
+    It is what an agent or a person reads to decide whether the exchange was good enough.
+    A note saying a compound clip was flattened, when its contents did not reach the
+    timeline, is worse than no note at all.
+    """
+
+    def setUp(self):
+        module = load_server_module()
+        self.timeline = module._otio_first_timeline(
+            module._otio_read_fcpx_string(NESTED_CONNECTED_FCPXML))
+        self.notes = self.timeline.metadata.get("splicekit_notes") or []
+
+    def test_each_compound_clip_is_reported_once(self):
+        for name in ("R1", "R2"):
+            flattened = [n for n in self.notes if f"{name!r} flattened" in n]
+            self.assertEqual(len(flattened), 1,
+                             f"{name} reported {len(flattened)} times: {self.notes}")
+
+    def test_the_level_that_does_not_survive_says_so(self):
+        # Inside2 never reaches the timeline: the reader carries one level of connection.
+        names = [c.name for c in self.timeline.find_clips()]
+        self.assertNotIn("Inside2", names)
+        self.assertTrue(
+            any("only one level of connection is carried" in n for n in self.notes),
+            f"nothing said the second level was dropped: {self.notes}")
+
+    def test_what_did_survive_is_playable(self):
+        names = [c.name for c in self.timeline.find_clips()]
+        self.assertIn("Inside1", names, f"the first level was lost too: {names}")
+        for clip in self.timeline.find_clips():
+            self.assertNotIsInstance(clip.media_reference, otio.schema.MissingReference,
+                                     f"{clip.name!r} came back unplayable")
+
+
 if __name__ == "__main__":
     unittest.main()
