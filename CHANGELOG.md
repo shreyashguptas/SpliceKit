@@ -9,6 +9,14 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **`remove_browser_clip`: take a clip back out of a library.** SpliceKit could put clips
+  into a library and never remove them, so every `import_media` and `import_url` call left
+  one behind and nothing short of Final Cut Pro's own UI could clear it. The bridge RPC is
+  `media.removeClip`, which calls `-removeOwnedClipsObject:` on the event's
+  `FFMediaEventProject` — the exact inverse of the add the import makes. The media file on
+  disk is untouched. It refuses a project unless `include_projects` is passed, because
+  removing a project removes a whole timeline, and it reports which kind it removed rather
+  than calling a project "1 clip". `dry_run` lists what it would remove without removing it.
 - **`get_audio_levels`: the audio of the timeline as numbers and a picture.** For one
   clip (its primary-storyline neighbours come along, summary only, so the cuts on both
   sides are compared), a list of clips, a time range or the whole timeline (first 100
@@ -48,6 +56,18 @@ that this fork has removed.
   out on purpose).
 
 ### Changed
+- **`import_otio` imports into an existing event and names it, instead of making one.**
+  The `.otio` -> FCPXML converter named the event after the timeline, so every call created
+  an event; removing the project it brought in then left an empty one behind. It now imports
+  into the library's first event, which is where `import_media` puts things too, and takes an
+  `event` argument to pick another. It creates a new project and leaves the open one alone.
+- **`cleanup_temp_projects` also sweeps the scratch *events* SpliceKit's own FCPXML declares**
+  (`SpliceKit Captions`, `SpliceKit Structure`), removing one as a unit when it holds nothing
+  but SpliceKit scratch. That is the only way to clear a scratch project Final Cut Pro has not
+  loaded: an unloaded sequence has no reachable `FFSequenceRecord`, but its event always does.
+  It only ever matches names SpliceKit generates itself.
+- **`export_otio` reports what it could not carry**, in `not_carried_across`, instead of
+  dropping it quietly.
 - **The MCP server now runs on the official MCP Python SDK 2.x** (`mcp>=2.2,<3`,
   `MCPServer`), which implements the current stable protocol revision
   2026-07-28. Older clients that still use the legacy `initialize` handshake
@@ -76,6 +96,82 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **The OTIO round trip lost the edit.** Exporting the QA project — three items on the primary
+  storyline, the first a compound clip holding two clips of its own, plus a connected clip
+  anchored inside it — reported "1 track, 2 clips", and re-importing produced four gaps and
+  41.034s where 40.040s went in. Four separate causes:
+  - `otio-fcpx-xml-adapter` 1.0 was the only reader and it crashes on a nested `<ref-clip>`,
+    so a compound clip was swapped for a gap of the same length before it ever saw it — the
+    compound clip and the connected clip anchored inside it were simply gone. FCPXML is now
+    read directly (`_otio_fcpx_build_timeline`): a `<ref-clip>` is flattened into the clips it
+    actually contains, trimmed as it is trimmed, with its connected clips re-anchored onto
+    whichever of them covers the moment they sat at. The adapter stays as the fallback for
+    shapes this does not recognise, and both upstream fixture tests still pass through it.
+  - Anchored clips had nowhere to go. Each lane is now its own OTIO track, with a leading gap
+    so a clip anchored twelve seconds in lands twelve seconds in.
+  - Every clip came back as a `MissingReference` — nothing to play. Clips now carry an
+    `ExternalReference` built from the `<asset>`'s media-rep, with `available_range` from the
+    asset's own start and duration.
+- **The `.otio` -> FCPXML converter then dropped almost everything on the way back.**
+  - It crashed outright on `"available_range": null` with `-[NSNull objectForKeyedSubscript:]`.
+    JSON null is a real object in Objective-C, so `ref[@"available_range"]` was truthy and the
+    next subscript killed it. Nulls are now stripped once, at the door.
+  - It pinned every `<asset start="0s">` and wrote clip in-points relative to that. Final Cut
+    Pro validates a clip's in-point against the asset's start and **silently drops anything
+    outside it while still reporting the import succeeded**: camera media starting around
+    1705373670/30000s had every clip thrown away. The media's real start is now carried
+    through and in-points are written to match it.
+  - It wrote spine items as `<clip>` with a nested `<video>`, on the belief that `<asset-clip>`
+    has a restricted DTD. On FCP 12.3 that is backwards: FCP's own export nests
+    `<adjust-transform>` and anchored clips inside `<asset-clip>`, and it is the `<clip><video>`
+    form that gets dropped. Measured both ways against build 450152 — the same document imports
+    as 1 spine item as `<clip><video>` and 4 as `<asset-clip>`.
+- **`cleanup_temp_projects` reported "No scratch import projects found" while `_SKPaste_*`
+  projects sat in the library.** It enumerated `library _deepLoadedSequences`, which only
+  answers sequences Final Cut Pro currently has loaded, and a scratch project that was imported,
+  copied from and switched away from is not loaded; it now walks the library's events through
+  the same `SpliceKit_browserClipsOfEvent` that `browser.listClips` uses. It also gated on
+  `-isProject`, which likewise only answers YES once the sequence is loaded. And the paste route
+  itself was never named in `SpliceKit_isScratchImportProjectName`.
+- **Trashing a scratch project would have trashed the whole event it lived in.**
+  `SpliceKit_libraryItemForSequence` asked the sequence for `-libraryItem`, which answers the
+  `FFEventRecord` the project lives **in**, not the project's own record — for the QA timeline,
+  the event holding every source clip. Two such event trashes were found in the library's
+  `__Trash`. It now prefers `-targetSequenceRecord` and refuses an event record outright.
+- **The FCPXML paste route leaked its temp project.** It asked
+  `-[FFAnchoredTimelineModule deleteSequence:]` to remove it, from a module that is back on the
+  user's sequence by then; that silently did nothing. It now trashes the project's own library
+  record and logs when it cannot.
+- **`browser_list_clips` offered items that were already in the library trash.**
+  `-displayOwnedClips` keeps answering an item after it is trashed, renamed with a random
+  suffix, so cleanup reported the same projects again right after removing them. Trashed items
+  are now dropped from the listing.
+- **`browser_list_clips` reported `"isProject": false` for every project Final Cut Pro had not
+  loaded.** `-isProject` only answers YES once the sequence is loaded, so right after launch
+  every project except the open one read NO — and callers duly handed a project to
+  `add_clip_to_timeline`. `-sequenceType` answers `"sequence"` for an unloaded project and
+  `"clip"` for a source clip, so the two together cover both states.
+  `SpliceKit_browserItemIsProject` is now the one implementation, used by `browser.listClips`,
+  `browser.placeClip`'s refusal and `media.removeClip`.
+- **`open_project` could not open a project Final Cut Pro had not loaded, its `event=` filter
+  never matched, and a partial name could beat an exact one.** It searched
+  `library _deepLoadedSequences`; it now walks the library's events, the same walk
+  `browser_list_clips` makes. The event name came from `-[FFAnchoredSequence event]`, which FCP
+  12.3 does not answer, so every candidate reported `event=""` — including in the "Available:"
+  list the error prints, which is how it went unnoticed; the event is the object holding the
+  sequence, which the new walk has in hand. And Final Cut Pro hands out "QA Timeline 1" when
+  "QA Timeline" is taken, so `open_project("QA Timeline")` opened whichever the walk reached
+  first. An exact name now wins.
+- **Final Cut Pro crashed when a bridge edit ran during a timeline drag.** A drag over the
+  timeline holds a temporary transaction open, and ending it runs the same
+  `-[FFUndoHandler undoableEnd:option:error:]` the modal-dialog crashes died in
+  (`-[TLKTimelineView draggingExited:]` -> `_handlerDidStopTracking:` ->
+  `_endTemporaryTransactionWithCommit:error:`). The existing guard only covered a modal dialog,
+  so an FCPXML import running over the bridge went straight through. Anything that changes the
+  document now waits for the drag to finish, the same way it waits for a dialog, and says so;
+  `-isTracking` is Final Cut Pro's own flag, which it gates its own actions on. Reads are
+  unaffected. `SpliceKit_methodIsAllowedDuringModal` is now `SpliceKit_methodIsAllowedWhileBusy`,
+  since it answers for both.
 - **`beat-detector` was never built or installed by the Makefile.** `make tools` and
   `make install` now compile and ad-hoc sign it like `audio-levels` and the other Swift helpers.
 - **`make tools` / `make deploy` failed on `tools/mixer-app` under Swift 6.4** because `@State`
