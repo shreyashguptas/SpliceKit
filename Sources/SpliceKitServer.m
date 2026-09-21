@@ -28435,12 +28435,35 @@ static void SpliceKit_structureSeekTimelineToSeconds(id timeline, id sequence, d
 
 static double SpliceKit_structureSequenceDurationSeconds(id sequence) {
     if (!sequence) return 0;
+
     SEL durSel = NSSelectorFromString(@"duration");
     if ([sequence respondsToSelector:durSel]) {
         SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
-        return SpliceKit_cmtimeToSeconds(d);
+        double secs = SpliceKit_cmtimeToSeconds(d);
+        if (secs > 0) return secs;
     }
-    return 0;
+
+    // FFAnchoredSequence on FCP 12.3 does not answer -duration (checked against the
+    // live runtime: 67 selectors match "duration" and none of them is the bare one).
+    // Asking for it and giving up left this reading 0, which made the caller think the
+    // sequence had no duration and skip recording it — so the gap song_structure_blocks
+    // appends was never registered and never removed. Sum the primary storyline the way
+    // timeline.getDetailedState does.
+    id primary = [sequence respondsToSelector:@selector(primaryObject)]
+        ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+    if (!primary || ![primary respondsToSelector:@selector(containedItems)]) return 0;
+
+    id items = ((id (*)(id, SEL))objc_msgSend)(primary, @selector(containedItems));
+    if (![items isKindOfClass:[NSArray class]]) return 0;
+
+    double total = 0;
+    for (id item in (NSArray *)items) {
+        if (![item respondsToSelector:@selector(duration)]) continue;
+        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        double secs = SpliceKit_cmtimeToSeconds(d);
+        if (secs > 0) total += secs;
+    }
+    return total;
 }
 
 NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
