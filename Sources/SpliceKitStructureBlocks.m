@@ -296,12 +296,8 @@ static id SB_findSequenceByPrefix(NSString *prefix) {
     return nil;
 }
 
-static void SB_deleteSequence(id sequence) {
-    if (!sequence) return;
-    SEL removeSel = NSSelectorFromString(@"removeFromParent");
-    if ([sequence respondsToSelector:removeSel]) {
-        ((void (*)(id, SEL))objc_msgSend)(sequence, removeSel);
-    }
+static BOOL SB_deleteSequence(id sequence) {
+    return SpliceKit_deleteSequenceLibraryItem(sequence);
 }
 
 NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
@@ -560,7 +556,12 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
     // Clean up temp project
     SpliceKit_executeOnMainThread(^{
         id tempToDelete = SB_findSequenceByPrefix(tempName);
-        if (tempToDelete) SB_deleteSequence(tempToDelete);
+        if (tempToDelete && !SB_deleteSequence(tempToDelete)) {
+            NSString *name = ((id (*)(id, SEL))objc_msgSend)(tempToDelete,
+                NSSelectorFromString(@"displayName"));
+            SpliceKit_log(@"[Structure] Warning: temp project '%@' was not removed from the library",
+                          name ?: tempName);
+        }
     });
 
     SpliceKit_log(@"[Structure] Done: %lu captions placed in caption lane", (unsigned long)captionCount);

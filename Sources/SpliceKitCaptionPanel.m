@@ -3941,29 +3941,8 @@ static id SpliceKitCaption_currentSequence(void) {
     return ((id (*)(id, SEL))objc_msgSend)(tm, NSSelectorFromString(@"sequence"));
 }
 
-static void SpliceKitCaption_deleteSequence(id sequence) {
-    if (!sequence) return;
-    @try {
-        SEL containerEventSel = NSSelectorFromString(@"containerEvent");
-        SEL eventSel = NSSelectorFromString(@"event");
-        id event = nil;
-        if ([sequence respondsToSelector:containerEventSel])
-            event = ((id (*)(id, SEL))objc_msgSend)(sequence, containerEventSel);
-        else if ([sequence respondsToSelector:eventSel])
-            event = ((id (*)(id, SEL))objc_msgSend)(sequence, eventSel);
-        if (event) {
-            SEL removeSel = NSSelectorFromString(@"removeObjectFromContainedItems:");
-            if ([event respondsToSelector:removeSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(event, removeSel, sequence);
-                return;
-            }
-        }
-        SEL trashSel = NSSelectorFromString(@"moveToTrash:");
-        if ([sequence respondsToSelector:trashSel])
-            ((void (*)(id, SEL, id))objc_msgSend)(sequence, trashSel, nil);
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Captions] Warning: could not delete temp project: %@", e.reason);
-    }
+static BOOL SpliceKitCaption_deleteSequence(id sequence) {
+    return SpliceKit_deleteSequenceLibraryItem(sequence);
 }
 
 static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double timeoutSec, double intervalSec) {
@@ -5545,7 +5524,10 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     // Clean up temp project
     SpliceKit_executeOnMainThread(^{
         id tempToDelete = SpliceKitCaption_findSequenceByPrefix(tempName);
-        if (tempToDelete) SpliceKitCaption_deleteSequence(tempToDelete);
+        if (tempToDelete && !SpliceKitCaption_deleteSequence(tempToDelete)) {
+            SpliceKit_log(@"[NativeCaptions] Warning: temp project '%@' was not removed from the library",
+                          tempName);
+        }
     });
 
     SpliceKit_log(@"[NativeCaptions] Done: %lu captions via FCPXML import+paste", (unsigned long)captionCount);

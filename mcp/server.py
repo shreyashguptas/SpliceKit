@@ -232,7 +232,7 @@ SPEECH / TEXT-BASED EDITING (SpliceKit's Text-Based Editor, not FCP's Transcribe
   open_transcript, get_transcript, search_transcript, delete_transcript_words,
   move_transcript_words, delete_transcript_silences, set_transcript_speaker,
   set_silence_threshold. Captions: open_captions, set_caption_style, set_caption_grouping,
-  generate_captions, verify_captions, generate_native_captions.
+  generate_captions, verify_captions, generate_native_captions, cleanup_temp_projects.
 UNDO / GROUPING: history_action("undo" | "redo"). begin_edit("Rough cut") ... end_edit() makes
   everything in between ONE undo step (Flexo's internal term: one undoable action) -- always
   call end_edit.
@@ -478,6 +478,7 @@ DESTRUCTIVE_TOOLS = {
     "export_captions_srt",
     "export_captions_txt",
     "generate_native_captions",
+    "cleanup_temp_projects",
     "blade_scene_changes",
     "beat_sync_blade",
     "song_structure_blocks",
@@ -672,6 +673,7 @@ CUSTOM_TOOL_TITLES = {
     "export_captions_txt": "Export Captions Text",
     "set_caption_words": "Set Caption Words",
     "generate_native_captions": "Generate Native Captions",
+    "cleanup_temp_projects": "Cleanup Temp Import Projects",
     "verify_native_captions": "Verify Native Captions",
     "mark_scene_changes": "Mark Scene Changes",
     "blade_scene_changes": "Blade Scene Changes",
@@ -9242,6 +9244,27 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
         "format": format,
     }
     r = bridge.call("nativeCaptions.generate", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@splicekit_tool("cleanup_temp_projects")
+def cleanup_temp_projects(dry_run: bool = False) -> str:
+    """Remove stale scratch projects left by caption and song-structure pipelines.
+
+    ``generate_native_captions`` and ``song_structure_blocks`` (and related
+    structure-caption import) create temporary FCPXML import projects named
+    ``SpliceKit Caption Import *`` or ``SK Structure *``. They should be
+    deleted automatically when each run finishes; this tool finds any that
+    were left behind and moves them to the library Trash.
+
+    Args:
+        dry_run: When true, only list matching project names without deleting.
+
+    Returns found/removed project names, plus any that failed to delete.
+    """
+    r = bridge.call("captions.cleanup", dryRun=dry_run)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)

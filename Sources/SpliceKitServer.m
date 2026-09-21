@@ -10869,8 +10869,107 @@ static NSDictionary *SpliceKit_handleCaptionsVerify(NSDictionary *params) {
     return result ?: @{@"error": @"Verification failed"};
 }
 
-// Clean up stale "SpliceKit Caption Import" projects from the library.
+static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
+    if (name.length == 0) return NO;
+    return [name hasPrefix:@"SpliceKit Caption Import"] || [name hasPrefix:@"SK Structure"];
+}
+
+static id SpliceKit_libraryItemForSequence(id sequence) {
+    if (!sequence) return nil;
+    SEL selectors[] = {
+        NSSelectorFromString(@"libraryItem"),
+        NSSelectorFromString(@"containerObject"),
+        NSSelectorFromString(@"targetLibraryItem"),
+    };
+    for (NSUInteger i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+        SEL sel = selectors[i];
+        if (![sequence respondsToSelector:sel]) continue;
+        id item = ((id (*)(id, SEL))objc_msgSend)(sequence, sel);
+        if (item) return item;
+    }
+    return nil;
+}
+
+static id SpliceKit_libraryForSequence(id sequence, id libraryItem) {
+    SEL librarySel = NSSelectorFromString(@"library");
+    if (sequence && [sequence respondsToSelector:librarySel]) {
+        id library = ((id (*)(id, SEL))objc_msgSend)(sequence, librarySel);
+        if (library) return library;
+    }
+    if (libraryItem && [libraryItem respondsToSelector:librarySel]) {
+        id library = ((id (*)(id, SEL))objc_msgSend)(libraryItem, librarySel);
+        if (library) return library;
+    }
+    return nil;
+}
+
+BOOL SpliceKit_deleteSequenceLibraryItem(id sequence) {
+    if (!sequence) return NO;
+
+    NSString *projectName = nil;
+    SEL displayNameSel = NSSelectorFromString(@"displayName");
+    if ([sequence respondsToSelector:displayNameSel]) {
+        projectName = ((id (*)(id, SEL))objc_msgSend)(sequence, displayNameSel);
+    }
+
+    id libraryItem = SpliceKit_libraryItemForSequence(sequence);
+    if (!libraryItem) {
+        SpliceKit_log(@"[SpliceKit] Warning: could not delete temp project '%@': sequence has no library item",
+                      projectName ?: @"?");
+        return NO;
+    }
+
+    id library = SpliceKit_libraryForSequence(sequence, libraryItem);
+    if (!library) {
+        SpliceKit_log(@"[SpliceKit] Warning: could not delete temp project '%@': no library",
+                      projectName ?: @"?");
+        return NO;
+    }
+
+    NSError *error = nil;
+    SEL trashActionSel = NSSelectorFromString(@"actionMoveLibraryItemToTrash:actionName:error:");
+    if ([library respondsToSelector:trashActionSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
+            library, trashActionSel, libraryItem, @"SpliceKit Cleanup", &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] actionMoveLibraryItemToTrash failed for '%@': %@",
+                          projectName ?: @"?", error.localizedDescription);
+            error = nil;
+        }
+    }
+
+    SEL trashSel = NSSelectorFromString(@"trashLibraryItem:immediately:error:");
+    if ([library respondsToSelector:trashSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+            library, trashSel, libraryItem, NO, &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] trashLibraryItem failed for '%@': %@",
+                          projectName ?: @"?", error.localizedDescription);
+            error = nil;
+        }
+    }
+
+    SEL removeSel = NSSelectorFromString(@"removeLibraryItem:error:");
+    if ([library respondsToSelector:removeSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
+            library, removeSel, libraryItem, &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] removeLibraryItem failed for '%@': %@",
+                          projectName ?: @"?", error.localizedDescription);
+        }
+    }
+
+    SpliceKit_log(@"[SpliceKit] Warning: could not delete temp project '%@': library trash APIs failed",
+                  projectName ?: @"?");
+    return NO;
+}
+
+// Clean up stale scratch import projects (caption + song-structure FCPXML temps).
 static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
+    BOOL dryRun = [params[@"dryRun"] boolValue];
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -10886,50 +10985,76 @@ static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
             NSArray *allSeqs = ((id (*)(id, SEL))objc_msgSend)(seqSet,
                 NSSelectorFromString(@"allObjects"));
             if (![allSeqs isKindOfClass:[NSArray class]]) {
-                result = @{@"status": @"ok", @"removed": @(0), @"message": @"No sequences found"};
+                result = @{
+                    @"status": @"ok",
+                    @"dryRun": @(dryRun),
+                    @"found": @(0),
+                    @"removed": @(0),
+                    @"foundNames": @[],
+                    @"removedNames": @[],
+                    @"failedNames": @[],
+                    @"message": @"No sequences found"
+                };
                 return;
             }
 
+            NSMutableArray *foundNames = [NSMutableArray array];
             NSMutableArray *toDelete = [NSMutableArray array];
             for (id seq in allSeqs) {
-                @try {
-                    NSString *name = ((id (*)(id, SEL))objc_msgSend)(seq,
-                        NSSelectorFromString(@"displayName"));
-                    if ([name hasPrefix:@"SpliceKit Caption Import"]) {
-                        [toDelete addObject:seq];
-                    }
-                } @catch (NSException *e) {}
+                NSString *name = nil;
+                SEL dnSel = NSSelectorFromString(@"displayName");
+                if ([seq respondsToSelector:dnSel]) {
+                    name = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel);
+                }
+                if (!SpliceKit_isScratchImportProjectName(name)) continue;
+                [foundNames addObject:name ?: @"?"];
+                [toDelete addObject:seq];
             }
 
-            int removed = 0;
-            for (id seq in toDelete) {
-                @try {
-                    SEL containerEventSel = NSSelectorFromString(@"containerEvent");
-                    SEL eventSel = NSSelectorFromString(@"event");
-                    id event = nil;
-                    if ([seq respondsToSelector:containerEventSel])
-                        event = ((id (*)(id, SEL))objc_msgSend)(seq, containerEventSel);
-                    else if ([seq respondsToSelector:eventSel])
-                        event = ((id (*)(id, SEL))objc_msgSend)(seq, eventSel);
-                    if (event) {
-                        SEL removeSel = NSSelectorFromString(@"removeObjectFromContainedItems:");
-                        if ([event respondsToSelector:removeSel]) {
-                            ((void (*)(id, SEL, id))objc_msgSend)(event, removeSel, seq);
-                            removed++;
-                        }
+            NSMutableArray *removedNames = [NSMutableArray array];
+            NSMutableArray *failedNames = [NSMutableArray array];
+            if (!dryRun) {
+                for (id seq in toDelete) {
+                    NSString *name = nil;
+                    SEL dnSel = NSSelectorFromString(@"displayName");
+                    if ([seq respondsToSelector:dnSel]) {
+                        name = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel);
                     }
-                } @catch (NSException *e) {}
+                    if (SpliceKit_deleteSequenceLibraryItem(seq)) {
+                        [removedNames addObject:name ?: @"?"];
+                    } else {
+                        [failedNames addObject:name ?: @"?"];
+                    }
+                }
+            }
+
+            NSString *message = nil;
+            if (dryRun) {
+                message = foundNames.count > 0
+                    ? [NSString stringWithFormat:@"Would remove %lu scratch import project(s)",
+                        (unsigned long)foundNames.count]
+                    : @"No scratch import projects found";
+            } else if (removedNames.count > 0) {
+                message = [NSString stringWithFormat:@"Removed %lu scratch import project(s)",
+                    (unsigned long)removedNames.count];
+            } else if (foundNames.count > 0) {
+                message = @"Found scratch import projects but could not remove any (see failedNames)";
+            } else {
+                message = @"No scratch import projects found";
             }
 
             result = @{
-                @"status": @"ok",
-                @"removed": @(removed),
-                @"found": @(toDelete.count),
-                @"message": removed > 0
-                    ? [NSString stringWithFormat:@"Removed %d stale caption import projects", removed]
-                    : @"No stale caption import projects found"
+                @"status": failedNames.count > 0 ? @"partial" : @"ok",
+                @"dryRun": @(dryRun),
+                @"found": @(foundNames.count),
+                @"removed": @(removedNames.count),
+                @"foundNames": foundNames,
+                @"removedNames": removedNames,
+                @"failedNames": failedNames,
+                @"message": message
             };
         } @catch (NSException *e) {
+            SpliceKit_log(@"[SpliceKit] captions.cleanup exception: %@", e.reason);
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
     });

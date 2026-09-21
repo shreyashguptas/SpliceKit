@@ -373,4 +373,7 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureRemove(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureToggle(NSDictionary *params);
 
+// Remove a sequence's library item (temp FCPXML import projects from captions / structure).
+BOOL SpliceKit_deleteSequenceLibraryItem(id sequence);
+
 #endif /* SpliceKit_h */
