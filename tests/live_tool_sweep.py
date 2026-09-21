@@ -334,7 +334,11 @@ CASES.update({
                                                    "pane": "secondary"})]),
     # Toggles the visibility of structure blocks that are already on the timeline;
     # with none placed, saying so is the correct answer.
-    "toggle_structure_blocks": dependency("No structure blocks", "sections array"),
+    # The happy path is song_structure_blocks' cleanup step above. What is left to check
+    # here is that it says so clearly when there is nothing to remove, rather than
+    # reporting success or deleting something else.
+    "toggle_structure_blocks": Case(args={}, kind="read",
+                                    expect=r"No structure blocks on the timeline to remove"),
     "sections_hide": write(),
     "livecam_open": write(cleanup=[("livecam_close", {})]),
     "livecam_close": write(),
@@ -405,9 +409,12 @@ CASES.update({
                                     kind="read", timeout=180),
     "beat_sync_blade": Case(args={"file_path": "$MEDIA_FILE", "dry_run": True},
                             kind="read", timeout=180),
+    # toggle_structure_blocks does the removal here, which is the only way its real
+    # path gets run: on its own it can only ever meet a timeline with no blocks on it.
     "song_structure_blocks": Case(args={"file_path": "$MEDIA_FILE"}, kind="write",
                                   timeout=180,
-                                  cleanup=[("remove_structure_blocks", {}),
+                                  cleanup=[("toggle_structure_blocks", {}),
+                                           ("remove_structure_blocks", {}),
                                            ("cleanup_temp_projects", {})]),
     "remove_structure_blocks": read(dry_run=True),
     # The beat-driven family reads Final Cut Pro's own timing metadata, which only
