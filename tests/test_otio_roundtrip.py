@@ -430,5 +430,67 @@ class GapRebasesItsAnchoredChildrenTests(unittest.TestCase):
                                  f"wanted {float(wanted)}s")
 
 
+# A compound clip connected to something inside itself. The cycle is formed through lane
+# anchoring rather than spine nesting, which is the path the spine-side guard never saw:
+# reading this used to expand forever and hang the reader outright.
+SELF_CONNECTED_FCPXML = """<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1920" height="1080"/>
+    <asset id="a1" name="A" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/a.mov"/>
+    </asset>
+    <media id="m_outer" name="Outer">
+      <sequence format="r1" duration="300300/30000s"><spine>
+        <asset-clip ref="a1" name="Body" offset="0s" start="0s" duration="300300/30000s" format="r1">
+          <ref-clip ref="m_outer" name="SelfConnected" lane="1" offset="30030/30000s"
+                    start="0s" duration="60060/30000s"/>
+        </asset-clip>
+      </spine></sequence>
+    </media>
+  </resources>
+  <library><event name="E"><project name="Hang">
+    <sequence format="r1" duration="300300/30000s"><spine>
+      <asset-clip ref="a1" name="Main" offset="0s" start="0s" duration="300300/30000s" format="r1">
+        <ref-clip ref="m_outer" name="Outer" lane="1" offset="0s" start="0s"
+                  duration="300300/30000s"/>
+      </asset-clip>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>
+"""
+
+
+class ConnectedCompoundClipCycleTests(unittest.TestCase):
+    def test_a_compound_clip_connected_inside_itself_terminates(self):
+        # Bounded in wall-clock, because the failure this guards against is a hang, and a
+        # test that hangs tells you nothing and blocks everything behind it.
+        import signal
+
+        def _giveup(signum, frame):
+            raise AssertionError(
+                "reading a compound clip connected inside itself did not finish within "
+                "10s — the cycle guard is not reaching the lane-anchored path")
+
+        module = load_server_module()
+        previous = signal.signal(signal.SIGALRM, _giveup)
+        signal.setitimer(signal.ITIMER_REAL, 10.0)
+        try:
+            timeline = module._otio_first_timeline(
+                module._otio_read_fcpx_string(SELF_CONNECTED_FCPXML))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+        for clip in timeline.find_clips():
+            self.assertNotIsInstance(clip.media_reference, otio.schema.MissingReference,
+                                     f"{clip.name!r} came back unplayable")
+        notes = timeline.metadata.get("splicekit_notes") or []
+        self.assertTrue(any("connected inside itself" in n for n in notes),
+                        f"the cycle was not reported: {notes}")
+        duration = timeline.duration()
+        self.assertAlmostEqual(duration.value / duration.rate, 10.01, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

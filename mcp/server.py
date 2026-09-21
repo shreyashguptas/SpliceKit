@@ -6838,38 +6838,72 @@ def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
     # `ref` against the asset index; a <media> id matches no <asset>, so it came back as
     # an unplayable clip with no note beside it — and that happened even when the compound
     # clip's contents were perfectly good.
-    for host in project_elem.iter():
-        anchored_refs = [c for c in host if c.tag == "ref-clip" and c.get("lane")]
-        if not anchored_refs:
-            continue
-        for ref in anchored_refs:
-            lane = ref.get("lane")
-            name = ref.get("name", "?")
-            at = list(host).index(ref)
-            inner_spine = _otio_fcpx_media_spine(resources_elem, ref.get("ref", ""))
+    # list() first. project_elem.iter() is a live iterator: an element inserted into the
+    # tree while the walk is in progress gets visited by that same walk. Together with a
+    # cycle guard that started empty on every ref-clip it found, that made a compound clip
+    # connected to something inside itself expand forever — each turn inserting one more
+    # copy for the walk to discover. It hung the reader outright, which is worse than the
+    # unplayable clip it replaced. The tree is snapshotted, and anything this pass inserts
+    # is followed by _otio_fcpx_flatten_anchored (below), which carries the guard with it.
+    for host in list(project_elem.iter()):
+        _otio_fcpx_flatten_anchored(host, resources_elem, notes)
+    return notes
+
+
+def _otio_fcpx_flatten_anchored(host, resources_elem, notes, seen=frozenset(), depth=0):
+    """Flatten every ``<ref-clip>`` anchored to `host`, then the ones inside those.
+
+    `seen` carries the compound clips already opened on the way here, so a connected
+    compound clip that contains a connection back to itself becomes a gap instead of
+    expanding forever. `depth` bounds it a second way, for a chain that never repeats an
+    id but goes on too long.
+    """
+    if depth > _OTIO_FCPX_MAX_COMPOUND_DEPTH:
+        return
+    for ref in [c for c in list(host) if c.tag == "ref-clip" and c.get("lane")]:
+        ref_id = ref.get("ref", "")
+        lane = ref.get("lane")
+        name = ref.get("name", "?")
+        at = list(host).index(ref)
+
+        if ref_id in seen:
+            replacement = [_otio_fcpx_ref_clip_as_gap(ref)]
+            notes.append(f"connected compound clip {name!r} replaced with a gap: "
+                         "it is connected inside itself")
+        else:
+            inner_spine = _otio_fcpx_media_spine(resources_elem, ref_id)
             expanded = []
             if inner_spine is not None:
                 expanded = _otio_fcpx_expand_ref_clip(
-                    ref, inner_spine, resources_elem, notes,
-                    frozenset({ref.get("ref", "")}))
-            if not expanded:
+                    ref, inner_spine, resources_elem, notes, seen | {ref_id})
+            if expanded:
+                replacement = expanded
+                notes.append(
+                    f"connected compound clip {name!r} flattened into "
+                    f"{len(expanded)} clip(s) on the same lane — OTIO has no compound clip")
+            else:
                 replacement = [_otio_fcpx_ref_clip_as_gap(ref)]
                 notes.append(
                     f"connected compound clip {name!r} replaced with a gap: "
                     + ("its contents are not in this document" if inner_spine is None
                        else "there is nothing in it"))
-            else:
-                replacement = expanded
-                notes.append(
-                    f"connected compound clip {name!r} flattened into "
-                    f"{len(expanded)} clip(s) on the same lane — OTIO has no compound clip")
-            # Expansion drops `lane`, since a spine item has none. These stay connected.
-            for item in replacement:
-                item.set("lane", lane)
-            host.remove(ref)
-            for offset, item in enumerate(replacement):
-                host.insert(at + offset, item)
-    return notes
+
+        # Expansion drops `lane`, since a spine item has none. These stay connected.
+        for item in replacement:
+            item.set("lane", lane)
+        host.remove(ref)
+        for offset, item in enumerate(replacement):
+            host.insert(at + offset, item)
+
+        # Anything connected to what just came out, with this compound clip remembered.
+        for item in replacement:
+            _otio_fcpx_flatten_anchored(item, resources_elem, notes,
+                                        seen | {ref_id}, depth + 1)
+        if depth >= 1:
+            notes.append(
+                f"connected compound clip {name!r} was itself connected to another "
+                "connected clip; only one level of connection is carried, so its "
+                "contents do not reach the timeline")
 
 
 def _otio_fcpx_asset_index(resources_elem):
