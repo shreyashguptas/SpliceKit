@@ -6715,9 +6715,13 @@ static NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params) {
             id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
 
+            id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
             NSUInteger applied = 0;
             NSMutableArray *results = [NSMutableArray array];
+            NSString *undoGroupName = @"Blade at Times";
+            BOOL openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
 
+            @try {
             for (NSNumber *timeNum in sortedTimes) {
                 double t = [timeNum doubleValue];
                 SpliceKit_handlePlaybackSeek(@{@"seconds": @(t)});
@@ -6733,13 +6737,24 @@ static NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params) {
                         @"error": bladeResult[@"error"] ?: @"blade failed"}];
                 }
             }
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
+            }
 
-            result = @{
+            NSMutableDictionary *out = [@{
                 @"status": @"ok",
                 @"count": @(sortedTimes.count),
                 @"applied": @(applied),
                 @"cuts": results,
-            };
+            } mutableCopy];
+            if (openedUndoGroup) {
+                out[@"undoStep"] = undoGroupName;
+            } else if (sOpenEditGroupName) {
+                out[@"undoStep"] = sOpenEditGroupName;
+            }
+            result = out;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -7480,10 +7495,9 @@ static NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
             SEL trimSel = NSSelectorFromString(
                 @"operationTrimEdit:endEdits:edgeType:byDelta:trimCommand:trimFlags:temporalResolutionMode:animationHint:error:");
             if (!dryRun && planned > 0 && [sequence respondsToSelector:trimSel]) {
-                if ([sequence respondsToSelector:@selector(beginEditing)]) {
-                    ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(beginEditing));
-                }
-
+                NSString *undoGroupName = @"Trim to Beats";
+                BOOL openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
+                @try {
                 NSMethodSignature *sig = [sequence methodSignatureForSelector:trimSel];
                 for (NSMutableDictionary *entry in plan) {
                     if (![entry[@"status"] isEqualToString:@"planned"]) continue;
@@ -7530,9 +7544,10 @@ static NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                     }
                     [entry removeObjectForKey:@"item"];
                 }
-
-                if ([sequence respondsToSelector:@selector(endEditing)]) {
-                    ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(endEditing));
+                } @finally {
+                    if (openedUndoGroup) {
+                        SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                    }
                 }
             } else {
                 for (NSMutableDictionary *entry in plan) {
@@ -9487,12 +9502,26 @@ static NSDictionary *SpliceKit_handleBatchActions(NSDictionary *params) {
         return @{@"error": @"actions array required"};
     }
 
+    NSString *paramName = params[@"name"];
+    NSString *batchUndoName = ([paramName isKindOfClass:[NSString class]] && paramName.length > 0)
+        ? paramName : @"Batch Actions";
+
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
+        id timeline = nil;
+        id sequence = nil;
+        BOOL openedUndoGroup = NO;
         @try {
+            timeline = SpliceKit_getActiveTimelineModule();
+            if (timeline) {
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, batchUndoName);
+            }
+
             NSMutableArray *results = [NSMutableArray array];
             NSUInteger executed = 0;
 
+            @try {
             for (NSDictionary *act in actions) {
                 NSString *type = act[@"type"] ?: @"timeline";
                 NSString *actionName = act[@"action"] ?: @"";
@@ -9525,6 +9554,11 @@ static NSDictionary *SpliceKit_handleBatchActions(NSDictionary *params) {
                     continue;
                 }
                 executed++;
+            }
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, batchUndoName, YES);
+                }
             }
 
             result = @{
@@ -10100,6 +10134,7 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
             NSMutableArray *exportResults = [NSMutableArray array];
             NSInteger exported = 0;
 
+            // No undo group: mark in/out + share export are not timeline model edits; nothing meaningful registers on the undo stack.
             for (NSUInteger i = 0; i < clips.count; i++) {
                 NSDictionary *clipInfo = clips[i];
                 SpliceKit_CMTime startCMTime, endCMTime;
@@ -10396,7 +10431,31 @@ static NSDictionary *SpliceKit_handleTranscriptMoveWords(NSDictionary *params) {
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
-        result = [[SpliceKitTranscriptPanel sharedPanel] moveWordsFromIndex:startIndex count:count toIndex:destIndex];
+        id timeline = nil;
+        id sequence = nil;
+        NSString *undoGroupName = @"Move Words";
+        BOOL openedUndoGroup = NO;
+        @try {
+            timeline = SpliceKit_getActiveTimelineModule();
+            if (timeline) {
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
+            }
+            @try {
+                result = [[SpliceKitTranscriptPanel sharedPanel] moveWordsFromIndex:startIndex count:count toIndex:destIndex];
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
+            }
+            if (result && !result[@"error"] && openedUndoGroup) {
+                NSMutableDictionary *out = [result mutableCopy];
+                out[@"undoStep"] = undoGroupName;
+                result = out;
+            }
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
     });
     return result ?: @{@"error": @"Operation failed"};
 }
@@ -10412,7 +10471,33 @@ static NSDictionary *SpliceKit_handleTranscriptDeleteSilences(NSDictionary *para
     double minDuration = [params[@"minDuration"] doubleValue]; // 0 = delete all
 
     __block NSDictionary *result = nil;
-    result = [[SpliceKitTranscriptPanel sharedPanel] deleteSilencesLongerThan:minDuration];
+    SpliceKit_executeOnMainThread(^{
+        id timeline = nil;
+        id sequence = nil;
+        NSString *undoGroupName = @"Delete Silences";
+        BOOL openedUndoGroup = NO;
+        @try {
+            timeline = SpliceKit_getActiveTimelineModule();
+            if (timeline) {
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
+            }
+            @try {
+                result = [[SpliceKitTranscriptPanel sharedPanel] deleteSilencesLongerThan:minDuration];
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
+                }
+            }
+            if (result && openedUndoGroup) {
+                NSMutableDictionary *out = [result mutableCopy];
+                out[@"undoStep"] = undoGroupName;
+                result = out;
+            }
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
     return result ?: @{@"error": @"Operation failed"};
 }
 
@@ -11375,6 +11460,8 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
         __block NSInteger applied = 0;
         __block NSInteger skippedOutsideClip = 0;
         __block BOOL sceneOpenedUndoGroup = NO;
+        NSString *sceneUndoGroupName = [action isEqualToString:@"blade"]
+            ? @"Blade Scene Changes" : @"Mark Scene Changes";
         id clipForApply = targetClip;
         double mapClipStart = clipTimelineStart;
         double mapClipEnd = clipTimelineEnd;
@@ -11385,7 +11472,7 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
         SpliceKit_executeOnMainThread(^{
             id timeline = nil;
             id sequence = nil;
-            NSString *undoGroupName = @"Mark Scene Changes";
+            NSString *undoGroupName = sceneUndoGroupName;
             BOOL openedUndoGroup = NO;
             @try {
                 timeline = SpliceKit_getActiveTimelineModule();
@@ -11459,7 +11546,7 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
         baseResult[@"applied"] = @(applied);
         baseResult[@"skippedOutsideClip"] = @(skippedOutsideClip);
         if (applied > 0 && sceneOpenedUndoGroup) {
-            baseResult[@"undoStep"] = @"Mark Scene Changes";
+            baseResult[@"undoStep"] = sceneUndoGroupName;
         }
     }
 
@@ -27593,6 +27680,21 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
             long long builtDurationFrames = 0;
             NSMutableDictionary *nativeErrors = [NSMutableDictionary dictionary];
 
+            id buildSequence = (buildTimeline && [buildTimeline respondsToSelector:@selector(sequence)])
+                ? ((id (*)(id, SEL))objc_msgSend)(buildTimeline, @selector(sequence))
+                : nil;
+            NSString *assembleUndoName = @"Assemble to Beats";
+            BOOL openedAssembleUndo = NO;
+            if (loadedSequence && buildTimeline && buildSequence) {
+                openedAssembleUndo = SpliceKit_internalBeginEditGroupIfNeeded(buildSequence, assembleUndoName);
+            }
+
+            BOOL songAudioInserted = NO;
+            NSString *songAudioError = @"";
+            NSDictionary *songAudioPrep = @{};
+            NSDictionary *songAudioEdit = @{};
+
+            @try {
             if (loadedSequence && buildTimeline) {
                 for (NSMutableDictionary *entry in plan) {
                     if ([entry[@"status"] isEqualToString:@"gap"]) {
@@ -27657,10 +27759,6 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
                     ? nativeProject[@"error"] : @"Failed to create or load the native target project";
             }
 
-            BOOL songAudioInserted = NO;
-            NSString *songAudioError = @"";
-            NSDictionary *songAudioPrep = @{};
-            NSDictionary *songAudioEdit = @{};
             if (loadedSequence && buildTimeline && includeAudio && sourceInsertObject && builtDurationFrames > 0) {
                 double targetSongSeconds = MIN(sourceDuration, builtDurationFrames * frameSeconds);
                 int32_t songTimescale = sourceClipRange.duration.timescale > 0
@@ -27701,6 +27799,11 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
                 songAudioError = @"Couldn't resolve the selected beat source song for native insertion";
             } else if (includeAudio && builtDurationFrames <= 0) {
                 songAudioError = @"No video segments were appended, so the song was not connected";
+            }
+            } @finally {
+                if (openedAssembleUndo) {
+                    SpliceKit_internalEndEditGroupIfOpened(buildSequence, buildTimeline, assembleUndoName, YES);
+                }
             }
 
             result = @{

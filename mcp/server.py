@@ -2419,15 +2419,21 @@ def get_clip_effects(handle: str = "") -> str:
 # of making a separate tool call for each step.
 
 @splicekit_tool("batch_timeline_actions")
-def batch_timeline_actions(actions: str) -> str:
+def batch_timeline_actions(actions: str, undo_name: str = "Batch Actions") -> str:
     """Execute multiple timeline/playback actions in sequence.
     Much more efficient than calling individual tools.
+
+    When the batch includes any timeline action, the whole run is wrapped in one
+    undo step (timeline.beginEdit / timeline.endEdit), so Edit > Undo reverts
+    every timeline mutation in the batch with a single undo.
 
     actions: JSON array of action objects. Each action:
       {"type": "timeline", "action": "blade"}
       {"type": "playback", "action": "nextFrame"}
       {"type": "playback", "action": "nextFrame", "repeat": 30}
       {"type": "wait", "seconds": 0.5}
+
+    undo_name: Edit > Undo menu name when a group is opened (default "Batch Actions").
 
     Example: blade at 3 positions:
       batch_timeline_actions('[
@@ -2445,44 +2451,67 @@ def batch_timeline_actions(actions: str) -> str:
     except json.JSONDecodeError as e:
         return f"Invalid JSON: {e}"
 
+    has_timeline_actions = any(
+        act.get("type", "timeline") == "timeline" for act in action_list
+    )
+    undo_group_opened = False
+    begin_edit_note: str | None = None
+    if has_timeline_actions:
+        r = bridge.call("timeline.beginEdit", name=undo_name)
+        if _err(r):
+            begin_edit_note = (
+                f"Note: could not open undo group ({r.get('error', r)}); "
+                "timeline actions are not grouped."
+            )
+        else:
+            undo_group_opened = True
+
     results = []
     errors = 0
-    for i, act in enumerate(action_list):
-        act_type = act.get("type", "timeline")
-        action_name = act.get("action", "")
-        repeat = act.get("repeat", 1)
+    try:
+        for i, act in enumerate(action_list):
+            act_type = act.get("type", "timeline")
+            action_name = act.get("action", "")
+            repeat = act.get("repeat", 1)
 
-        if act_type == "wait":
-            secs = act.get("seconds", 0.5)
-            time.sleep(secs)
-            results.append(f"[{i}] wait {secs}s -> OK")
-        elif act_type == "playback":
-            r = None
-            for _ in range(repeat):
-                r = bridge.call("playback.action", action=action_name)
-            label = f"[{i}] playback.{action_name}" + (f" x{repeat}" if repeat > 1 else "")
-            if r and _err(r):
-                errors += 1
-                results.append(f"{label} -> FAILED: {r.get('error', '?')}")
+            if act_type == "wait":
+                secs = act.get("seconds", 0.5)
+                time.sleep(secs)
+                results.append(f"[{i}] wait {secs}s -> OK")
+            elif act_type == "playback":
+                r = None
+                for _ in range(repeat):
+                    r = bridge.call("playback.action", action=action_name)
+                label = f"[{i}] playback.{action_name}" + (f" x{repeat}" if repeat > 1 else "")
+                if r and _err(r):
+                    errors += 1
+                    results.append(f"{label} -> FAILED: {r.get('error', '?')}")
+                else:
+                    results.append(f"{label} -> OK")
+            elif act_type == "timeline":
+                r = None
+                for _ in range(repeat):
+                    r = bridge.call("timeline.action", action=action_name)
+                label = f"[{i}] timeline.{action_name}" + (f" x{repeat}" if repeat > 1 else "")
+                if r and _err(r):
+                    errors += 1
+                    results.append(f"{label} -> FAILED: {r.get('error', '?')}")
+                else:
+                    results.append(f"{label} -> OK")
             else:
-                results.append(f"{label} -> OK")
-        elif act_type == "timeline":
-            r = None
-            for _ in range(repeat):
-                r = bridge.call("timeline.action", action=action_name)
-            label = f"[{i}] timeline.{action_name}" + (f" x{repeat}" if repeat > 1 else "")
-            if r and _err(r):
                 errors += 1
-                results.append(f"{label} -> FAILED: {r.get('error', '?')}")
-            else:
-                results.append(f"{label} -> OK")
-        else:
-            errors += 1
-            results.append(f"[{i}] unknown type: {act_type} -> SKIPPED")
+                results.append(f"[{i}] unknown type: {act_type} -> SKIPPED")
+    finally:
+        if undo_group_opened:
+            bridge.call("timeline.endEdit", name=undo_name)
 
     summary = f"Executed {len(action_list)} actions"
     if errors:
         summary += f" ({errors} failed)"
+    if undo_group_opened:
+        summary += f"\nUndo group: {undo_name}"
+    if begin_edit_note:
+        summary += f"\n{begin_edit_note}"
     return summary + ":\n" + "\n".join(results)
 
 
