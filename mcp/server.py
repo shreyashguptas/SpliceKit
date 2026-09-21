@@ -6830,6 +6830,45 @@ def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
                 spine.remove(child)
             for child in rebuilt:
                 spine.append(child)
+
+    # A compound clip does not have to sit in the spine. Connect one to a clip — B-roll,
+    # an insert, a titled sequence — and it hangs off its host on a lane instead, which
+    # the walk above never reaches, because that only iterates the direct children of a
+    # <spine>. The reader then handed the raw <ref-clip> to make_item, which resolves a
+    # `ref` against the asset index; a <media> id matches no <asset>, so it came back as
+    # an unplayable clip with no note beside it — and that happened even when the compound
+    # clip's contents were perfectly good.
+    for host in project_elem.iter():
+        anchored_refs = [c for c in host if c.tag == "ref-clip" and c.get("lane")]
+        if not anchored_refs:
+            continue
+        for ref in anchored_refs:
+            lane = ref.get("lane")
+            name = ref.get("name", "?")
+            at = list(host).index(ref)
+            inner_spine = _otio_fcpx_media_spine(resources_elem, ref.get("ref", ""))
+            expanded = []
+            if inner_spine is not None:
+                expanded = _otio_fcpx_expand_ref_clip(
+                    ref, inner_spine, resources_elem, notes,
+                    frozenset({ref.get("ref", "")}))
+            if not expanded:
+                replacement = [_otio_fcpx_ref_clip_as_gap(ref)]
+                notes.append(
+                    f"connected compound clip {name!r} replaced with a gap: "
+                    + ("its contents are not in this document" if inner_spine is None
+                       else "there is nothing in it"))
+            else:
+                replacement = expanded
+                notes.append(
+                    f"connected compound clip {name!r} flattened into "
+                    f"{len(expanded)} clip(s) on the same lane — OTIO has no compound clip")
+            # Expansion drops `lane`, since a spine item has none. These stay connected.
+            for item in replacement:
+                item.set("lane", lane)
+            host.remove(ref)
+            for offset, item in enumerate(replacement):
+                host.insert(at + offset, item)
     return notes
 
 

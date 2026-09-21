@@ -334,5 +334,101 @@ class GapKeepsAnchoredClipsWhereTheyWereTests(unittest.TestCase):
                                    "start was dropped without rebasing it")
 
 
+class ConnectedCompoundClipTests(unittest.TestCase):
+    """A compound clip does not have to sit in the spine.
+
+    Connect one to a clip — B-roll, an insert, a titled sequence — and it hangs off its
+    host on a lane. The flattening walk only ever looked at the direct children of a
+    <spine>, so it never reached those: the raw <ref-clip> went to the reader, which
+    resolves `ref` against the asset index, where a <media> id matches no <asset>. It came
+    back as an unplayable clip with no note beside it, even when its contents were good.
+    """
+
+    def _timeline(self, xml):
+        module = load_server_module()
+        return module._otio_first_timeline(module._otio_read_fcpx_string(xml))
+
+    def test_a_connected_compound_clip_with_good_media_is_flattened(self):
+        xml = _fcpxml(
+            '    <asset id="a2" name="B" start="0s" duration="600600/30000s" hasVideo="1"'
+            ' format="r1">\n'
+            '      <media-rep kind="original-media" src="file:///tmp/b.mov"/>\n'
+            '    </asset>\n'
+            '    <media id="m_real" name="Real">\n'
+            '      <sequence format="r1" duration="120120/30000s"><spine>\n'
+            '        <asset-clip ref="a2" name="Inside" offset="0s" start="0s"'
+            ' duration="120120/30000s" format="r1"/>\n'
+            '      </spine></sequence>\n'
+            '    </media>',
+            '            <asset-clip ref="a1" name="Main" offset="0s" start="0s"'
+            ' duration="300300/30000s" format="r1">\n'
+            '              <ref-clip ref="m_real" name="AnchoredCompound" lane="1"'
+            ' offset="90090/30000s" start="0s" duration="120120/30000s"/>\n'
+            '            </asset-clip>')
+        timeline = self._timeline(xml)
+        names = [c.name for c in timeline.find_clips()]
+        self.assertIn("Inside", names,
+                      f"the connected compound clip was not flattened: {names}")
+        for clip in timeline.find_clips():
+            self.assertNotIsInstance(clip.media_reference, otio.schema.MissingReference,
+                                     f"{clip.name!r} came back unplayable")
+
+    def test_a_connected_compound_clip_with_no_media_becomes_a_gap(self):
+        xml = _fcpxml(
+            "",
+            '            <asset-clip ref="a1" name="Main" offset="0s" start="0s"'
+            ' duration="300300/30000s" format="r1">\n'
+            '              <ref-clip ref="m_absent" name="AnchoredCompound" lane="1"'
+            ' offset="90090/30000s" start="0s" duration="120120/30000s"/>\n'
+            '            </asset-clip>')
+        timeline = self._timeline(xml)
+        for clip in timeline.find_clips():
+            self.assertNotIsInstance(clip.media_reference, otio.schema.MissingReference,
+                                     f"{clip.name!r} came back unplayable")
+
+
+class GapRebasesItsAnchoredChildrenTests(unittest.TestCase):
+    """The arithmetic in _otio_fcpx_ref_clip_as_gap, on its own.
+
+    Tested directly rather than through a document: routed through a whole read, this is
+    masked by whichever earlier branch happens to fire, so a test that looks like it
+    covers the rebasing can pass for the wrong reason.
+    """
+
+    def test_children_are_rebased_by_the_start_the_gap_discards(self):
+        import xml.etree.ElementTree as ET
+        module = load_server_module()
+        # The reader places an anchored child at host_offset + (child_offset - host_start).
+        # The gap is written with start="0s", so each child's offset has to lose the
+        # host's start for the child to stay where it was.
+        for ref_offset, ref_start, child_offset in (("10s", "5s", "7s"),
+                                                    ("0s", "2s", "3s"),
+                                                    ("10s", "5s", "2s")):
+            with self.subTest(start=ref_start, child=child_offset):
+                ref = ET.Element("ref-clip")
+                ref.set("name", "C"); ref.set("offset", ref_offset)
+                ref.set("start", ref_start); ref.set("duration", "20s")
+                child = ET.SubElement(ref, "asset-clip")
+                child.set("lane", "1"); child.set("offset", child_offset)
+                child.set("duration", "1s"); child.set("start", "0s")
+
+                before = ET.tostring(ref)
+                gap = module._otio_fcpx_ref_clip_as_gap(ref)
+
+                self.assertEqual(ET.tostring(ref), before,
+                                 "the original element was mutated")
+                self.assertEqual(gap.get("start"), "0s")
+                self.assertEqual(gap.get("offset"), ref_offset)
+                moved = list(gap)[0]
+                landed = (module._otio_fcpx_fraction(gap.get("offset"))
+                          + module._otio_fcpx_fraction(moved.get("offset")))
+                wanted = (module._otio_fcpx_fraction(ref_offset)
+                          + module._otio_fcpx_fraction(child_offset)
+                          - module._otio_fcpx_fraction(ref_start))
+                self.assertEqual(landed, wanted,
+                                 f"the anchored clip moved: {float(landed)}s, "
+                                 f"wanted {float(wanted)}s")
+
+
 if __name__ == "__main__":
     unittest.main()
