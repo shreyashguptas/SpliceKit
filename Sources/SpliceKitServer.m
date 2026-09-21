@@ -95,6 +95,13 @@ static BOOL SpliceKit_mixerIsSkippableItem(id item);
 // Used by timeline.getDetailedState's connected-clip/marker walk; defined later in the file.
 // (The CMTime-typed helpers it also needs are forward-declared after the CMTime typedefs below.)
 static BOOL SpliceKit_boolForSelector(id item, NSString *selectorName);
+static void SpliceKit_collectCaptionsFromItem(id item,
+                                              Class captionClass,
+                                              NSMutableArray *found,
+                                              NSMutableSet *visited,
+                                              NSInteger depth);
+static NSArray *SpliceKit_allCaptionsOnSequence(id sequence);
+static NSArray *SpliceKit_allMotionTitleCandidatesOnSequence(id sequence);
 static NSInteger SpliceKit_laneForItem(id item);
 static NSString *SpliceKit_displayNameForItem(id item);
 static NSDictionary *SpliceKit_describeWindow(NSWindow *window);   // dialog tools, later in the file
@@ -10727,6 +10734,73 @@ static NSDictionary *SpliceKit_handleCaptionsSetXML(NSDictionary *params) {
     return @{@"status": @"ok", @"xmlLength": @(xml.length)};
 }
 
+static BOOL SpliceKit_itemIsMotionTitleVerifyCandidate(id item) {
+    if (!item) return NO;
+    NSString *className = NSStringFromClass([item class]);
+    BOOL isGenerator = [className containsString:@"Generator"] || [className containsString:@"Motion"];
+    SEL esSel = NSSelectorFromString(@"effectStack");
+    id effectStack = [item respondsToSelector:esSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(item, esSel) : nil;
+    return effectStack || isGenerator;
+}
+
+// Build one verify_captions entry for a generator/Motion title (connected or nested in a storyline).
+static NSMutableDictionary *SpliceKit_buildVerifiedMotionTitleEntry(id connectedItem) {
+    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+    NSString *className = NSStringFromClass([connectedItem class]);
+    SEL esSel = NSSelectorFromString(@"effectStack");
+    id effectStack = [connectedItem respondsToSelector:esSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(connectedItem, esSel) : nil;
+
+    @try {
+        if ([connectedItem respondsToSelector:@selector(displayName)]) {
+            id n = ((id (*)(id, SEL))objc_msgSend)(connectedItem, @selector(displayName));
+            if (n) entry[@"name"] = [n description];
+        }
+    } @catch (NSException *e) {}
+    entry[@"class"] = className;
+
+    NSMutableArray *textChannels = [NSMutableArray array];
+    @try {
+        SEL effectSel = NSSelectorFromString(@"effect");
+        id genEffect = [connectedItem respondsToSelector:effectSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(connectedItem, effectSel) : nil;
+        if (genEffect) {
+            SEL cfSel = NSSelectorFromString(@"channelFolder");
+            id cf = [genEffect respondsToSelector:cfSel]
+                ? ((id (*)(id, SEL))objc_msgSend)(genEffect, cfSel) : nil;
+            if (cf) SpliceKit_collectTitleText(cf, textChannels, 0);
+        }
+    } @catch (NSException *e) {}
+
+    if (textChannels.count == 0 && effectStack) {
+        @try {
+            SEL efSel = NSSelectorFromString(@"visibleEffects");
+            if ([effectStack respondsToSelector:efSel]) {
+                NSArray *effects = ((id (*)(id, SEL))objc_msgSend)(effectStack, efSel);
+                for (id effect in effects) {
+                    SEL cfSel = NSSelectorFromString(@"channelFolder");
+                    if ([effect respondsToSelector:cfSel]) {
+                        id cf = ((id (*)(id, SEL))objc_msgSend)(effect, cfSel);
+                        if (cf) SpliceKit_collectTitleText(cf, textChannels, 0);
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+
+    if (textChannels.count > 0) {
+        NSDictionary *first = textChannels.firstObject;
+        if (first[@"text"]) entry[@"text"] = first[@"text"];
+        if (first[@"fontSize"]) entry[@"fontSize"] = first[@"fontSize"];
+        if (first[@"fontFamily"]) entry[@"fontFamily"] = first[@"fontFamily"];
+        if (first[@"fontName"]) entry[@"fontName"] = first[@"fontName"];
+        entry[@"textChannelCount"] = @(textChannels.count);
+    }
+
+    return entry;
+}
+
 // Verify that generated captions rendered correctly by inspecting timeline items.
 // Finds connected title clips and reads their text channels to confirm
 // text content, font size, and font family match the expected style.
@@ -10747,100 +10821,14 @@ static NSDictionary *SpliceKit_handleCaptionsVerify(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, primarySel) : nil;
             if (!primary) { result = @{@"error": @"No primary object"}; return; }
 
-            SEL itemsSel = NSSelectorFromString(@"containedItems");
-            NSArray *items = [primary respondsToSelector:itemsSel]
-                ? ((id (*)(id, SEL))objc_msgSend)(primary, itemsSel) : nil;
-            if (![items isKindOfClass:[NSArray class]]) { result = @{@"error": @"No timeline items"}; return; }
-
-            // Walk items looking for connected (anchored) title clips
+            // Walk spine anchored items and descend into connected storylines (same as generate_captions paste).
             NSMutableArray *verified = [NSMutableArray array];
-            int titleCount = 0;
             int maxToCheck = 5; // Check first 5 titles for efficiency
 
-            for (id item in items) {
-                if (titleCount >= maxToCheck) break;
-
-                // Get anchored items (connected clips) — returns NSSet, not NSArray
-                SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
-                id anchoredRaw = [item respondsToSelector:anchoredSel]
-                    ? ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel) : nil;
-                // Convert NSSet to NSArray for enumeration, or use directly if already NSArray
-                NSArray *anchored = nil;
-                if ([anchoredRaw isKindOfClass:[NSSet class]])
-                    anchored = [(NSSet *)anchoredRaw allObjects];
-                else if ([anchoredRaw isKindOfClass:[NSArray class]])
-                    anchored = anchoredRaw;
-                if (!anchored || anchored.count == 0) continue;
-
-                for (id connectedItem in anchored) {
-                    if (titleCount >= maxToCheck) break;
-
-                    // Check if this is a title/generator (FFAnchoredGapGeneratorComponent or FFMotionEffect)
-                    NSString *className = NSStringFromClass([connectedItem class]);
-                    BOOL isGenerator = [className containsString:@"Generator"] || [className containsString:@"Motion"];
-
-                    // Also check effect stack for title effects
-                    SEL esSel = NSSelectorFromString(@"effectStack");
-                    id effectStack = [connectedItem respondsToSelector:esSel]
-                        ? ((id (*)(id, SEL))objc_msgSend)(connectedItem, esSel) : nil;
-
-                    if (!effectStack && !isGenerator) continue;
-
-                    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-                    @try {
-                        if ([connectedItem respondsToSelector:@selector(displayName)]) {
-                            id n = ((id (*)(id, SEL))objc_msgSend)(connectedItem, @selector(displayName));
-                            if (n) entry[@"name"] = [n description];
-                        }
-                    } @catch (NSException *e) {}
-                    entry[@"class"] = className;
-
-                    // Walk the generator's own effect channel tree for text.
-                    // Motion titles store text at: effect → channelFolder → Project → Main → Title → Object → CHChannelText(ID=369)
-                    // The effectStack.visibleEffects are user-added effects (empty for generators);
-                    // the title's own text is on FFAnchoredEffectComponent.effect.channelFolder.
-                    NSMutableArray *textChannels = [NSMutableArray array];
-                    @try {
-                        SEL effectSel = NSSelectorFromString(@"effect");
-                        id genEffect = [connectedItem respondsToSelector:effectSel]
-                            ? ((id (*)(id, SEL))objc_msgSend)(connectedItem, effectSel) : nil;
-                        if (genEffect) {
-                            SEL cfSel = NSSelectorFromString(@"channelFolder");
-                            id cf = [genEffect respondsToSelector:cfSel]
-                                ? ((id (*)(id, SEL))objc_msgSend)(genEffect, cfSel) : nil;
-                            if (cf) SpliceKit_collectTitleText(cf, textChannels, 0);
-                        }
-                    } @catch (NSException *e) {}
-
-                    // Fallback: try effectStack.visibleEffects too
-                    if (textChannels.count == 0 && effectStack) {
-                        @try {
-                            SEL efSel = NSSelectorFromString(@"visibleEffects");
-                            if ([effectStack respondsToSelector:efSel]) {
-                                NSArray *effects = ((id (*)(id, SEL))objc_msgSend)(effectStack, efSel);
-                                for (id effect in effects) {
-                                    SEL cfSel = NSSelectorFromString(@"channelFolder");
-                                    if ([effect respondsToSelector:cfSel]) {
-                                        id cf = ((id (*)(id, SEL))objc_msgSend)(effect, cfSel);
-                                        if (cf) SpliceKit_collectTitleText(cf, textChannels, 0);
-                                    }
-                                }
-                            }
-                        } @catch (NSException *e) {}
-                    }
-
-                    if (textChannels.count > 0) {
-                        NSDictionary *first = textChannels.firstObject;
-                        if (first[@"text"]) entry[@"text"] = first[@"text"];
-                        if (first[@"fontSize"]) entry[@"fontSize"] = first[@"fontSize"];
-                        if (first[@"fontFamily"]) entry[@"fontFamily"] = first[@"fontFamily"];
-                        if (first[@"fontName"]) entry[@"fontName"] = first[@"fontName"];
-                        entry[@"textChannelCount"] = @(textChannels.count);
-                    }
-
-                    [verified addObject:entry];
-                    titleCount++;
-                }
+            for (id connectedItem in SpliceKit_allMotionTitleCandidatesOnSequence(sequence)) {
+                if ((int)verified.count >= maxToCheck) break;
+                if (!SpliceKit_itemIsMotionTitleVerifyCandidate(connectedItem)) continue;
+                [verified addObject:SpliceKit_buildVerifiedMotionTitleEntry(connectedItem)];
             }
 
             // Compare against expected style from the caption panel
@@ -11011,55 +10999,26 @@ static NSDictionary *SpliceKit_handleNativeCaptionsVerify(NSDictionary *params) 
             NSMutableArray *captionInfos = [NSMutableArray array];
             Class captionClass = NSClassFromString(@"FFAnchoredCaption");
 
-            // Try FFAnchoredSequence.allCaptions or captionsWithRoleUID:includingDisabled:
-            SEL allCaptionsSel = NSSelectorFromString(@"allCaptions");
-            id allCaptions = nil;
-            if ([sequence respondsToSelector:allCaptionsSel]) {
-                allCaptions = ((id (*)(id, SEL))objc_msgSend)(sequence, allCaptionsSel);
-            }
+            SEL textSel = NSSelectorFromString(@"text");
+            SEL displayNameSel = NSSelectorFromString(@"displayName");
 
-            if (!allCaptions) {
-                // Fallback: check primaryObject's direct anchored items (non-recursive)
-                id primaryObject = ((id (*)(id, SEL))objc_msgSend)(sequence,
-                    NSSelectorFromString(@"primaryObject"));
-                if (primaryObject) {
-                    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
-                    if ([primaryObject respondsToSelector:anchoredSel]) {
-                        allCaptions = ((id (*)(id, SEL))objc_msgSend)(primaryObject, anchoredSel);
-                    }
-                }
-            }
+            for (id item in SpliceKit_allCaptionsOnSequence(sequence)) {
+                @try {
+                    BOOL isCaption = captionClass && [item isKindOfClass:captionClass];
+                    if (!isCaption) continue;
 
-            // Process found items
-            if (allCaptions) {
-                NSArray *items = nil;
-                if ([allCaptions isKindOfClass:[NSArray class]]) {
-                    items = allCaptions;
-                } else if ([allCaptions isKindOfClass:[NSSet class]]) {
-                    items = [(NSSet *)allCaptions allObjects];
-                }
+                    NSString *text = [item respondsToSelector:textSel]
+                        ? ((id (*)(id, SEL))objc_msgSend)(item, textSel) : nil;
+                    NSString *name = [item respondsToSelector:displayNameSel]
+                        ? ((id (*)(id, SEL))objc_msgSend)(item, displayNameSel) : nil;
 
-                SEL textSel = NSSelectorFromString(@"text");
-                SEL displayNameSel = NSSelectorFromString(@"displayName");
-
-                for (id item in items) {
-                    @try {
-                        BOOL isCaption = captionClass && [item isKindOfClass:captionClass];
-                        if (!isCaption) continue;
-
-                        NSString *text = [item respondsToSelector:textSel]
-                            ? ((id (*)(id, SEL))objc_msgSend)(item, textSel) : nil;
-                        NSString *name = [item respondsToSelector:displayNameSel]
-                            ? ((id (*)(id, SEL))objc_msgSend)(item, displayNameSel) : nil;
-
-                        NSMutableDictionary *info = [NSMutableDictionary dictionary];
-                        if (text) info[@"text"] = text;
-                        if (name) info[@"displayName"] = name;
-                        info[@"class"] = NSStringFromClass([item class]);
-                        [captionInfos addObject:info];
-                    } @catch (NSException *e) {
-                        // Skip problematic items
-                    }
+                    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+                    if (text) info[@"text"] = text;
+                    if (name) info[@"displayName"] = name;
+                    info[@"class"] = NSStringFromClass([item class]);
+                    [captionInfos addObject:info];
+                } @catch (NSException *e) {
+                    // Skip problematic items
                 }
             }
 
@@ -27990,12 +27949,12 @@ static void SpliceKit_structureUnregisterCaptions(id sequence, NSArray *captions
     }
 }
 
-// Structure captions anchor to spine clips (lane 1), not primaryObject.anchoredItems.
-static void SpliceKit_structureCollectCaptionsFromItem(id item,
-                                                       Class captionClass,
-                                                       NSMutableArray *found,
-                                                       NSMutableSet *visited,
-                                                       NSInteger depth) {
+// Captions anchor to spine clips (lane 1), not primaryObject.anchoredItems alone.
+static void SpliceKit_collectCaptionsFromItem(id item,
+                                              Class captionClass,
+                                              NSMutableArray *found,
+                                              NSMutableSet *visited,
+                                              NSInteger depth) {
     if (!item || !found || !visited || depth > 32) return;
 
     NSString *pointerKey = SpliceKit_handlePointerKey(item);
@@ -28043,12 +28002,91 @@ static void SpliceKit_structureCollectCaptionsFromItem(id item,
                 continue;
             }
 
-            SpliceKit_structureCollectCaptionsFromItem(child, captionClass, found, visited, depth + 1);
+            SpliceKit_collectCaptionsFromItem(child, captionClass, found, visited, depth + 1);
         }
     }
 }
 
-static NSArray *SpliceKit_structureAllCaptionsOnSequence(id sequence) {
+static void SpliceKit_collectMotionTitleCandidatesFromItem(id item,
+                                                         NSMutableArray *found,
+                                                         NSMutableSet *visited,
+                                                         NSInteger depth) {
+    if (!item || !found || !visited || depth > 32) return;
+
+    NSString *pointerKey = SpliceKit_handlePointerKey(item);
+    if (pointerKey.length == 0) return;
+    NSString *walkKey = [@"walk:" stringByAppendingString:pointerKey];
+    if ([visited containsObject:walkKey]) return;
+    [visited addObject:walkKey];
+
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    NSArray *anchored = nil;
+    if ([item respondsToSelector:anchoredSel]) {
+        @try {
+            anchored = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, anchoredSel));
+        } @catch (NSException *e) {
+            anchored = nil;
+        }
+    }
+
+    BOOL itemIsConnectedStoryline = SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+    BOOL itemHasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+    BOOL walkContained = itemIsConnectedStoryline || (!itemHasVideo && SpliceKit_mixerIsCollectionLike(item));
+    NSArray *contained = nil;
+    SEL containedSel = NSSelectorFromString(@"containedItems");
+    if (walkContained && [item respondsToSelector:containedSel]) {
+        @try {
+            contained = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel));
+        } @catch (NSException *e) {
+            contained = nil;
+        }
+    }
+
+    for (NSInteger pass = 0; pass < 2; pass++) {
+        NSArray *children = (pass == 1) ? contained : anchored;
+        if (children.count == 0) continue;
+
+        for (id child in children) {
+            if (!child) continue;
+
+            if (SpliceKit_itemIsMotionTitleVerifyCandidate(child)) {
+                NSString *childKey = SpliceKit_handlePointerKey(child);
+                if (childKey.length > 0 && ![visited containsObject:childKey]) {
+                    [visited addObject:childKey];
+                    [found addObject:child];
+                }
+                continue;
+            }
+
+            SpliceKit_collectMotionTitleCandidatesFromItem(child, found, visited, depth + 1);
+        }
+    }
+}
+
+static NSArray *SpliceKit_allMotionTitleCandidatesOnSequence(id sequence) {
+    if (!sequence) return @[];
+
+    NSMutableArray *found = [NSMutableArray array];
+    NSMutableSet *walkVisited = [NSMutableSet set];
+
+    SEL primarySel = NSSelectorFromString(@"primaryObject");
+    id primaryObject = [sequence respondsToSelector:primarySel]
+        ? ((id (*)(id, SEL))objc_msgSend)(sequence, primarySel) : nil;
+    if (primaryObject) {
+        SEL itemsSel = NSSelectorFromString(@"containedItems");
+        NSArray *spineItems = [primaryObject respondsToSelector:itemsSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(primaryObject, itemsSel) : nil;
+        if ([spineItems isKindOfClass:[NSArray class]]) {
+            for (id spineItem in spineItems) {
+                SpliceKit_collectMotionTitleCandidatesFromItem(spineItem, found, walkVisited, 0);
+            }
+        }
+    }
+
+    return found;
+}
+
+static NSArray *SpliceKit_allCaptionsOnSequence(id sequence) {
     if (!sequence) return @[];
 
     Class captionClass = NSClassFromString(@"FFAnchoredCaption");
@@ -28081,7 +28119,7 @@ static NSArray *SpliceKit_structureAllCaptionsOnSequence(id sequence) {
         if ([spineItems isKindOfClass:[NSArray class]]) {
             NSMutableSet *walkVisited = [NSMutableSet setWithSet:seen];
             for (id spineItem in spineItems) {
-                SpliceKit_structureCollectCaptionsFromItem(spineItem, captionClass, found, walkVisited, 0);
+                SpliceKit_collectCaptionsFromItem(spineItem, captionClass, found, walkVisited, 0);
             }
         }
     }
@@ -28166,7 +28204,7 @@ static NSArray *SpliceKit_structureCaptionsToRemove(id sequence, BOOL *outUsedRe
         }
     }
 
-    for (id caption in SpliceKit_structureAllCaptionsOnSequence(sequence)) {
+    for (id caption in SpliceKit_allCaptionsOnSequence(sequence)) {
         if ([seen containsObject:caption]) continue;
         if (captionClass && ![caption isKindOfClass:captionClass]) continue;
         NSString *text = SpliceKit_structureCaptionText(caption);
@@ -28248,7 +28286,7 @@ NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
             id tm = SpliceKit_getActiveTimelineModule();
             userSequence = tm ? ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence)) : nil;
             if (userSequence) {
-                captionsBefore = SpliceKit_structureAllCaptionsOnSequence(userSequence);
+                captionsBefore = SpliceKit_allCaptionsOnSequence(userSequence);
             }
         });
 
@@ -28259,7 +28297,7 @@ NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
             NSHashTable *beforeSet = SpliceKit_structureCaptionPointerSet(captionsBefore ?: @[]);
             __block NSMutableArray *newCaptions = [NSMutableArray array];
             SpliceKit_executeOnMainThread(^{
-                for (id caption in SpliceKit_structureAllCaptionsOnSequence(userSequence)) {
+                for (id caption in SpliceKit_allCaptionsOnSequence(userSequence)) {
                     if (![beforeSet containsObject:caption]) {
                         [newCaptions addObject:caption];
                     }
