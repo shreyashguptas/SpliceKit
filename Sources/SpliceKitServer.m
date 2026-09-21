@@ -25466,27 +25466,42 @@ static NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params) {
             }
             if (!dialogWindow) { result = @{@"error": @"No dialog found"}; return; }
 
-            __block NSButton *targetCB = nil;
-            __block void (^findCB)(NSView *);
-            __weak void (^weakCB)(NSView *);
-            weakCB = findCB = ^(NSView *view) {
-                if (!view) return;
-                NSArray *subs = SpliceKit_safeSubviews(view);
-                if (!subs) return;
-                for (NSView *subview in subs) {
-                    if (!subview) continue;
+            NSButton *targetCB = nil;
+            const NSUInteger kMaxDialogViewNodes = 8192;
+            NSMutableArray *stack = [NSMutableArray array];
+            NSView *rootView = [dialogWindow contentView];
+            NSArray *rootSubs = rootView ? SpliceKit_safeSubviews(rootView) : nil;
+            if (rootSubs) {
+                for (NSInteger i = (NSInteger)rootSubs.count - 1; i >= 0; i--) {
+                    NSView *v = rootSubs[i];
+                    if (v) [stack addObject:v];
+                }
+            }
+            NSUInteger visited = 0;
+            while (stack.count > 0 && !targetCB && visited < kMaxDialogViewNodes) {
+                NSView *subview = stack.lastObject;
+                [stack removeLastObject];
+                visited++;
+                @try {
                     if ([subview isKindOfClass:[NSButton class]]) {
                         NSButton *btn = (NSButton *)subview;
                         if (([[btn className] containsString:@"Checkbox"] || [btn allowsMixedState]) &&
                             [[btn title] localizedCaseInsensitiveContainsString:checkboxTitle]) {
                             targetCB = btn;
-                            return;
+                            break;
                         }
                     }
-                    if (!targetCB) weakCB(subview);
+                    NSArray *subs = SpliceKit_safeSubviews(subview);
+                    if (subs) {
+                        for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
+                            NSView *child = subs[i];
+                            if (child) [stack addObject:child];
+                        }
+                    }
+                } @catch (NSException *e) {
+                    // Skip this view
                 }
-            };
-            findCB([dialogWindow contentView]);
+            }
 
             if (!targetCB) {
                 result = @{@"error": [NSString stringWithFormat:@"Checkbox '%@' not found", checkboxTitle]};
@@ -25526,21 +25541,36 @@ static NSDictionary *SpliceKit_handleDialogPopup(NSDictionary *params) {
             if (!dialogWindow) { result = @{@"error": @"No dialog found"}; return; }
 
             NSMutableArray *popups = [NSMutableArray array];
-            __block void (^findPopups)(NSView *);
-            __weak void (^weakPU)(NSView *);
-            weakPU = findPopups = ^(NSView *view) {
-                if (!view) return;
-                NSArray *subs = SpliceKit_safeSubviews(view);
-                if (!subs) return;
-                for (NSView *subview in subs) {
-                    if (!subview) continue;
+            const NSUInteger kMaxDialogViewNodes = 8192;
+            NSMutableArray *stack = [NSMutableArray array];
+            NSView *rootView = [dialogWindow contentView];
+            NSArray *rootSubs = rootView ? SpliceKit_safeSubviews(rootView) : nil;
+            if (rootSubs) {
+                for (NSInteger i = (NSInteger)rootSubs.count - 1; i >= 0; i--) {
+                    NSView *v = rootSubs[i];
+                    if (v) [stack addObject:v];
+                }
+            }
+            NSUInteger visited = 0;
+            while (stack.count > 0 && visited < kMaxDialogViewNodes) {
+                NSView *subview = stack.lastObject;
+                [stack removeLastObject];
+                visited++;
+                @try {
                     if ([subview isKindOfClass:[NSPopUpButton class]]) {
                         [popups addObject:subview];
                     }
-                    weakPU(subview);
+                    NSArray *subs = SpliceKit_safeSubviews(subview);
+                    if (subs) {
+                        for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
+                            NSView *child = subs[i];
+                            if (child) [stack addObject:child];
+                        }
+                    }
+                } @catch (NSException *e) {
+                    // Skip this view
                 }
-            };
-            findPopups([dialogWindow contentView]);
+            }
 
             NSInteger idx = [popupIndex integerValue];
             if (idx >= 0 && idx < (NSInteger)popups.count) {
