@@ -565,5 +565,54 @@ class NotesDoNotOverstateWhatSurvivedTests(unittest.TestCase):
                                      f"{clip.name!r} came back unplayable")
 
 
+def _deeply_nested_fcpxml(levels):
+    """`levels` of ordinary <sync-clip><spine> nesting, with no compound clip anywhere."""
+    return ("""<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1920" height="1080"/>
+    <asset id="a1" name="A" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/a.mov"/>
+    </asset>
+  </resources>
+  <library><event name="E"><project name="Deep">
+    <sequence format="r1" duration="300300/30000s"><spine>"""
+            + '<sync-clip name="S" offset="0s" start="0s" duration="300300/30000s"><spine>' * levels
+            + '<asset-clip ref="a1" name="Leaf" offset="0s" start="0s"'
+              ' duration="300300/30000s" format="r1"/>'
+            + "</spine></sync-clip>" * levels
+            + "</spine></sequence></project></event></library></fcpxml>")
+
+
+class DeeplyNestedOrdinaryStructureTests(unittest.TestCase):
+    """Nesting depth must not cost Python stack frames.
+
+    Walking the tree with recursion, to visit each element exactly once, turned ordinary
+    nesting into call depth: a document around 500 levels deep — no compound clips
+    involved at all — died with a RecursionError where it had read fine before. Reading is
+    a stack of elements to visit now, so depth costs a list entry.
+    """
+
+    def test_five_hundred_levels_of_nesting_reads(self):
+        module = load_server_module()
+        # Past CPython's default limit of 1000 frames at the two frames per level the
+        # recursive walk used, which is where it broke.
+        module._otio_read_fcpx_string(_deeply_nested_fcpxml(500))
+
+    def test_two_thousand_levels_of_nesting_reads(self):
+        module = load_server_module()
+        module._otio_read_fcpx_string(_deeply_nested_fcpxml(2000))
+
+    def test_nesting_depth_alone_is_not_reported_as_a_compound_clip_chain(self):
+        # The depth bound counts compound clips opened, not tree depth. Ordinary nesting,
+        # however deep, must not trip it.
+        module = load_server_module()
+        result = module._otio_read_fcpx_string(_deeply_nested_fcpxml(500))
+        timeline = module._otio_first_timeline(result)
+        notes = timeline.metadata.get("splicekit_notes") or []
+        self.assertEqual([n for n in notes if "compound clips goes more than" in n], [],
+                         f"ordinary nesting was reported as a compound-clip chain: {notes}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6838,36 +6838,58 @@ def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
     # `ref` against the asset index; a <media> id matches no <asset>, so it came back as
     # an unplayable clip with no note beside it — and that happened even when the compound
     # clip's contents were perfectly good.
-    # One walk from the root, descending the tree as it is now.
+    # One walk from the root over the tree as it is now, with an explicit stack.
     #
-    # project_elem.iter() is a live iterator: an element inserted while the walk is running
-    # gets visited by that same walk, which — with a cycle guard that restarted on every
-    # ref-clip — made a compound clip connected inside itself expand forever. Snapshotting
-    # with list() stopped the hang but left a quieter problem: a replaced <ref-clip> keeps
-    # its own children, and the snapshot still held it, so the walk reached that detached
-    # subtree later and flattened it a second time with fresh bookkeeping. Nothing wrong
-    # reached the timeline — a detached subtree cannot — but it reported a second, duplicate
-    # flattening without the caveat the real one carries, so the answer claimed content had
-    # landed that had not. _otio_fcpx_flatten_anchored descends itself now, so every element
-    # is visited once, in the tree it is actually in.
-    _otio_fcpx_flatten_anchored(project_elem, resources_elem, notes)
+    # Three attempts have lived here. project_elem.iter() is a live iterator, so an element
+    # inserted while the walk ran was visited by that same walk, and a compound clip
+    # connected inside itself expanded forever. Snapshotting with list() stopped the hang
+    # but held on to replaced elements, which are removed from the tree yet keep their own
+    # children, so the walk reached those detached subtrees and reported a second,
+    # caveat-less flattening for content that never landed. Recursing instead fixed both
+    # and broke a third thing: ordinary nesting then consumed Python stack frames, and a
+    # document around 500 levels deep — no compound clips involved — died with a
+    # RecursionError where it used to read fine.
+    #
+    # A stack of elements to visit has none of those problems. Children are read after the
+    # host's own anchored clips have been replaced, so a detached element is never queued,
+    # nothing that is queued can be reached twice, and depth costs a list entry rather than
+    # a stack frame. Only the compound-clip nesting still recurses, and that is bounded at
+    # _OTIO_FCPX_MAX_COMPOUND_DEPTH.
+    stack = [(project_elem, frozenset(), 0)]
+    while stack:
+        host, seen, depth = stack.pop()
+        opened = _otio_fcpx_flatten_anchored(host, resources_elem, notes, seen, depth)
+        queued = set()
+        for item, item_seen, item_depth in opened:
+            stack.append((item, item_seen, item_depth))
+            queued.add(id(item))
+        for child in list(host):
+            if id(child) not in queued:
+                stack.append((child, seen, depth))
     return notes
 
 
-def _otio_fcpx_flatten_anchored(host, resources_elem, notes, seen=frozenset(), depth=0):
-    """Flatten every ``<ref-clip>`` anchored to `host`, then the ones inside those.
+def _otio_fcpx_flatten_anchored(host, resources_elem, notes, seen, depth):
+    """Replace every ``<ref-clip>`` anchored to `host` with the clips it holds.
 
-    `seen` carries the compound clips already opened on the way here, so a connected
-    compound clip that contains a connection back to itself becomes a gap instead of
-    expanding forever. `depth` bounds it a second way, for a chain that never repeats an
-    id but goes on too long.
+    Answers what it put there, each with the compound clips opened to reach it and how
+    deep that is, for the caller to carry on from. `seen` is what stops a connected
+    compound clip that contains a connection back to itself expanding forever; `depth`
+    bounds a chain that never repeats an id but goes on too long.
+
+    One host only. Walking the rest of the tree is the caller's job, and is deliberately
+    not recursion — see the comment above.
     """
+    anchored = [c for c in list(host) if c.tag == "ref-clip" and c.get("lane")]
+    if not anchored:
+        return []
     if depth > _OTIO_FCPX_MAX_COMPOUND_DEPTH:
         notes.append("a chain of connected compound clips goes more than "
                      f"{_OTIO_FCPX_MAX_COMPOUND_DEPTH} deep; the rest is not opened")
-        return
-    expanded_here = set()
-    for ref in [c for c in list(host) if c.tag == "ref-clip" and c.get("lane")]:
+        return []
+
+    opened = []
+    for ref in anchored:
         ref_id = ref.get("ref", "")
         lane = ref.get("lane")
         name = ref.get("name", "?")
@@ -6901,23 +6923,15 @@ def _otio_fcpx_flatten_anchored(host, resources_elem, notes, seen=frozenset(), d
         host.remove(ref)
         for offset, item in enumerate(replacement):
             host.insert(at + offset, item)
-
-        # Anything connected to what just came out, with this compound clip remembered.
         for item in replacement:
-            expanded_here.add(id(item))
-            _otio_fcpx_flatten_anchored(item, resources_elem, notes,
-                                        seen | {ref_id}, depth + 1)
+            opened.append((item, seen | {ref_id}, depth + 1))
+
         if depth >= 1:
             notes.append(
                 f"connected compound clip {name!r} was itself connected to another "
                 "connected clip; only one level of connection is carried, so its "
                 "contents do not reach the timeline")
-
-    # Everything else still in the tree here. Ordinary structure, so the compound-clip
-    # depth and the set of opened ones do not change going down.
-    for child in list(host):
-        if id(child) not in expanded_here:
-            _otio_fcpx_flatten_anchored(child, resources_elem, notes, seen, depth)
+    return opened
 
 
 def _otio_fcpx_asset_index(resources_elem):
