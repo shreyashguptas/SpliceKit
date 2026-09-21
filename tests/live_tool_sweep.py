@@ -133,6 +133,11 @@ def skip(reason: str, **args) -> Case:
 #   $SCRATCH_PROJECT  lands under a name of its own ($PASTE_* is a second copy, so
 #   $PASTE_FCPXML     import_fcpxml and paste_fcpxml never collide on one name)
 #   $PASTE_PROJECT
+#   $OTIO_IMPORT      the same, exported as OTIO, for import_otio
+#   $OTIO_PROJECT
+#   $URL_PROBE_NAME   the name import_url's download lands under
+# Every one of those names carries this run's process id, because Final Cut Pro keeps
+# a name reserved after the thing holding it is trashed.
 
 
 CASES: dict[str, Case] = {
@@ -342,10 +347,9 @@ CASES.update({
     # import_otio builds a new project in a new event named after the timeline; the
     # open project is left alone. The new project is removed afterwards so the library
     # does not grow a copy on every run.
-    "import_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=180,
+    "import_otio": Case(args={"path": "$OTIO_IMPORT"}, kind="write", timeout=180,
                         cleanup=[("remove_browser_clip",
-                                  {"name": EXPECTED_PROJECT, "event": EXPECTED_PROJECT,
-                                   "include_projects": True})],
+                                  {"name": "$OTIO_PROJECT", "include_projects": True})],
                         invalidates_handles=True),
     "generate_fcpxml": read(items="[]"),
     "export_captions_srt": Case(args={"path": "$TMP/sweep.srt"}, kind="write"),
@@ -504,11 +508,10 @@ CASES.update({
     # makes a "URL Imports" event, and an empty event would be left behind every run.
     "import_url": Case(args={"url": "$PROBE_URL", "mode": "import_only",
                              "target_event": "$EVENT_NAME",
-                             "title": "SpliceKit Sweep URL Probe"},
+                             "title": "$URL_PROBE_NAME"},
                        kind="write", timeout=300,
                        expect=r"completed|imported",
-                       cleanup=[("remove_browser_clip",
-                                 {"name": "SpliceKit Sweep URL Probe"})]),
+                       cleanup=[("remove_browser_clip", {"name": "$URL_PROBE_NAME"})]),
     # Its happy path is the cleanup step of the three above; on its own it has to say
     # clearly that nothing matched rather than quietly reporting success.
     "remove_browser_clip": Case(args={"name": "no-such-clip-in-this-library"},
@@ -687,9 +690,16 @@ class Sweep:
         self.placeholders["$TMP"] = str(self.tmp)
 
         # -- what the import tools import ---------------------------------
+        # Every name below carries a token unique to this run.
+        #
+        # Final Cut Pro keeps a name reserved after the thing holding it is trashed, so
+        # a second run's import landed as "SpliceKit Sweep Import 1" and the cleanup,
+        # which asks for the exact name, walked straight past it. The leftover copy then
+        # made open_project("QA Timeline") open "QA Timeline 1" instead.
+        token = f"{os.getpid()}"
         # A file of our own, so importing it cannot be confused with the media already
         # in the library and removing it afterwards cannot take a real clip with it.
-        probe = self.tmp / "splicekit-sweep-probe.mov"
+        probe = self.tmp / f"splicekit-sweep-probe-{token}.mov"
         if not probe.exists():
             made = subprocess.run(
                 ["ffmpeg", "-y", "-loglevel", "error",
@@ -702,7 +712,7 @@ class Sweep:
                 # No ffmpeg: link the timeline's own media under a name of its own
                 # rather than copying a multi-gigabyte file.
                 source = self.placeholders["$MEDIA_FILE"]
-                probe = self.tmp / ("splicekit-sweep-probe" + Path(source).suffix)
+                probe = self.tmp / (f"splicekit-sweep-probe-{token}" + Path(source).suffix)
                 try:
                     os.link(source, probe)
                 except OSError:
@@ -725,11 +735,23 @@ class Sweep:
         export_path = self.tmp / "sweep-import.fcpxml"
         await self.call("export_xml", {"path": str(export_path)}, 180)
         exported = export_path.read_text(encoding="utf-8")
-        for key, project in (("$SCRATCH", "SpliceKit Sweep Import"),
-                             ("$PASTE", "SpliceKit Sweep Paste")):
+        for key, project in (("$SCRATCH", f"SpliceKit Sweep Import {token}"),
+                             ("$PASTE", f"SpliceKit Sweep Paste {token}")):
             self.placeholders[f"{key}_PROJECT"] = project
             self.placeholders[f"{key}_FCPXML"] = re.sub(
                 r'<project name="[^"]*"', f'<project name="{project}"', exported, count=1)
+
+        # import_otio builds its project from the timeline's name in the file, so the
+        # file gets a name of its own too.
+        otio_path = self.tmp / "sweep-import.otio"
+        await self.call("export_otio", {"path": str(otio_path)}, 180)
+        document = json.loads(otio_path.read_text(encoding="utf-8"))
+        document["name"] = f"SpliceKit Sweep OTIO {token}"
+        otio_path.write_text(json.dumps(document), encoding="utf-8")
+        self.placeholders["$OTIO_IMPORT"] = str(otio_path)
+        self.placeholders["$OTIO_PROJECT"] = document["name"]
+
+        self.placeholders["$URL_PROBE_NAME"] = f"SpliceKit Sweep URL {token}"
 
         # montage_plan_edit wants the clip list montage_analyze_clips produces, so
         # take it from there rather than inventing a shape that drifts from the tool.

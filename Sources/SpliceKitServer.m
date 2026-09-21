@@ -23792,72 +23792,77 @@ NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params) {
 
             // Step 2: Search across all libraries for matching sequence
             id foundSequence = nil;
+            BOOL foundExact = NO;
             NSString *foundName = nil;
             NSString *foundEvent = nil;
             NSString *foundLibrary = nil;
             NSMutableArray *allSequences = [NSMutableArray array];
 
+            // Walk each library's events, not -_deepLoadedSequences.
+            //
+            // Two things were wrong with the old walk. _deepLoadedSequences only answers
+            // sequences Final Cut Pro has already loaded, so a project that has not been
+            // opened yet in this session could not be opened by name at all. And the
+            // event name came from -[FFAnchoredSequence event], which FCP 12.3 does not
+            // answer: every entry reported event="" and so `event=` never matched
+            // anything, including the name it was looking at. The event is the object
+            // holding the sequence, which this walk has in hand.
+            SEL dnSel = @selector(displayName);
             for (id lib in (NSArray *)libs) {
                 NSString *libName = @"";
-                if ([lib respondsToSelector:@selector(displayName)]) {
-                    libName = ((id (*)(id, SEL))objc_msgSend)(lib, @selector(displayName)) ?: @"";
+                if ([lib respondsToSelector:dnSel]) {
+                    libName = ((id (*)(id, SEL))objc_msgSend)(lib, dnSel) ?: @"";
                 }
 
-                // Get deep loaded sequences
-                SEL deepSeqSel = NSSelectorFromString(@"_deepLoadedSequences");
-                if (![lib respondsToSelector:deepSeqSel]) continue;
+                SEL eventsSel = NSSelectorFromString(@"events");
+                if (![lib respondsToSelector:eventsSel]) continue;
+                id events = ((id (*)(id, SEL))objc_msgSend)(lib, eventsSel);
+                if (![events isKindOfClass:[NSArray class]]) continue;
 
-                id seqSet = ((id (*)(id, SEL))objc_msgSend)(lib, deepSeqSel);
-                if (!seqSet) continue;
-
-                id seqArray = nil;
-                if ([seqSet respondsToSelector:@selector(allObjects)]) {
-                    seqArray = ((id (*)(id, SEL))objc_msgSend)(seqSet, @selector(allObjects));
-                } else if ([seqSet isKindOfClass:[NSArray class]]) {
-                    seqArray = seqSet;
-                }
-                if (!seqArray || ![seqArray isKindOfClass:[NSArray class]]) continue;
-
-                for (id seq in (NSArray *)seqArray) {
-                    NSString *seqName = @"";
-                    if ([seq respondsToSelector:@selector(displayName)]) {
-                        seqName = ((id (*)(id, SEL))objc_msgSend)(seq, @selector(displayName)) ?: @"";
-                    }
-
-                    // Get event name for this sequence
+                for (id event in (NSArray *)events) {
                     NSString *seqEvent = @"";
-                    SEL eventSel = NSSelectorFromString(@"event");
-                    if ([seq respondsToSelector:eventSel]) {
-                        id event = ((id (*)(id, SEL))objc_msgSend)(seq, eventSel);
-                        if (event && [event respondsToSelector:@selector(displayName)]) {
-                            seqEvent = ((id (*)(id, SEL))objc_msgSend)(event, @selector(displayName)) ?: @"";
+                    if ([event respondsToSelector:dnSel]) {
+                        seqEvent = ((id (*)(id, SEL))objc_msgSend)(event, dnSel) ?: @"";
+                    }
+
+                    for (id seq in SpliceKit_browserClipsOfEvent(event)) {
+                        if (!SpliceKit_browserItemIsProject(seq)) continue;
+
+                        NSString *seqName = @"";
+                        if ([seq respondsToSelector:dnSel]) {
+                            seqName = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel) ?: @"";
                         }
-                    }
 
-                    // Check if sequence has content
-                    BOOL hasContent = NO;
-                    SEL hasItemsSel = NSSelectorFromString(@"hasContainedItems");
-                    if ([seq respondsToSelector:hasItemsSel]) {
-                        hasContent = ((BOOL (*)(id, SEL))objc_msgSend)(seq, hasItemsSel);
-                    }
+                        BOOL hasContent = NO;
+                        SEL hasItemsSel = NSSelectorFromString(@"hasContainedItems");
+                        if ([seq respondsToSelector:hasItemsSel]) {
+                            hasContent = ((BOOL (*)(id, SEL))objc_msgSend)(seq, hasItemsSel);
+                        }
 
-                    [allSequences addObject:@{
-                        @"name": seqName,
-                        @"event": seqEvent,
-                        @"library": libName,
-                        @"hasContent": @(hasContent),
-                    }];
+                        [allSequences addObject:@{
+                            @"name": seqName,
+                            @"event": seqEvent,
+                            @"library": libName,
+                            @"hasContent": @(hasContent),
+                        }];
 
-                    // Match by name (case-insensitive contains)
-                    BOOL nameMatch = [seqName localizedCaseInsensitiveContainsString:nameFilter];
-                    BOOL eventMatch = !eventFilter || eventFilter.length == 0 ||
-                        [seqEvent localizedCaseInsensitiveContainsString:eventFilter];
+                        // Match by name (case-insensitive contains), but an exact name
+                        // wins over a longer one that merely contains it. Final Cut Pro
+                        // hands out "QA Timeline 1" when "QA Timeline" is taken, and
+                        // asking for "QA Timeline" used to open whichever of the two the
+                        // walk reached first.
+                        BOOL nameMatch = [seqName localizedCaseInsensitiveContainsString:nameFilter];
+                        BOOL eventMatch = !eventFilter || eventFilter.length == 0 ||
+                            [seqEvent localizedCaseInsensitiveContainsString:eventFilter];
+                        BOOL exact = [seqName caseInsensitiveCompare:nameFilter] == NSOrderedSame;
 
-                    if (nameMatch && eventMatch && !foundSequence) {
-                        foundSequence = seq;
-                        foundName = seqName;
-                        foundEvent = seqEvent;
-                        foundLibrary = libName;
+                        if (nameMatch && eventMatch && (!foundSequence || (exact && !foundExact))) {
+                            foundSequence = seq;
+                            foundName = seqName;
+                            foundEvent = seqEvent;
+                            foundLibrary = libName;
+                            foundExact = exact;
+                        }
                     }
                 }
             }
