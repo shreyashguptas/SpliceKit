@@ -408,6 +408,18 @@ that this fork has removed.
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
 
 ### Removed
+- **Blackmagic RAW (BRAW) support is gone.** The prototype format reader, its probe tool
+  and the `braw_probe` MCP tool have all been removed; nothing in `Sources/`, `mcp/`,
+  `tests/` or `docs/` refers to BRAW any more. Entries further down this file describe it
+  as it shipped in earlier releases and are kept as history, not as a description of this
+  build. `.braw` files behave exactly as they do in unmodified Final Cut Pro.
+- **Vision Pro support is gone.** The whole `visionpro.*` RPC namespace and its 16 MCP
+  tools (the AIME exchange, the camera and mask paths, the preview panel) have been
+  removed. They never worked in this fork to begin with — the namespace was never wired
+  into the request dispatcher, so every one of those tools answered "method not found".
+  Nothing is sent to the local network by SpliceKit any more. Mentions of Vision Pro left
+  in `docs/FCP_APPLICATION_INTERNALS.md` and `docs/fcp_defaults_keys.csv` are about Apple's
+  own spatial-video features inside Final Cut Pro, which are untouched.
 - **Every remaining path that could send data off this Mac, except the user's
   own actions.** The dylib's Sentry stubs and their call sites (breadcrumbs,
   launch phases, RPC exception capture), the patcher's Sentry SDK and Sparkle
@@ -418,7 +430,7 @@ that this fork has removed.
   Sparkle signing, GitHub release) are gone. Crash handling is the local
   NSException/signal logger writing under `~/Library/Logs/SpliceKit`. What
   still talks to the network is listed in `docs/THIRD_PARTY_DEPENDENCIES.md`:
-  the loopback bridge, the Vision Pro preview on the local network, and
+  the loopback bridge and
   downloads the user starts (URL import, transcriber and Gemma models, the
   `mcp` and `mlx-lm` packages from PyPI, install-time Homebrew/Python and
   `insert_dylib`).

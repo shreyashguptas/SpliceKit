@@ -2123,8 +2123,14 @@ def batch_export(scope: str = "all", folder: str = "") -> str:
 @splicekit_tool("verify_action")
 def verify_action(description: str = "") -> str:
     """Capture timeline state for before/after verification.
+
     Call before an action, then after, and compare the snapshots.
     Returns: playhead_seconds, item_count, selected_count, timestamp.
+
+    Args:
+        description: A free-text label echoed back in the snapshot, so two snapshots can
+            be told apart in a transcript ("before blade", "after blade"). It has no
+            effect on what is captured and may be left out.
     """
     r = bridge.call("timeline.getDetailedState")
     if _err(r):
@@ -2227,19 +2233,42 @@ def list_handles() -> str:
 
 @splicekit_tool("inspect_handle")
 def inspect_handle(handle: str) -> str:
-    """Use this tool to inspect one retained bridge object handle."""
+    """Inspect one retained bridge object handle: its class, description and key properties.
+
+    A handle ("obj_3") is a reference SpliceKit keeps to one Objective-C object,
+    handed out by an earlier read — get_timeline_clips(), browser_list_clips(),
+    get_selected_clips(), list_markers(), mixer_get_state(), import_media(), or any call
+    made with return_handle=True. It is not a Final Cut Pro media handle. Handles are
+    dropped when a project is reopened, so a stale one answers "no longer resolves" and
+    the fix is to make the read again, not to guess a number.
+
+    Args:
+        handle: The handle to inspect, e.g. "obj_3".
+    """
     return _handle_management_response("inspect", handle)
 
 
 @splicekit_tool("release_handle")
 def release_handle(handle: str) -> str:
-    """Use this tool to release one retained bridge object handle when it is no longer needed."""
+    """Release one retained bridge object handle when it is no longer needed.
+
+    This frees SpliceKit's reference to the object. It does not delete anything in Final
+    Cut Pro — the clip, marker or project the handle pointed at is untouched. Any other
+    handle you still hold stays valid.
+
+    Args:
+        handle: The handle to release, e.g. "obj_3".
+    """
     return _handle_management_response("release", handle)
 
 
 @splicekit_tool("release_all_handles")
 def release_all_handles() -> str:
-    """Use this tool to release every retained bridge object handle."""
+    """Release every retained bridge object handle.
+
+    Frees all of SpliceKit's references at once. Nothing in Final Cut Pro is deleted, but
+    every handle you are holding stops resolving, so re-read anything you still need.
+    """
     return _handle_management_response("release_all")
 
 
@@ -2247,10 +2276,19 @@ def release_all_handles() -> str:
 def get_object_property(handle: str, key: str, return_handle: bool = False) -> str:
     """Use this tool to inspect one property on a retained Objective-C object handle.
 
+    A handle ("obj_3") is a reference SpliceKit keeps to one Objective-C object,
+    handed out by an earlier read — get_timeline_clips(), browser_list_clips(),
+    get_selected_clips(), list_markers(), mixer_get_state(), import_media(), or any call
+    made with return_handle=True. It is not a Final Cut Pro media handle. Handles are
+    dropped when a project is reopened, so a stale one answers "no longer resolves" and
+    the fix is to make the read again, not to guess a number.
+
     Args:
         handle: Retained bridge handle (e.g. "obj_3").
         key: KVC key or property name (e.g. "displayName", "duration", "containedItems").
-        return_handle: When True, retain the property value and return a new handle for it.
+            Spelled exactly as the runtime has it; get_properties(class_name) lists them.
+        return_handle: When True, retain the property value and return a new handle for it,
+            instead of describing it. Use this to walk from one object to another.
 
     Example: get_object_property("obj_3", "displayName")
     """
@@ -2265,10 +2303,19 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
     """Set a property on an object handle using Key-Value Coding.
 
     WARNING: Direct KVC bypasses undo. For undoable edits, use timeline_action() instead.
+    Nothing written here can be taken back with history_action("undo"), and writing a key
+    Final Cut Pro did not expect can leave the document in a state it cannot save.
+
+    A handle ("obj_3") is a reference SpliceKit keeps to one Objective-C object,
+    handed out by an earlier read — get_timeline_clips(), browser_list_clips(),
+    get_selected_clips(), list_markers(), mixer_get_state(), import_media(), or any call
+    made with return_handle=True. It is not a Final Cut Pro media handle. Handles are
+    dropped when a project is reopened, so a stale one answers "no longer resolves" and
+    the fix is to make the read again, not to guess a number.
 
     Args:
         handle: Retained bridge handle whose property will be written.
-        key: KVC key or property name.
+        key: KVC key or property name, spelled exactly as the runtime has it.
         value: Value as a string; converted using value_type before sending to the bridge.
         value_type: One of string, int, double, bool, nil (default string).
     """
@@ -3453,7 +3500,12 @@ def is_library_updating() -> str:
 @splicekit_tool("get_classes")
 def get_classes(filter: str = "") -> str:
     """List ObjC classes loaded in FCP's process.
-    Common prefixes: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit), TK (TimelineKit), IX (Interchange).
+
+    Args:
+        filter: Case-insensitive substring to match against the class names. Left out, it
+            lists everything, which is tens of thousands of classes — pass a prefix.
+            Common prefixes: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
     """
     r = bridge.call("system.getClasses", filter=filter) if filter else bridge.call("system.getClasses")
     if _err(r):
@@ -3467,7 +3519,16 @@ def get_classes(filter: str = "") -> str:
 
 @splicekit_tool("get_methods")
 def get_methods(class_name: str, include_super: bool = False) -> str:
-    """List all methods on an ObjC class with type encodings."""
+    """List all methods on an ObjC class with type encodings.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+        include_super: Also list methods inherited from superclasses. Default False.
+    """
     r = bridge.call("system.getMethods", className=class_name, includeSuper=include_super)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3485,7 +3546,15 @@ def get_methods(class_name: str, include_super: bool = False) -> str:
 
 @splicekit_tool("get_properties")
 def get_properties(class_name: str) -> str:
-    """List declared @property definitions on an ObjC class."""
+    """List declared @property definitions on an ObjC class.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+    """
     r = bridge.call("system.getProperties", className=class_name)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3497,7 +3566,15 @@ def get_properties(class_name: str) -> str:
 
 @splicekit_tool("get_ivars")
 def get_ivars(class_name: str) -> str:
-    """List instance variables of an ObjC class with their types."""
+    """List instance variables of an ObjC class with their types.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+    """
     r = bridge.call("system.getIvars", className=class_name)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3509,7 +3586,15 @@ def get_ivars(class_name: str) -> str:
 
 @splicekit_tool("get_protocols")
 def get_protocols(class_name: str) -> str:
-    """List protocols adopted by an ObjC class."""
+    """List protocols adopted by an ObjC class.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+    """
     r = bridge.call("system.getProtocols", className=class_name)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3518,7 +3603,15 @@ def get_protocols(class_name: str) -> str:
 
 @splicekit_tool("get_superchain")
 def get_superchain(class_name: str) -> str:
-    """Get the inheritance chain for an ObjC class."""
+    """Get the inheritance chain for an ObjC class, from it up to NSObject.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+    """
     r = bridge.call("system.getSuperchain", className=class_name)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3527,7 +3620,15 @@ def get_superchain(class_name: str) -> str:
 
 @splicekit_tool("explore_class")
 def explore_class(class_name: str) -> str:
-    """Comprehensive overview of an ObjC class: inheritance, protocols, properties, ivars, key methods."""
+    """Comprehensive overview of an ObjC class: inheritance, protocols, properties, ivars, key methods.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+    """
     lines = [f"=== {class_name} ===\n"]
     r = bridge.call("system.getSuperchain", className=class_name)
     if not _err(r):
@@ -3567,7 +3668,20 @@ def explore_class(class_name: str) -> str:
 
 @splicekit_tool("search_methods")
 def search_methods(class_name: str, keyword: str) -> str:
-    """Search for methods on a class by keyword."""
+    """Search for methods on a class by keyword.
+
+    This, and get_methods(), are the only acceptable evidence that a selector exists on
+    this build of Final Cut Pro. Do not assume one from a header, a disassembly or
+    another version.
+
+    Args:
+        class_name: The Objective-C class name, spelled exactly as the runtime has it and
+            case-sensitively — "FFAnchoredSequence", not "ffanchoredsequence". Find one
+            with get_classes(filter=...) or explore_class(). Common prefixes inside Final
+            Cut Pro: FF (Flexo), OZ (Ozone), PE (ProEditor), LK (LunaKit),
+            TK (TimelineKit), IX (Interchange).
+        keyword: Case-insensitive substring to match against the method names.
+    """
     r = bridge.call("system.getMethods", className=class_name)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3997,6 +4111,10 @@ def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = T
     The transition is applied at the selected edit point (between clips).
     Select an edit point first with timeline_action("nextEdit") or
     timeline_action("previousEdit").
+
+    Supports undo via ``history_action("undo")``. Note that a transition consumes media
+    from both sides of the cut, so with freeze_extend the clips around it may be altered
+    too; undo takes the whole thing back together.
     """
     if not name and not effectID:
         return "Error: provide either name or effectID"
@@ -4167,6 +4285,12 @@ def ai_command(query: str, engine: str = "") -> str:
 
     The MCP client waits up to ~5.5 minutes (330s) so it outlasts the bridge's
     300s agentic/Gemma deadline; standard mode usually finishes sooner.
+
+    This hands the instruction to a language model that then edits the timeline itself.
+    On the agentic and gemma engines it decides its own sequence of actions and can run
+    destructive ones — delete, blade, trim, replace — without asking again. It is driven
+    by your wording, so keep the instruction specific, and take a verify_action()
+    snapshot first if you want to be able to tell exactly what it changed.
     """
     if engine and engine not in _AI_COMMAND_ENGINES:
         allowed = ", ".join(_AI_COMMAND_ENGINES)
@@ -4254,13 +4378,25 @@ def ai_command(query: str, engine: str = "") -> str:
 @splicekit_tool("ai_command_gemma")
 def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bit") -> str:
     """Use Gemma 4 (via MLX on Apple Silicon) for agentic natural language editing.
-    Unlike ai_command which uses a fixed action schema, this runs a multi-turn
-    tool-calling loop and can access all bridge methods.
+
+    Runs a multi-turn tool-calling loop that can reach every bridge method, rather than
+    the fixed action schema ai_command's "standard" engine uses.
     Requires mlx-lm server: python -m mlx_lm.server --model unsloth/gemma-4-E4B-it-UD-MLX-4bit
+
+    ``ai_command(query, engine="gemma")`` reaches the same handler and does the same
+    thing; this tool exists to name the model. Prefer whichever reads more clearly, and
+    use this one when you want to choose a different `model`.
+
+    This hands the instruction to a language model that then edits the timeline itself.
+    It decides its own sequence of actions and can run destructive ones — delete, blade,
+    trim, replace — without asking again. It is driven by your wording, so keep the
+    instruction specific, and take a verify_action() snapshot first if you want to be able
+    to tell exactly what it changed.
 
     Args:
         query: Natural language editing instruction
-        model: HuggingFace model ID (default: unsloth/gemma-4-E4B-it-UD-MLX-4bit)
+        model: HuggingFace model ID (default: unsloth/gemma-4-E4B-it-UD-MLX-4bit). Must be
+            the model the mlx-lm server was started with.
 
     The Gemma path uses a multi-turn agentic loop (local MLX model) and can take
     several minutes; the MCP client waits up to ~5.5 minutes so it outlasts the
@@ -4562,7 +4698,8 @@ def mixer_set_volume(handle: str, volume_db: float = None,
 
     Args:
         handle: The volumeChannelHandle from mixer_get_state()
-        volume_db: Volume in dB (0 = unity, -6 = half, -inf = silent). Use this OR volume_linear.
+        volume_db: Volume in dB (0 = unity, -6 = half, -inf = silent). Use this OR
+            volume_linear. If both are given, volume_db wins and volume_linear is ignored.
         volume_linear: Volume as linear gain (1.0 = 0dB, 0.5 = -6dB, 0 = silent)
     """
     params = {"handle": handle}
@@ -4828,11 +4965,17 @@ def mixer_volume_end(effect_stack_handle: str) -> str:
 def mixer_set_all_volumes(volumes: list) -> str:
     """Set volumes for multiple faders at once.
 
+    For proper undo support, call mixer_volume_begin() before this and
+    mixer_volume_end() after: without that scope each fader move lands in Final Cut Pro's
+    undo stack separately, or not at all, and one ``history_action("undo")`` will not put
+    them all back.
+
     Args:
         volumes: List of dicts with 'handle' (volumeChannelHandle) and
                  'volumeDB' or 'volumeLinear'. Example:
                  [{"handle": "obj_42", "volumeDB": -6.0},
                   {"handle": "obj_43", "volumeDB": -3.0}]
+                 When an entry carries both, 'volumeDB' wins.
     """
     r = bridge.call("mixer.setAllVolumes", volumes=volumes)
     if _err(r):
@@ -4950,8 +5093,17 @@ def open_project(name: str, event: str = "") -> str:
     and optionally filters by event name. Much faster than manually navigating
     the library -> sequences -> loadEditorForSequence: chain.
 
+    An exact name always wins over a longer one that merely contains it. Final Cut Pro
+    hands out "QA Timeline 1" when "QA Timeline" is already taken, so asking for
+    "QA Timeline" opens that one and not the copy. Among several substring matches with
+    no exact one, the first found wins — pass `event` to be sure which.
+
+    A project with nothing in it cannot be found by name: Final Cut Pro reports an empty,
+    unopened project as a clip rather than a project, so it is not a candidate here.
+
     Args:
-        name: Project/sequence name to find (case-insensitive substring match).
+        name: Project/sequence name to find. Matched case-insensitively; an exact match
+              is preferred, otherwise a substring match.
               e.g. "My Project", "Edit v2", "Interview"
         event: Optional event name filter (case-insensitive substring match).
                e.g. "4-5-26", "Wedding", "Interview"
@@ -7708,6 +7860,11 @@ def click_dialog_button(button: str = "", index: int = -1) -> str:
 
     Save/open file panels cannot be confirmed (Save/OK/Open) from the bridge;
     only Cancel is supported via click_dialog_button or dismiss_dialog(action=\"cancel\").
+
+    This confirms whatever the dialog is asking. Some of those choices cannot be taken
+    back: "Don't Save" discards unsaved changes, "Replace" overwrites a file, and the
+    render-file and generated-file dialogs delete what they name. Call detect_dialog()
+    and read the buttons before choosing one. There is no undo for a dialog.
     """
     params = {}
     if button:
@@ -7729,6 +7886,9 @@ def fill_dialog_field(value: str, index: int = 0) -> str:
         index: Field index (0-based) if there are multiple fields
 
     Use detect_dialog() first to see available text fields and their indices.
+
+    Filling a field does not commit anything on its own, but it decides what the button
+    you click next will act on — a name typed here is the name a Save panel will use.
     """
     r = bridge.call("dialog.fill", value=value, index=index)
     if _err(r):
@@ -7748,6 +7908,10 @@ def toggle_dialog_checkbox(checkbox: str = "", index: int = -1, checked: bool = 
 
     Use detect_dialog() first to see available checkboxes. On a miss the error
     lists every checkbox the dialog actually has.
+
+    A checkbox can change what the dialog's confirm button will do — "Delete render
+    files" and "Include used clips only" among them — so read the dialog before setting
+    one, and there is no undo once the dialog is confirmed.
     """
     if not checkbox and index < 0:
         return "Error: pass checkbox (a title) or index"
@@ -7773,6 +7937,10 @@ def select_dialog_popup(select: str, popup_index: int = 0) -> str:
         popup_index: Which popup menu (0-based) if there are multiple
 
     Use detect_dialog() first to see available popup menus and their options.
+
+    A popup can change what the dialog's confirm button will do — an export preset, a
+    destination, a codec — so read the dialog before setting one, and there is no undo
+    once the dialog is confirmed.
     """
     r = bridge.call("dialog.popup", select=select, popupIndex=popup_index)
     if _err(r):
@@ -9521,7 +9689,9 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
         Trim / edit (splitAtTime, trimDuration, removeEdits, joinThroughEdits, nudge*, …):
             time: Timeline seconds for splitAtTime (>=0 to send; omit for playhead).
-            is_delta: Trim mode flag for trimDuration.
+            is_delta: For trimDuration, how `duration` is read. True (the default) treats
+                it as a change to add to the clip's current length; False treats it as the
+                length to set. Getting this backwards silently trims to the wrong place.
             replace_with_gap: When True, removeEdits leaves a gap instead of ripple.
             on_edges / on_left: Ignored on FCP 12.3 for joinThroughEdits (reported in response).
             frames: Whole frames to nudge (nudgeAnchoredItems, nudgeSpineItems).
@@ -9535,7 +9705,9 @@ def direct_timeline_action(action: str = "", selector: str = "",
             language: Language code for duplicateCaptions.
             format_: Export format for duplicateCaptions (e.g. "SRT").
             multicam: When True, createCompoundClipDirect builds a multicam compound.
-            as_split: When True, alignClipsAtMusicMarkers uses split mode.
+            as_split: For alignClipsAtMusicMarkers, when True each clip is cut at the
+                marker and both halves are kept, instead of the clip being moved so its
+                start lands on the marker.
 
         Misc:
             store_result: When True, retain a direct-action result object as a handle.
@@ -9634,12 +9806,24 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
 @splicekit_tool("browser_list_clips")
 def browser_list_clips(event: str = "") -> str:
-    """List the clips in the browser (the active library's events): name, event,
-    duration and a handle. Use the handle with add_clip_to_timeline() to make an
-    append, insert or connect edit from a clip or a range of it.
+    """List what is in the browser (the active library's events): name, event, duration,
+    a handle, and whether each row is a project.
+
+    Use the handle with add_clip_to_timeline() to make an append, insert or connect edit
+    from a clip or a range of it.
+
+    Check `isProject` first. A project sits in the browser next to the source clips but it
+    is a whole timeline, not footage: add_clip_to_timeline() and browser_append_clip()
+    refuse it, and remove_browser_clip() refuses it unless you pass include_projects. Open
+    a project with open_project(name) instead. Items already in the library trash are not
+    listed at all.
+
+    One caveat: a project with nothing in it cannot be told apart from a clip here and
+    reports `isProject: false`. Final Cut Pro answers -isProject NO and -sequenceType
+    "clip" for an empty, unopened project, and there is nothing else to go on.
 
     Args:
-        event: Optional event name to filter by
+        event: Optional event name to filter by (case-insensitive substring match).
     """
     params = {}
     if event:
@@ -9656,10 +9840,17 @@ def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> st
     Shortcut for add_clip_to_timeline(edit="append"); use that tool for a range of the
     clip, an insert or connect edit, a target time, or a dry run.
 
+    Pass exactly one of handle, index or name. A project is refused: it is a whole
+    timeline, not footage. Check `isProject` in browser_list_clips() before choosing.
+
     Args:
-        handle: Object handle of the clip (e.g. "obj_5")
-        index: Index of the clip in the browser
-        name: Name of the clip to find
+        handle: Object handle of the clip from browser_list_clips() (e.g. "obj_5").
+            Unambiguous; preferred.
+        index: The clip's `index` as browser_list_clips() reports it. That ordering is
+            Final Cut Pro's and can change when the library changes, so read it fresh.
+        name: The clip's name. Matched case-insensitively; an exact match wins over a
+            longer name that merely contains it. If several clips still match, the first
+            found wins, so prefer a handle when names repeat across events.
     """
     params = {}
     if handle:
@@ -10447,6 +10638,9 @@ def remove_captions(native: bool = True, dry_run: bool = False) -> str:
     Reports foundCount and removedCount separately. Only caption items from the
     chosen pipeline are considered; ordinary clips are never touched. Any item
     the bridge could not delete is listed under notRemoved with a reason.
+
+    Supports undo via ``history_action("undo")``, which takes the whole removal back as
+    one step. Run with dry_run=True first to see the count before committing.
     """
     r = bridge.call("nativeCaptions.remove", native=native, dryRun=dry_run)
     if _err(r):

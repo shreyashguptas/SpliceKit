@@ -67,8 +67,7 @@ allSeqs = call_method_with_args(seqs_handle, "allObjects", "[]", false, true)
 ### Select Before Acting
 Color correction, retiming, titles, and effects require a selected clip:
 ```
-playback_action("goToStart")              # position
-playback_action("nextFrame") x N          # navigate
+seek_to_time(12.5)                        # position the playhead
 timeline_action("selectClipAtPlayhead")   # select primary storyline clip
 timeline_action("addColorBoard")          # now apply
 ```
@@ -90,9 +89,11 @@ Markers are not selectable this way; an empty list deselects everything.
 
 ### Playhead Positioning
 - 1 frame = ~0.042s at 24fps, ~0.033s at 30fps
-- Use `nextFrame` with repeat count for precise positioning
+- Use `seek_to_time(seconds)` for precise positioning. This is the rule at the top of this
+  file: never step frame by frame to reach a time `seek_to_time` can jump to.
+- `nextFrame` / `prevFrame` are for moving one or two frames off a position you are
+  already at — nudging to the next edit, checking the frame after a cut.
 - `batch_timeline_actions` is fastest for multi-step sequences
-- Always go to a known position (goToStart) before stepping
 
 ### Undo After Mistakes
 ```
@@ -281,14 +282,33 @@ single source file; both are listed as skipped. A harsh audio cut: read the outg
 read again. `slice`, `edge window`, `jump` and the sparkline are SpliceKit bookkeeping, not FCP
 terms. Raw RPC: `timeline.getAudioLevels`.
 
+### Put a clip into a library, and take one back out
+```
+import_media(path="/path/to/clip.mov", event="My Event")   # add footage to an event
+remove_browser_clip(name="clip", event="My Event")         # the exact inverse; file on disk untouched
+remove_browser_clip(name="Old Cut", include_projects=True) # a project is a whole timeline: opt in
+remove_browser_clip(name="clip", dry_run=True)             # see what would go first
+cleanup_temp_projects(dry_run=True)                        # SpliceKit's own leftovers, nothing of yours
+cleanup_temp_projects()                                    # move them to the library trash
+```
+`remove_browser_clip` refuses a name that matches more than one item and tells you which
+ones matched — pass `event=` or a handle to say which. `cleanup_temp_projects` only ever
+matches names SpliceKit generates itself ("SK Structure 1271", "_SKPaste_8180",
+"SpliceKit Caption Import 7362"), whole-name, number required; a project of yours called
+"SK Structure notes" is left alone, and an empty event is never removed.
+
 ### Add a source clip, or a range of it, to the timeline
 ```
-browser_list_clips()                                                       # source clips with handles
+browser_list_clips()                                                       # name, event, handle, isProject
 add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45, dry_run=True)
 add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
 add_clip_to_timeline("obj_5", edit="insert", at_seconds=0)                 # whole clip, the effect of Insert (W) at 0s
 add_clip_to_timeline("obj_5", edit="append")                               # whole clip, the effect of Append (E)
 ```
+Check `isProject` before using a row: a project sits in the browser next to the source
+clips but it is a whole timeline, and these tools refuse it. Open it with
+`open_project(name)` instead. An exact project name always beats a longer one that merely
+contains it, so `open_project("QA Timeline")` opens that and not "QA Timeline 1".
 SpliceKit writes the range to FCP's pasteboard and uses FCP's Edit > Paste (`insert`: into the primary
 storyline at the playhead, later clips move right) or Edit > Paste as Connected Clip (`connect`: a
 connected clip at the playhead; FCP picks the lane); `append` moves the playhead to the end of the
@@ -567,7 +587,10 @@ Supported formats:
 - `.otioz` / `.otiod` — OTIO bundles (media files must exist on disk)
 
 Optional extra (not in `mcp/requirements.txt`; `make install` does not install it):
-`pip install opentimelineio otio-fcpx-xml-adapter otio-cmx3600-adapter`.
+`pip install opentimelineio otio-fcpxml-adapter otio-cmx3600-adapter` (the legacy
+`otio-fcpx-xml-adapter` also works). This is what the tools' own error message says.
+SpliceKit reads Final Cut Pro's FCPXML itself and only falls back to an adapter for
+shapes it does not recognise, so the adapter is optional for the FCPXML path.
 If the packages are missing, `export_otio` / `import_otio` tell you to install them.
 
 ## Deploy & Restart FCP
