@@ -2536,86 +2536,6 @@ NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params) {
     return result;
 }
 
-// spine.removeItemAtIndex — remove a single item from the containedItems array.
-// Wraps in an editing transaction for undo support.
-NSDictionary *SpliceKit_handleSpineRemoveItem(NSDictionary *params) {
-    NSNumber *indexNum = params[@"index"];
-    if (!indexNum) {
-        return @{@"error": @"'index' is required"};
-    }
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id sequence = nil, spine = nil;
-            NSDictionary *err = nil;
-            if (!SpliceKit_getSequenceAndSpine(&sequence, &spine, &err)) {
-                result = err;
-                return;
-            }
-            id items = ((id (*)(id, SEL))objc_msgSend)(spine, @selector(containedItems));
-            NSInteger count = [(NSArray *)items count];
-            NSInteger idx = [indexNum integerValue];
-            if (idx < 0 || idx >= count) {
-                result = @{@"error": [NSString stringWithFormat:
-                    @"Index %ld out of range (0-%ld)", (long)idx, (long)count - 1]};
-                return;
-            }
-            SEL removeSel = NSSelectorFromString(@"removeObjectFromContainedItemsAtIndex:");
-            if ([spine respondsToSelector:removeSel]) {
-                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(spine, removeSel, (NSUInteger)idx);
-            }
-            SEL informSel = NSSelectorFromString(@"informContainedItemsAddedRemovedOrPlayEnableChanged:");
-            if ([spine respondsToSelector:informSel]) {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(spine, informSel, YES);
-            }
-            result = @{@"status": @"ok", @"removedIndex": @(idx), @"newCount": @(count - 1)};
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result;
-}
-
-// spine.insertItem — insert a handle-referenced item at a specific index.
-NSDictionary *SpliceKit_handleSpineInsertItem(NSDictionary *params) {
-    NSString *handle = params[@"handle"];
-    NSNumber *indexNum = params[@"index"];
-    if (!handle || !indexNum) {
-        return @{@"error": @"'handle' and 'index' are required"};
-    }
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id sequence = nil, spine = nil;
-            NSDictionary *err = nil;
-            if (!SpliceKit_getSequenceAndSpine(&sequence, &spine, &err)) {
-                result = err;
-                return;
-            }
-            id item = SpliceKit_resolveHandle(handle);
-            if (!item) {
-                result = @{@"error": [NSString stringWithFormat:@"Handle '%@' not found", handle]};
-                return;
-            }
-            NSInteger idx = [indexNum integerValue];
-            SEL insertSel = NSSelectorFromString(@"insertObject:inContainedItemsAtIndex:");
-            if ([spine respondsToSelector:insertSel]) {
-                ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(spine, insertSel, item, (NSUInteger)idx);
-            }
-            SEL informSel = NSSelectorFromString(@"informContainedItemsAddedRemovedOrPlayEnableChanged:");
-            if ([spine respondsToSelector:informSel]) {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(spine, informSel, YES);
-            }
-            result = @{@"status": @"ok", @"insertedAt": @(idx)};
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result;
-}
-
 // timeline.beginEdit — open one undo step on the sequence.
 // Everything between beginEdit and endEdit becomes a single Edit > Undo entry
 // named after `name` (FCP's internal term is an undoable action). Opens with
@@ -10877,14 +10797,6 @@ static NSDictionary *SpliceKit_handleCaptionsSetWords(NSDictionary *params) {
         return @{@"error": @"words array required"};
     [[SpliceKitCaptionPanel sharedPanel] setWordsManually:wordDicts];
     return @{@"status": @"ok", @"wordCount": @(wordDicts.count)};
-}
-
-static NSDictionary *SpliceKit_handleCaptionsSetXML(NSDictionary *params) {
-    NSString *xml = params[@"xml"];
-    if (!xml) return @{@"error": @"xml parameter required"};
-    SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
-    panel.generatedFCPXML = xml;
-    return @{@"status": @"ok", @"xmlLength": @(xml.length)};
 }
 
 // A gap is a generator (FFAnchoredGapGeneratorComponent, display name "Gap"), so the
@@ -23712,64 +23624,6 @@ NSDictionary *SpliceKit_handleMixerOpenBusEffect(NSDictionary *params) {
     return result ?: @{@"error": @"Failed to open mixer bus effect editor"};
 }
 
-// mixer.setMasterVolume — set the playback/output master level
-static NSDictionary *SpliceKit_handleMixerSetMasterVolume(NSDictionary *params) {
-    NSNumber *dbVal = params[@"volumeDB"];
-    NSNumber *linearVal = params[@"volumeLinear"];
-    if (!dbVal && !linearVal) return @{@"error": @"volumeDB or volumeLinear parameter required"};
-
-    double linear;
-    if (linearVal) {
-        linear = [linearVal doubleValue];
-    } else {
-        double db = [dbVal doubleValue];
-        linear = (db <= -96.0) ? 0.0 : pow(10.0, db / 20.0);
-    }
-
-    if (!isfinite(linear)) linear = 0.0;
-    if (linear < 0.0) linear = 0.0;
-    if (linear > 1.0) linear = 1.0;
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id audioDest = SpliceKit_getMasterAudioDest();
-            if (!audioDest) {
-                result = @{@"error": @"No master audio output found"};
-                return;
-            }
-
-            SEL setVolumeSel = NSSelectorFromString(@"setOutputVolume:");
-            SEL outputVolumeSel = NSSelectorFromString(@"outputVolume");
-            if (![audioDest respondsToSelector:setVolumeSel] || ![audioDest respondsToSelector:outputVolumeSel]) {
-                result = @{@"error": @"Master audio destination does not expose volume controls"};
-                return;
-            }
-
-            ((BOOL (*)(id, SEL, float))objc_msgSend)(audioDest, setVolumeSel, (float)linear);
-
-            double readback = ((float (*)(id, SEL))objc_msgSend)(audioDest, outputVolumeSel);
-            if (!isfinite(readback) || readback < 0.0) readback = 0.0;
-            if (readback > 1.0) readback = 1.0;
-
-            double readbackDB = (readback > 0.000001) ? 20.0 * log10(readback) : -96.0;
-            if (!isfinite(readbackDB) || readbackDB < -96.0) readbackDB = -96.0;
-
-            result = @{
-                @"ok": @YES,
-                @"handle": SpliceKit_storeHandle(audioDest) ?: @"",
-                @"volumeLinear": @(readback),
-                @"volumeDB": @(readbackDB),
-                @"minDB": @(-96.0),
-                @"maxDB": @(0.0)
-            };
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result;
-}
-
 // Active undo transactions for mixer fader drags
 static NSMutableDictionary *sMixerUndoTransactions = nil;
 
@@ -33651,47 +33505,6 @@ static NSDictionary *SpliceKit_handleDebugObserveNotification(NSDictionary *para
 
 #pragma mark - Debug: Hidden UI (Settings Panel + Menu Bar)
 
-// debug.showSettingsPanel — rebuilds FCP's missing Debug preferences pane
-// and injects it into the Settings window. Implementation lives in
-// SpliceKitDebugUI.m (ObjC-heavy view construction + LKPreferences ivar patching).
-static NSDictionary *SpliceKit_handleDebugShowSettingsPanel(NSDictionary *params) {
-    NSString *act = params[@"action"] ?: @"install";
-    if ([act isEqualToString:@"status"]) {
-        return @{@"installed": @(SpliceKit_isDebugSettingsPanelInstalled())};
-    }
-    if ([act isEqualToString:@"uninstall"] || [act isEqualToString:@"remove"]) {
-        BOOL ok = SpliceKit_uninstallDebugSettingsPanel();
-        return @{@"status": ok ? @"ok" : @"error",
-                 @"installed": @(SpliceKit_isDebugSettingsPanelInstalled())};
-    }
-    BOOL ok = SpliceKit_installDebugSettingsPanel();
-    if (!ok) {
-        return @{@"error": @"Failed to install Debug settings panel — see SpliceKit log"};
-    }
-    return @{@"status": @"ok",
-             @"installed": @(SpliceKit_isDebugSettingsPanelInstalled()),
-             @"note": @"Open Final Cut Pro → Settings to see the Debug tab."};
-}
-
-// debug.installMenuBar — adds the "Debug" top-level menu back to the menu bar.
-static NSDictionary *SpliceKit_handleDebugInstallMenuBar(NSDictionary *params) {
-    NSString *act = params[@"action"] ?: @"install";
-    if ([act isEqualToString:@"status"]) {
-        return @{@"installed": @(SpliceKit_isDebugMenuBarInstalled())};
-    }
-    if ([act isEqualToString:@"uninstall"] || [act isEqualToString:@"remove"]) {
-        BOOL ok = SpliceKit_uninstallDebugMenuBar();
-        return @{@"status": ok ? @"ok" : @"error",
-                 @"installed": @(SpliceKit_isDebugMenuBarInstalled())};
-    }
-    BOOL ok = SpliceKit_installDebugMenuBar();
-    if (!ok) {
-        return @{@"error": @"Failed to install Debug menu bar — see SpliceKit log"};
-    }
-    return @{@"status": @"ok",
-             @"installed": @(SpliceKit_isDebugMenuBarInstalled())};
-}
-
 #pragma mark - Debug: Breakpoints
 
 // True breakpoint system: swizzle a method, pause the calling thread,
@@ -34411,10 +34224,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleSpineGetItems(params);
     } else if ([method isEqualToString:@"spine.reorder"]) {
         result = SpliceKit_handleSpineReorder(params);
-    } else if ([method isEqualToString:@"spine.removeItemAtIndex"]) {
-        result = SpliceKit_handleSpineRemoveItem(params);
-    } else if ([method isEqualToString:@"spine.insertItem"]) {
-        result = SpliceKit_handleSpineInsertItem(params);
     }
     // playback.* namespace
     else if ([method isEqualToString:@"playback.action"]) {
@@ -34490,8 +34299,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleCaptionsExportTXT(params);
     } else if ([method isEqualToString:@"captions.setWords"]) {
         result = SpliceKit_handleCaptionsSetWords(params);
-    } else if ([method isEqualToString:@"captions.setXML"]) {
-        result = SpliceKit_handleCaptionsSetXML(params);
     } else if ([method isEqualToString:@"captions.verify"]) {
         result = SpliceKit_handleCaptionsVerify(params);
     } else if ([method isEqualToString:@"captions.cleanup"]) {
@@ -34622,38 +34429,12 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleMixerSetBusEffectEnabled(params);
     } else if ([method isEqualToString:@"mixer.removeBusEffect"]) {
         result = SpliceKit_handleMixerRemoveBusEffect(params);
-    } else if ([method isEqualToString:@"mixer.setMasterVolume"]) {
-        result = SpliceKit_handleMixerSetMasterVolume(params);
     } else if ([method isEqualToString:@"mixer.volumeBegin"]) {
         result = SpliceKit_handleMixerVolumeBegin(params);
     } else if ([method isEqualToString:@"mixer.volumeEnd"]) {
         result = SpliceKit_handleMixerVolumeEnd(params);
     } else if ([method isEqualToString:@"mixer.setAllVolumes"]) {
         result = SpliceKit_handleMixerSetAllVolumes(params);
-    } else if ([method isEqualToString:@"mixer.open"]) {
-        SpliceKit_executeOnMainThread(^{
-            Class cls = objc_getClass("SpliceKitMixerPanel");
-            if (cls) ((void (*)(id, SEL))objc_msgSend)(
-                ((id (*)(id, SEL))objc_msgSend)((id)cls, @selector(sharedPanel)), @selector(showPanel));
-        });
-        result = @{@"status": @"ok", @"message": @"Mixer panel opened"};
-    } else if ([method isEqualToString:@"mixer.close"]) {
-        SpliceKit_executeOnMainThread(^{
-            Class cls = objc_getClass("SpliceKitMixerPanel");
-            if (cls) ((void (*)(id, SEL))objc_msgSend)(
-                ((id (*)(id, SEL))objc_msgSend)((id)cls, @selector(sharedPanel)), @selector(hidePanel));
-        });
-        result = @{@"status": @"ok", @"message": @"Mixer panel closed"};
-    } else if ([method isEqualToString:@"mixer.debug"]) {
-        __block NSDictionary *debugResult = nil;
-        SpliceKit_executeOnMainThread(^{
-            Class cls = objc_getClass("SpliceKitMixerPanel");
-            if (cls) {
-                id panel = ((id (*)(id, SEL))objc_msgSend)((id)cls, @selector(sharedPanel));
-                debugResult = ((NSDictionary * (*)(id, SEL))objc_msgSend)(panel, NSSelectorFromString(@"debugState"));
-            }
-        });
-        result = debugResult ?: @{@"error": @"Panel not found"};
     }
     // audioBusDiagnostics.* namespace
     else if ([method hasPrefix:@"audioBusDiagnostics."]) {
@@ -34770,19 +34551,11 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleSectionsShow(params);
     } else if ([method isEqualToString:@"sections.hide"]) {
         result = SpliceKit_handleSectionsHide(params);
-    } else if ([method isEqualToString:@"sections.add"]) {
-        result = SpliceKit_handleSectionsAdd(params);
-    } else if ([method isEqualToString:@"sections.remove"]) {
-        result = SpliceKit_handleSectionsRemove(params);
-    } else if ([method isEqualToString:@"sections.setColor"]) {
-        result = SpliceKit_handleSectionsSetColor(params);
     } else if ([method isEqualToString:@"sections.get"]) {
         result = SpliceKit_handleSectionsGet(params);
     }
     // structure.* namespace
-    else if ([method isEqualToString:@"structure.generateBlocks"]) {
-        result = SpliceKit_handleStructureGenerateBlocks(params);
-    } else if ([method isEqualToString:@"structure.generateCaptions"]) {
+    else if ([method isEqualToString:@"structure.generateCaptions"]) {
         result = SpliceKit_serverStructureGenerateCaptions(params);
     } else if ([method isEqualToString:@"structure.remove"]) {
         result = SpliceKit_serverStructureRemove(params);
@@ -34828,10 +34601,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleDebugLoadPlugin(params);
     } else if ([method isEqualToString:@"debug.observeNotification"]) {
         result = SpliceKit_handleDebugObserveNotification(params);
-    } else if ([method isEqualToString:@"debug.showSettingsPanel"]) {
-        result = SpliceKit_handleDebugShowSettingsPanel(params);
-    } else if ([method isEqualToString:@"debug.installMenuBar"]) {
-        result = SpliceKit_handleDebugInstallMenuBar(params);
     } else if ([method isEqualToString:@"debug.breakpoint"]) {
         result = SpliceKit_handleDebugBreakpoint(params);
     }

@@ -377,9 +377,6 @@ void SpliceKit_setTimelineOverviewBarEnabled(BOOL enabled);
 // Custom NSView injected into FCP's timeline showing color-coded song structure.
 NSDictionary *SpliceKit_handleSectionsShow(NSDictionary *params);
 NSDictionary *SpliceKit_handleSectionsHide(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsAdd(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsRemove(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsSetColor(NSDictionary *params);
 NSDictionary *SpliceKit_handleSectionsGet(NSDictionary *params);
 
 #pragma mark - Structure Blocks
@@ -387,7 +384,6 @@ NSDictionary *SpliceKit_handleSectionsGet(NSDictionary *params);
 // Color-coded section blocks above the timeline (verse/chorus/bridge/etc.).
 // Creates a connected storyline of labeled title clips from song structure data.
 void SpliceKit_installStructureBlockContextMenu(void);
-NSDictionary *SpliceKit_handleStructureGenerateBlocks(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureRemove(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureToggle(NSDictionary *params);

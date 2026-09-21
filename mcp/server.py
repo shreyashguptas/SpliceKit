@@ -8411,14 +8411,6 @@ def beat_sync_blade(file_path: str, cut_on: str = "bar",
 # elements; Final Cut Pro assigns them to the library's normal SRT caption
 # role (e.g. English), not a separate "structure" role.
 
-def _structure_caption_role():
-    """Role string passed in FCPXML for structure block captions.
-
-    FCP maps this to the library's standard SRT caption subrole (e.g. English),
-    same lane as user subtitles — removal must not match by role."""
-    return "SRT.structure"
-
-
 @splicekit_tool("song_structure_blocks")
 def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
                           min_bpm: float = 60.0, max_bpm: float = 200.0,
@@ -8452,60 +8444,11 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
     if not structure:
         return "Error: no song structure detected"
 
-    # Get timeline properties for rational time arithmetic
-    pos = bridge.call("playback.getPosition")
-    if _err(pos):
-        return f"Error: {pos.get('error', pos)}"
-    fd = pos.get("frameDuration", {})
-    fd_num = fd.get("value", 100)
-    fd_den = fd.get("timescale", 2400)
-
-    def dur_rational(seconds):
-        frames = round(seconds * fd_den / fd_num)
-        return f"{frames * fd_num}/{fd_den}s"
-
-    # Compute total duration (end of last section + 1s padding)
-    total_dur = max(s["end"] for s in structure) + 1.0
-    total_dur_str = dur_rational(total_dur)
-    caption_role = _structure_caption_role()
-
-    # Build FCPXML with <caption> elements inside a gap
-    # These appear in FCP's native caption lane
-    caption_xml = ""
-    for s in structure:
-        label = s["label"].upper()
-        offset_str = dur_rational(s["start"])
-        dur_str = dur_rational(s["duration"])
-        caption_xml += (
-            f'                            <caption lane="1" offset="{offset_str}" '
-            f'name="{label}" duration="{dur_str}" role="{caption_role}">\n'
-            f'                                <text>{label}</text>\n'
-            f'                            </caption>\n'
-        )
-
-    xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE fcpxml>
-
-<fcpxml version="1.11">
-    <resources>
-        <format id="r1" frameDuration="{fd_num}/{fd_den}s" width="1920" height="1080"/>
-    </resources>
-    <library>
-        <event name="SpliceKit Structure">
-            <project name="SpliceKit Structure Blocks">
-                <sequence format="r1" duration="{total_dur_str}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
-                    <spine>
-                        <gap name="placeholder" duration="{total_dur_str}" start="0s">
-{caption_xml}                        </gap>
-                    </spine>
-                </sequence>
-            </project>
-        </event>
-    </library>
-</fcpxml>'''
-
-    # Use the ObjC bridge to create native captions in the caption lane.
-    # This does: FCPXML import → load temp project → selectAll → copy → switch back → paste
+    # The captions are built natively on the ObjC side from `structure`. There used to be
+    # forty lines here that assembled an <fcpxml> document — and a playback.getPosition
+    # round trip purely to get a frame duration for its rational times — into a local that
+    # was never read. structure.generateCaptions replaced that FCPXML import long ago;
+    # the scaffolding was left behind.
     r = bridge.call("structure.generateCaptions", sections=structure, atSeconds=at_seconds)
     if _err(r):
         return f"Error: {r.get('error', r)}"

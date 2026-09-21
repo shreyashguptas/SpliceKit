@@ -87,8 +87,6 @@ static void SpliceKit_initBuiltinMetadata(void) {
             // spine.*
             @"spine.getItems": meta(@"safe", @"Read spine-level items from primary storyline."),
             @"spine.reorder": meta(@"destructive", @"Move items within the spine."),
-            @"spine.removeItemAtIndex": meta(@"destructive", @"Delete a spine item by index."),
-            @"spine.insertItem": meta(@"destructive", @"Insert a spine item at position."),
 
             // playback.*
             @"playback.action": meta(@"state_dependent", @"Play/pause/step/shuttle."),
@@ -205,13 +203,9 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"mixer.openBusEffect": meta(@"state_dependent", @"Opens the bus effect editor for a role."),
             @"mixer.setBusEffectEnabled": meta(@"state_dependent", @"Enables or disables a managed bus effect."),
             @"mixer.removeBusEffect": meta(@"destructive", @"Removes a managed bus effect from a role."),
-            @"mixer.setMasterVolume": meta(@"state_dependent", @"Sets the master output level."),
             @"mixer.volumeBegin": meta(@"state_dependent", @"Begins a grouped volume drag on the mixer."),
             @"mixer.volumeEnd": meta(@"state_dependent", @"Ends a grouped volume drag on the mixer."),
             @"mixer.setAllVolumes": meta(@"state_dependent", @"Sets fader levels for every role at once."),
-            @"mixer.open": meta(@"state_dependent", @"Opens the SpliceKit mixer panel."),
-            @"mixer.close": meta(@"state_dependent", @"Closes the SpliceKit mixer panel."),
-            @"mixer.debug": meta(@"safe", @"Dumps internal mixer reconciliation state for debugging."),
 
             // share.*
             @"share.export": meta(@"modal", @"Triggers File > Share (opens the share sheet)."),
@@ -279,13 +273,9 @@ static void SpliceKit_initBuiltinMetadata(void) {
             // sections.* (timeline bar)
             @"sections.show": meta(@"state_dependent", @"Shows the custom sections bar overlay."),
             @"sections.hide": meta(@"state_dependent", @"Hides the custom sections bar overlay."),
-            @"sections.add": meta(@"destructive", @"Adds a labeled section on the timeline bar."),
-            @"sections.remove": meta(@"destructive", @"Removes a section from the timeline bar."),
-            @"sections.setColor": meta(@"state_dependent", @"Changes a section's color on the timeline bar."),
             @"sections.get": meta(@"safe", @"Lists sections on the timeline bar."),
 
             // structure.*
-            @"structure.generateBlocks": meta(@"destructive", @"Generates structure blocks on the timeline from analysis."),
             @"structure.generateCaptions": meta(@"destructive", @"Generates structure caption titles on the timeline."),
             @"structure.remove": meta(@"destructive", @"Removes generated structure items."),
             // Not a visibility toggle: with blocks on the timeline this is structure.remove,
@@ -304,13 +294,10 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"debug.getImageSections": meta(@"safe", @"Reads ObjC class/selector sections from a binary."),
             @"debug.getImageSymbols": meta(@"safe", @"Lists demangled symbols from a loaded image."),
             @"debug.getNotificationNames": meta(@"safe", @"Discovers notification-related classes and names."),
-            @"debug.showSettingsPanel": meta(@"state_dependent", @"Opens the SpliceKit debug settings panel."),
-            @"debug.installMenuBar": meta(@"system", @"Installs SpliceKit items on the menu bar."),
 
             // captions.* (additional)
             @"captions.setGrouping": meta(@"state_dependent", @"Sets caption word-grouping mode for generation."),
             @"captions.setWords": meta(@"state_dependent", @"Supplies transcript words to the caption pipeline."),
-            @"captions.setXML": meta(@"state_dependent", @"Loads caption title XML into the pipeline."),
             @"captions.cleanup": meta(@"destructive", @"Removes temporary caption projects from the library."),
 
             // nativeCaptions.*
