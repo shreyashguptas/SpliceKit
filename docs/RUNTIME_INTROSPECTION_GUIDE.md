@@ -326,16 +326,16 @@ get_object_property("obj_2", "duration")
 
 ```python
 # List all stored handles
-manage_handles(action="list")
+list_handles()
 
 # Inspect a specific handle
-manage_handles(action="inspect", handle="obj_1")
+inspect_handle("obj_1")
 
 # Release a specific handle
-manage_handles(action="release", handle="obj_1")
+release_handle("obj_1")
 
 # Release all handles (clean up)
-manage_handles(action="release_all")
+release_all_handles()
 ```
 
 Always release handles when done to prevent memory leaks in FCP's process.
@@ -528,7 +528,7 @@ get_object_property("obj_5", "displayName")
 get_object_property("obj_5", "duration")
 
 # 7. Clean up
-manage_handles(action="release_all")
+release_all_handles()
 ```
 
 ### Finding How FCP Implements a Feature

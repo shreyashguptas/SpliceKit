@@ -150,9 +150,196 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"transcript.moveWords": meta(@"destructive", @"Reorder timeline segments."),
             @"transcript.search": meta(@"safe", @"Search transcript text."),
             @"transcript.deleteSilences": meta(@"destructive", @"Ripple-delete pauses."),
+            @"transcript.clear": meta(@"destructive", @"Clears transcript text and on-disk cache for the panel."),
+            @"transcript.setSilenceThreshold": meta(@"state_dependent", @"Recomputes silence markers at a new threshold."),
+            @"transcript.setSpeaker": meta(@"state_dependent", @"Labels speaker on a word range in the transcript panel."),
+            @"transcript.setEngine": meta(@"state_dependent", @"Switches the transcript recognition engine."),
 
             // scene.*
             @"scene.detect": meta(@"safe", @"Detect scene changes in timeline."),
+
+            // transitions.*
+            @"transitions.list": meta(@"safe", @"Lists installed transition effects."),
+            @"transitions.apply": meta(@"destructive", @"Applies a transition at the current edit point."),
+
+            // titles.* / stabilize.*
+            @"titles.insert": meta(@"destructive", @"Inserts a Motion title on the timeline at the playhead."),
+            @"stabilize.subject": meta(@"destructive", @"Tracks a subject and writes position keyframes on the selected clip."),
+
+            // command.* (palette)
+            @"command.show": meta(@"state_dependent", @"Opens the in-app command palette window."),
+            @"command.hide": meta(@"state_dependent", @"Closes the command palette."),
+            @"command.search": meta(@"safe", @"Fuzzy-searches available commands without executing them."),
+            @"command.execute": meta(@"state_dependent", @"Runs a palette command by id."),
+            @"command.ai": meta(@"state_dependent", @"Sends natural language to Apple Intelligence via the palette."),
+            @"command.aiGemma": meta(@"state_dependent", @"Runs a Gemma model prompt through the palette."),
+            @"command.aiAppleAgentic": meta(@"state_dependent", @"Runs an agentic Apple Intelligence request via the palette."),
+
+            // liveCam.*
+            @"liveCam.show": meta(@"state_dependent", @"Opens the Live Cam floating panel."),
+            @"liveCam.hide": meta(@"state_dependent", @"Closes the Live Cam panel."),
+            @"liveCam.status": meta(@"safe", @"Reports Live Cam panel and capture state."),
+
+            // immersivePreview.*
+            @"immersivePreview.show": meta(@"state_dependent", @"Opens the immersive spatial preview panel."),
+            @"immersivePreview.hide": meta(@"state_dependent", @"Closes the immersive preview panel."),
+            @"immersivePreview.status": meta(@"safe", @"Reads immersive preview session state."),
+            @"immersivePreview.resolveSelectedPath": meta(@"safe", @"Resolves the file path of the selected browser or timeline item."),
+            @"immersivePreview.loadSelected": meta(@"state_dependent", @"Loads the current selection into the preview."),
+            @"immersivePreview.loadPath": meta(@"state_dependent", @"Loads a file path into the preview."),
+            @"immersivePreview.setFrame": meta(@"state_dependent", @"Seeks the preview to a frame index."),
+            @"immersivePreview.setEyeMode": meta(@"state_dependent", @"Sets left/right/both eye preview mode."),
+            @"immersivePreview.setViewMode": meta(@"state_dependent", @"Sets preview view mode (e.g. mono/stereo)."),
+            @"immersivePreview.setViewport": meta(@"state_dependent", @"Adjusts preview viewport parameters."),
+            @"immersivePreview.refresh": meta(@"state_dependent", @"Forces a preview redraw."),
+            @"immersivePreview.resetPerf": meta(@"system", @"Resets immersive preview performance counters."),
+            @"immersivePreview.sendCurrentFrame": meta(@"state_dependent", @"Pushes the current preview frame to connected clients."),
+
+            // dualTimeline.*
+            @"dualTimeline.status": meta(@"safe", @"Reports dual-timeline panel state."),
+            @"dualTimeline.open": meta(@"state_dependent", @"Opens the secondary timeline editor."),
+            @"dualTimeline.syncRoot": meta(@"state_dependent", @"Syncs root sequence between primary and secondary."),
+            @"dualTimeline.openSelectedInSecondary": meta(@"state_dependent", @"Opens the selected compound/reference clip in the secondary timeline."),
+            @"dualTimeline.focus": meta(@"state_dependent", @"Moves keyboard focus between primary and secondary timelines."),
+            @"dualTimeline.close": meta(@"state_dependent", @"Closes the secondary timeline."),
+            @"dualTimeline.togglePanel": meta(@"state_dependent", @"Shows or hides the dual-timeline panel."),
+
+            // media.*
+            @"media.importFile": meta(@"modal", @"Imports a media file into the active event (may show import UI)."),
+
+            // roles.*
+            @"roles.assign": meta(@"destructive", @"Assigns a video or audio role on the selected clip."),
+
+            // mixer.*
+            @"mixer.getState": meta(@"safe", @"Reads role faders, mutes, solos, and bus effects for the open timeline."),
+            @"mixer.setVolume": meta(@"state_dependent", @"Sets a role or clip fader level."),
+            @"mixer.setSolo": meta(@"state_dependent", @"Solo or unsolo a role."),
+            @"mixer.setMute": meta(@"state_dependent", @"Mute or unmute a role."),
+            @"mixer.applyBusEffect": meta(@"destructive", @"Inserts a managed bus effect on a role."),
+            @"mixer.openBusEffect": meta(@"state_dependent", @"Opens the bus effect editor for a role."),
+            @"mixer.setBusEffectEnabled": meta(@"state_dependent", @"Enables or disables a managed bus effect."),
+            @"mixer.removeBusEffect": meta(@"destructive", @"Removes a managed bus effect from a role."),
+            @"mixer.setMasterVolume": meta(@"state_dependent", @"Sets the master output level."),
+            @"mixer.volumeBegin": meta(@"state_dependent", @"Begins a grouped volume drag on the mixer."),
+            @"mixer.volumeEnd": meta(@"state_dependent", @"Ends a grouped volume drag on the mixer."),
+            @"mixer.setAllVolumes": meta(@"state_dependent", @"Sets fader levels for every role at once."),
+            @"mixer.open": meta(@"state_dependent", @"Opens the SpliceKit mixer panel."),
+            @"mixer.close": meta(@"state_dependent", @"Closes the SpliceKit mixer panel."),
+            @"mixer.debug": meta(@"safe", @"Dumps internal mixer reconciliation state for debugging."),
+
+            // share.*
+            @"share.export": meta(@"modal", @"Triggers File > Share (opens the share sheet)."),
+
+            // project.*
+            @"project.create": meta(@"modal", @"Starts new project creation (may show a save panel)."),
+            @"project.createEvent": meta(@"modal", @"Starts new event creation (may show a save panel)."),
+            @"project.createLibrary": meta(@"modal", @"Starts new library creation (may show a save panel)."),
+            @"project.open": meta(@"state_dependent", @"Loads a project by name in the active library."),
+
+            // urlImport.*
+            @"urlImport.start": meta(@"state_dependent", @"Begins a background URL import job."),
+            @"urlImport.import": meta(@"destructive", @"Imports remote media into the library synchronously."),
+            @"urlImport.status": meta(@"safe", @"Reports progress of an in-flight URL import."),
+            @"urlImport.cancel": meta(@"state_dependent", @"Cancels a running URL import."),
+
+            // timeline capture / lane selection
+            @"timeline.selectClipInLane": meta(@"state_dependent", @"Selects the connected clip on a storyline lane at the playhead."),
+            @"timeline.capture": meta(@"safe", @"Captures the timeline window to a PNG file."),
+
+            // viewer.* / inspector capture
+            @"viewer.capture": meta(@"safe", @"Captures the viewer window to a PNG file."),
+            @"inspector.capture": meta(@"safe", @"Captures the inspector window to a PNG file."),
+            @"viewer.getZoom": meta(@"safe", @"Reads viewer canvas zoom level."),
+            @"viewer.setZoom": meta(@"state_dependent", @"Sets viewer canvas zoom level."),
+
+            // fcpxml export
+            @"fcpxml.export": meta(@"destructive", @"Writes the active sequence to an FCPXML file on disk."),
+
+            // tool.*
+            @"tool.select": meta(@"state_dependent", @"Switches the active timeline tool (blade, trim, etc.)."),
+
+            // dialog.*
+            @"dialog.detect": meta(@"safe", @"Lists open dialogs, buttons, fields, and checkboxes."),
+            @"dialog.click": meta(@"state_dependent", @"Clicks a dialog button by title or index."),
+            @"dialog.fill": meta(@"state_dependent", @"Types into a dialog text field."),
+            @"dialog.checkbox": meta(@"state_dependent", @"Toggles a dialog checkbox."),
+            @"dialog.popup": meta(@"state_dependent", @"Chooses an item from a dialog pop-up."),
+            @"dialog.dismiss": meta(@"state_dependent", @"Dismisses the front dialog via default or cancel."),
+
+            // backgroundRender.*
+            @"backgroundRender.status": meta(@"safe", @"Reads background render queue state."),
+            @"backgroundRender.control": meta(@"state_dependent", @"Starts, stops, or pauses background rendering."),
+
+            // options.*
+            @"options.get": meta(@"safe", @"Reads SpliceKit/FCP behavioral option flags."),
+            @"options.set": meta(@"system", @"Writes SpliceKit/FCP behavioral option flags."),
+
+            // beats.*
+            @"beats.detect": meta(@"safe", @"Runs beat detection on an audio file path (no timeline change)."),
+
+            // flexmusic.*
+            @"flexmusic.listSongs": meta(@"safe", @"Lists FlexMusic songs in the library."),
+            @"flexmusic.getSong": meta(@"safe", @"Reads metadata for one FlexMusic song."),
+            @"flexmusic.getTiming": meta(@"safe", @"Reads beat/bar timing metadata for a song."),
+            @"flexmusic.renderToFile": meta(@"destructive", @"Renders a FlexMusic mix to an audio file on disk."),
+            @"flexmusic.addToTimeline": meta(@"destructive", @"Places FlexMusic audio on the timeline."),
+
+            // montage.*
+            @"montage.analyzeClips": meta(@"safe", @"Scores browser clips for montage assembly (read-only)."),
+            @"montage.planEdit": meta(@"safe", @"Builds a montage edit plan without applying it."),
+            @"montage.assemble": meta(@"destructive", @"Executes a montage plan on the timeline."),
+            @"montage.auto": meta(@"destructive", @"Analyzes, plans, and assembles a montage in one call."),
+
+            // sections.* (timeline bar)
+            @"sections.show": meta(@"state_dependent", @"Shows the custom sections bar overlay."),
+            @"sections.hide": meta(@"state_dependent", @"Hides the custom sections bar overlay."),
+            @"sections.add": meta(@"destructive", @"Adds a labeled section on the timeline bar."),
+            @"sections.remove": meta(@"destructive", @"Removes a section from the timeline bar."),
+            @"sections.setColor": meta(@"state_dependent", @"Changes a section's color on the timeline bar."),
+            @"sections.get": meta(@"safe", @"Lists sections on the timeline bar."),
+
+            // structure.*
+            @"structure.generateBlocks": meta(@"destructive", @"Generates structure blocks on the timeline from analysis."),
+            @"structure.generateCaptions": meta(@"destructive", @"Generates structure caption titles on the timeline."),
+            @"structure.remove": meta(@"destructive", @"Removes generated structure items."),
+            @"structure.toggle": meta(@"state_dependent", @"Toggles structure overlay visibility."),
+
+            // debug config / runtime export (additional)
+            @"debug.getConfig": meta(@"safe", @"Reads FCP debug and log configuration keys."),
+            @"debug.setConfig": meta(@"system", @"Sets a FCP debug or log configuration key."),
+            @"debug.resetConfig": meta(@"system", @"Resets debug configuration groups to defaults."),
+            @"debug.enablePreset": meta(@"system", @"Applies a named debug flag preset."),
+            @"debug.startFramerateMonitor": meta(@"system", @"Starts HMDFramerate logging to the system log."),
+            @"debug.stopFramerateMonitor": meta(@"system", @"Stops HMDFramerate logging."),
+            @"debug.dumpRuntimeMetadata": meta(@"safe", @"Exports ObjC runtime metadata JSON (read-only introspection)."),
+            @"debug.listLoadedImages": meta(@"safe", @"Lists Mach-O images loaded in the process."),
+            @"debug.getImageSections": meta(@"safe", @"Reads ObjC class/selector sections from a binary."),
+            @"debug.getImageSymbols": meta(@"safe", @"Lists demangled symbols from a loaded image."),
+            @"debug.getNotificationNames": meta(@"safe", @"Discovers notification-related classes and names."),
+            @"debug.showSettingsPanel": meta(@"state_dependent", @"Opens the SpliceKit debug settings panel."),
+            @"debug.installMenuBar": meta(@"system", @"Installs SpliceKit items on the menu bar."),
+
+            // captions.* (additional)
+            @"captions.setGrouping": meta(@"state_dependent", @"Sets caption word-grouping mode for generation."),
+            @"captions.setWords": meta(@"state_dependent", @"Supplies transcript words to the caption pipeline."),
+            @"captions.setXML": meta(@"state_dependent", @"Loads caption title XML into the pipeline."),
+            @"captions.cleanup": meta(@"destructive", @"Removes temporary caption projects from the library."),
+
+            // nativeCaptions.*
+            @"nativeCaptions.generate": meta(@"destructive", @"Creates FFAnchoredCaption objects on the caption lane."),
+            @"nativeCaptions.verify": meta(@"safe", @"Inspects native captions against expected text."),
+            @"nativeCaptions.remove": meta(@"destructive", @"Deletes caption items from the open sequence (native or Motion-title pipeline)."),
+
+            // lua.*
+            @"lua.execute": meta(@"system", @"Runs Lua source in the embedded VM (full FCP access)."),
+            @"lua.executeFile": meta(@"system", @"Runs a Lua file in the embedded VM."),
+            @"lua.reset": meta(@"system", @"Resets the Lua VM state."),
+            @"lua.getState": meta(@"safe", @"Reads Lua VM globals and loaded modules."),
+            @"lua.watch": meta(@"system", @"Registers a filesystem watch on a Lua script path."),
+
+            // plugin.*
+            @"plugin.listMethods": meta(@"safe", @"Lists dynamically registered plugin RPC methods."),
+            @"plugin.list": meta(@"safe", @"Lists loaded SpliceKit plugins."),
         };
     });
 }

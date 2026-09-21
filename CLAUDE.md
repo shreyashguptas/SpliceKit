@@ -737,7 +737,7 @@ call_method_with_args("obj_1", "objectAtIndex:", '[{"type":"int","value":0}]', f
 get_object_property("obj_2", "displayName")
 
 # Always clean up
-manage_handles(action="release_all")
+release_all_handles()
 ```
 
 Argument types: string, int, double, float, bool, nil, sender, handle, cmtime, selector

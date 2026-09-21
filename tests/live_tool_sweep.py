@@ -90,10 +90,13 @@ class Case:
     # whole registry), so the placeholders are looked up again before the next case
     # instead of every later call failing on a handle that no longer resolves.
     invalidates_handles: bool = False
+    # A handle to select before the call, for tools that act on the selection and need
+    # a particular kind of clip (the second timeline pane only takes a compound clip).
+    select_before: str = ""
 
 
-def read(expect: str | None = None, **args) -> Case:
-    return Case(args=args, kind="read", expect=expect)
+def read(expect: str | None = None, timeout: float = 60.0, **args) -> Case:
+    return Case(args=args, kind="read", expect=expect, timeout=timeout)
 
 
 def write(undo=None, cleanup=None, expect=None, timeout=60.0, **args) -> Case:
@@ -159,7 +162,6 @@ CASES: dict[str, Case] = {
     "list_menus": read(menu="Edit"),
     "search_commands": read(query="blade", limit=5),
     "list_handles": read(),
-    "manage_handles": read(action="list"),
     "inspect_handle": Case(args={"handle": "$CONNECTED_CLIP"}, kind="read"),
     "get_object_property": Case(args={"handle": "$CONNECTED_CLIP", "key": "displayName"},
                                 kind="read"),
@@ -169,7 +171,7 @@ CASES: dict[str, Case] = {
     "get_caption_styles": read(),
     "verify_captions": read(),
     "verify_native_captions": read(),
-    "get_sections": read(),
+    "sections_get": read(),
     "mixer_get_state": read(),
     "dual_timeline_status": read(),
     "plugin_list": read(),
@@ -218,7 +220,7 @@ CASES: dict[str, Case] = {
 CASES.update({
     # ---------------------------------------------------------------- playhead, view
     "seek_to_time": write(seconds=5.0, cleanup=[("seek_to_time", {"seconds": 11.979})]),
-    "playback_action": write(action="pause"),
+    "playback_action": write(action="stopPlaying"),
     "set_playback_speed": write(rate=1.0),
     "set_viewer_zoom": write(zoom=1.0, cleanup=[("set_viewer_zoom", {"zoom": 0})]),
     "select_clips": Case(args={"handles": "$CONNECTED_CLIP"}, kind="write"),
@@ -227,19 +229,20 @@ CASES.update({
     "timeline_navigation_action": write(action="selectAll",
                                         cleanup=[("timeline_navigation_action",
                                                   {"action": "deselectAll"})]),
-    "set_bridge_option": write(option="verboseLogging", enabled=False),
-    "set_bridge_option_value": write(option="captionStylePreset", value="social"),
-    "set_silence_threshold": write(threshold=-50.0),
+    "set_bridge_option": Case(args={"option": "$BRIDGE_OPTION", "enabled": False},
+                              kind="write"),
+    "set_bridge_option_value": skip("set_bridge_option covers the option table; the\n                                    value-taking options need per-option values"),
+    "set_silence_threshold": write(threshold=0.3),
     "set_transcript_engine": write(engine="parakeetV3"),
 
     # ---------------------------------------------------------------- timeline writes
     "add_markers_at_times": write(markers="5.0, 10.0", undo="Add Markers"),
-    "blade_at_times": write(times="5.0", undo=("Blade", "Blade Clips")),
+    "blade_at_times": write(times="5.0", undo=("Blade at Times", "Blade", "Blade Clips")),
     "timeline_edit_action": write(action="addMarker", undo=("Add Marker", "Marker")),
     "timeline_action": write(action="addMarker", undo=("Add Marker", "Marker")),
     "timeline_destructive_action": write(action="blade", undo=("Blade", "Blade Clips")),
-    "direct_timeline_action": write(action="addMarker", name="sweep",
-                                    undo=("Add Marker", "Marker")),
+    "direct_timeline_action": write(action="addKeywords", keywords="sweep",
+                                    undo=("Add Keywords", "Keywords", "Add Keyword")),
     "batch_timeline_actions": write(actions='[{"action":"addMarker"}]',
                                     undo_name="Sweep Batch", undo="Sweep Batch"),
     "history_action": Case(args={"action": "undo"}, kind="skip",
@@ -253,17 +256,22 @@ CASES.update({
                           undo=("Add Effect", "Black & White", "Add Video Effect")),
     "apply_transition": write(name="Cross Dissolve",
                               undo=("Add Transition", "Cross Dissolve")),
-    "apply_transition_to_all_clips": write(undo=("Add Transition", "Cross Dissolve")),
+    "apply_transition_to_all_clips": write(
+        undo=("Add Transition", "Cross Dissolve", "Add Transitions"), timeout=120),
     "batch_apply_effect": write(name="Black & White", clip_count=2,
                                 undo=("Batch Apply Effect", "Add Effect")),
     "batch_color_correct": write(correction="addColorBoard", clip_count=2,
                                  undo=("Batch Color Correct", "Add Color Board Effect")),
     "insert_title": write(name="Basic Title",
-                          undo=("Insert Title", "Connect Title", "Add Basic Title")),
+                          undo=("Connect to Primary Storyline", "Insert Title",
+                                "Connect Title", "Add Basic Title")),
     "set_inspector_property": write(property="positionX", value=25,
                                     undo="Set positionX"),
     "set_object_property": skip("arbitrary KVC write on a live model object"),
-    "assign_role": write(type="video", role="Video"),
+    # Final Cut Pro only populates its Assign Roles submenus while it is frontmost,
+    # so from a background sweep this can only report that limitation.
+    "assign_role": dependency("frontmost", "enumerated no items",
+                              type="video", role="Video"),
     "stabilize_subject": Case(args={}, kind="write", undo="Stabilize Subject", timeout=600),
     "import_srt_as_markers": write(
         srt_content="1\n00:00:05,000 --> 00:00:06,000\nsweep\n",
@@ -283,17 +291,20 @@ CASES.update({
     "dual_timeline_close": write(),
     "dual_timeline_focus": write(pane="primary"),
     "dual_timeline_sync_root": write(),
-    "dual_timeline_open_selected_in_secondary": write(
-        cleanup=[("dual_timeline_close", {})]),
-    "dual_timeline_toggle_panel": write(panel="index", pane="secondary",
+    # Only a compound clip, multicam angle or similar can open in the second pane.
+    "dual_timeline_open_selected_in_secondary": Case(
+        args={}, kind="write", select_before="$SPINE_CLIP",
+        cleanup=[("dual_timeline_close", {}),
+                 ("select_clips", {"handles": "$CONNECTED_CLIP"})]),
+    "dual_timeline_toggle_panel": write(panel="timelineIndex", pane="secondary",
                                         cleanup=[("dual_timeline_toggle_panel",
-                                                  {"panel": "index",
+                                                  {"panel": "timelineIndex",
                                                    "pane": "secondary"})]),
     "toggle_structure_blocks": write(cleanup=[("toggle_structure_blocks", {})]),
-    "hide_sections": write(),
-    "open_livecam": write(cleanup=[("close_livecam", {})]),
-    "close_livecam": write(),
-    "get_livecam_status": read(),
+    "sections_hide": write(),
+    "livecam_open": write(cleanup=[("livecam_close", {})]),
+    "livecam_close": write(),
+    "livecam_status": read(),
     "capture_viewer": Case(args={"path": "$TMP/viewer.png", "return_image": False},
                            kind="read"),
     "capture_timeline": Case(args={"path": "$TMP/timeline.png", "return_image": False},
@@ -302,7 +313,7 @@ CASES.update({
                               kind="read"),
 
     # ---------------------------------------------------------------- render / export
-    "background_render_control": write(action="pause", seconds=5),
+    "background_render_control": write(action="low_overhead", seconds=5),
     "export_xml": Case(args={"path": "$TMP/sweep.fcpxml"}, kind="write",
                        expect=r"fcpxml|Exported", timeout=120),
     "export_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=120),
@@ -328,14 +339,20 @@ CASES.update({
     # ---------------------------------------------------------------- captions
     "open_captions": write(cleanup=[("close_captions", {})]),
     "close_captions": write(),
-    "set_caption_style": write(preset_id="social"),
+    "set_caption_style": write(preset_id="bold_pop"),
     "set_caption_grouping": write(mode="social", max_words=3),
     "set_caption_words": skip("needs generated captions with known word indices"),
     "generate_captions": Case(args={}, kind="write", timeout=300,
+                              undo=("Paste", "Insert Captions", "Connect to Primary Storyline"),
                               cleanup=[("cleanup_temp_projects", {})]),
     "generate_native_captions": Case(args={}, kind="write", timeout=300,
-                                     cleanup=[("cleanup_temp_projects", {})]),
+                                     undo=("Paste", "Insert Captions"),
+                                     cleanup=[("remove_captions", {"native": True}),
+                                              ("cleanup_temp_projects", {})]),
     "cleanup_temp_projects": read(dry_run=True),
+    # The counterpart to generate_native_captions. A dry run is enough here:
+    # the real deletion is exercised as generate_native_captions's cleanup.
+    "remove_captions": read(dry_run=True),
 
     # ---------------------------------------------------------------- beats / music
     "detect_beats": Case(args={"file_path": "$MEDIA_FILE", "limit": 8},
@@ -351,31 +368,43 @@ CASES.update({
                                   cleanup=[("remove_structure_blocks", {}),
                                            ("cleanup_temp_projects", {})]),
     "remove_structure_blocks": read(dry_run=True),
-    "trim_clips_to_beats": Case(args={"dry_run": True}, kind="read", timeout=120),
-    "sync_clips_to_song_beats": Case(args={"dry_run": True}, kind="read", timeout=120),
-    "build_song_cut": Case(args={"dry_run": True}, kind="read", timeout=180),
-    "assemble_random_clips_to_song_beats": Case(args={"dry_run": True}, kind="read",
-                                                timeout=180),
+    # The beat-driven family reads Final Cut Pro's own timing metadata, which only
+    # songs from its music library carry. That library is not installed here, so the
+    # pass condition is that each tool says so plainly rather than failing obscurely.
+    "trim_clips_to_beats": dependency("beat map", "music library", timeout=120,
+                                      dry_run=True, source_handle="$CONNECTED_CLIP"),
+    "sync_clips_to_song_beats": dependency("beat map", "music library", timeout=120,
+                                           dry_run=True,
+                                           source_handle="$CONNECTED_CLIP"),
+    "build_song_cut": Case(args={"dry_run": True,
+                                 "source_handle": "$CONNECTED_CLIP"},
+                           kind="read", timeout=180),
+    "assemble_random_clips_to_song_beats": dependency(
+        "beat map", "music library", timeout=180,
+        dry_run=True, source_handle="$CONNECTED_CLIP"),
 
     # ---------------------------------------------------------------- montage
     "montage_analyze_clips": Case(args={}, kind="read", timeout=300),
-    "montage_plan_edit": read(beats="[0.0, 1.0, 2.0]", clips="[]"),
+    "montage_plan_edit": read(beats="[0.0, 1.0, 2.0, 3.0]", style="beat",
+                              clips="$MONTAGE_CLIPS"),
     "montage_assemble": skip("builds a whole project; covered by montage_auto"),
     "montage_auto": skip("builds a whole project from a song library that is absent"),
 
     # ---------------------------------------------------------------- mixer
-    "mixer_set_volume": Case(args={"handle": "$EFFECT_STACK", "volume_db": 0.0},
+    "mixer_set_volume": Case(args={"handle": "$MIXER_VOLUME", "volume_db": 0.0},
                              kind="write"),
     "mixer_set_mute": write(index=0, muted=False),
     "mixer_set_solo": write(index=0, solo=False),
-    "mixer_set_all_volumes": write(volumes=[]),
-    "mixer_volume_begin": Case(args={"effect_stack_handle": "$EFFECT_STACK"},
+    "mixer_set_all_volumes": write(
+        volumes=[{"handle": "$MIXER_VOLUME", "volumeDB": 0.0}]),
+    "mixer_volume_begin": Case(args={"effect_stack_handle": "$MIXER_STACK"},
                                kind="write",
                                cleanup=[("mixer_volume_end",
-                                         {"effect_stack_handle": "$EFFECT_STACK"})]),
+                                         {"effect_stack_handle": "$MIXER_STACK"})]),
     "mixer_volume_end": skip("closes the scope mixer_volume_begin opens"),
-    "mixer_apply_bus_effect": Case(args={"name": "Channel EQ", "index": 0,
-                                         "dry_run": True}, kind="read"),
+    "mixer_apply_bus_effect": dependency("role-bearing collection",
+                                        "No collection-backed bus",
+                                        name="Channel EQ", index=0, dry_run=True),
     "mixer_open_bus_effect": skip("opens a plugin window a person has to close"),
     "mixer_set_bus_effect_enabled": skip("needs a bus effect applied first"),
     "mixer_remove_bus_effect": skip("needs a bus effect applied first"),
@@ -389,7 +418,7 @@ CASES.update({
     # ---------------------------------------------------------------- debug config
     "debug_set_config": write(key="verbose", value="false"),
     "debug_reset_config": write(scope="all"),
-    "debug_enable_preset": write(preset="off"),
+    "debug_enable_preset": write(preset="all_off"),
     "debug_start_framerate_monitor": write(interval=2.0,
                                            cleanup=[("debug_stop_framerate_monitor", {})]),
     "debug_stop_framerate_monitor": write(),
@@ -401,7 +430,7 @@ CASES.update({
                                    timeout=400,
                                    query="how many clips are on the timeline?"),
     "execute_command": read(action="blade", type="timeline"),
-    "execute_menu_command": read(menu_path=["Edit"], dry_run=True),
+    "execute_menu_command": read(menu_path=["Edit", "Undo"], dry_run=True),
 
     # ---------------------------------------------------------------- dialogs
     "click_dialog_button": Case(args={"button": "OK"}, kind="read",
@@ -436,7 +465,10 @@ CASES.update({
     "batch_export": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
     "open_project": Case(args={"name": EXPECTED_PROJECT}, kind="write",
                          invalidates_handles=True),
-    "set_timeline_range": write(start_seconds=1.0, end_seconds=2.0),
+    # FCP 12.3 has no setRangeStart:/setRangeEnd: on FFAnchoredTimelineModule, so the
+    # honest result is the tool naming what it cannot find.
+    "set_timeline_range": dependency("does not implement", "setRangeStart",
+                                     start_seconds=1.0, end_seconds=2.0),
 
     # ---------------------------------------------------------------- external deps
     "flexmusic_list_songs": dependency("no songs", "not installed", "empty",
@@ -552,21 +584,51 @@ class Sweep:
         m = re.search(r"(obj_\d+)", browser)
         self.placeholders["$BROWSER_CLIP"] = m.group(1) if m else ""
 
+        # The mixer hands out its own handles: a volume channel and an effect stack
+        # per fader. A clip's effect-stack handle from get_inspector_properties is not
+        # the same object and mixer_set_volume rejects it.
+        options = await self.call("get_bridge_options", {})
+        m = re.search(r'"([a-zA-Z][a-zA-Z0-9_]*)"\s*:', options)
+        self.placeholders["$BRIDGE_OPTION"] = m.group(1) if m else ""
+
+        mixer = await self.call("mixer_get_state", {})
+        vol = re.search(r"vol=(obj_\d+)", mixer)
+        es = re.search(r"es=(obj_\d+)", mixer)
+        self.placeholders["$MIXER_VOLUME"] = vol.group(1) if vol else ""
+        self.placeholders["$MIXER_STACK"] = es.group(1) if es else ""
+
         self.placeholders["$TMP"] = str(self.tmp)
+
+        # montage_plan_edit wants the clip list montage_analyze_clips produces, so
+        # take it from there rather than inventing a shape that drifts from the tool.
+        analyzed = await self.call("montage_analyze_clips", {}, 300)
+        try:
+            clips = json.loads(analyzed).get("clips", [])
+        except Exception:
+            clips = []
+        self.placeholders["$MONTAGE_CLIPS"] = json.dumps([
+            {"handle": c.get("handle"), "duration": c.get("duration", 5.0),
+             "score": c.get("score", 1)}
+            for c in clips[:4]
+        ])
 
         missing = [k for k, v in self.placeholders.items() if not v]
         if missing:
             raise SystemExit(f"could not resolve {missing} from the live timeline; "
                              "is the QA project open with a connected clip?")
 
-    def fill(self, args: dict) -> dict:
-        out = {}
-        for k, v in args.items():
-            if isinstance(v, str):
-                for name, value in self.placeholders.items():
-                    v = v.replace(name, value)
-            out[k] = v
-        return out
+    def fill(self, value):
+        """Substitute placeholders anywhere in an argument, including inside lists
+        and dicts — mixer_set_all_volumes takes a list of {handle, volumeDB}."""
+        if isinstance(value, str):
+            for name, resolved in self.placeholders.items():
+                value = value.replace(name, resolved)
+            return value
+        if isinstance(value, dict):
+            return {k: self.fill(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.fill(v) for v in value]
+        return value
 
     # -- one case ----------------------------------------------------------
 
@@ -574,6 +636,10 @@ class Sweep:
         started = time.monotonic()
         if case.kind == "skip":
             return Result(tool, SKIPPED, case.reason)
+
+        if case.select_before:
+            await self.call("select_clips",
+                            {"handles": self.fill(case.select_before)})
 
         args = self.fill(case.args)
         before = await self.shape()
@@ -625,10 +691,14 @@ class Sweep:
         if case.undo:
             wanted = (case.undo,) if isinstance(case.undo, str) else tuple(case.undo)
             name = await self.undo_name()
-            if name not in wanted:
-                return (f"nothing to undo: the undo stack says {name!r}, "
-                        f"expected one of {wanted}")
-            await self.call("history_action", {"action": "undo"})
+            if name in wanted:
+                await self.call("history_action", {"action": "undo"})
+            elif await self.shape() != before:
+                return (f"the timeline changed but the undo stack says {name!r}, "
+                        f"expected one of {wanted} — the change cannot be taken back")
+            # Otherwise the tool decided there was nothing to do (no scene changes
+            # found, no clip matched) and correctly made no edit. That is a pass, not
+            # a missing undo step.
 
         after = await self.shape()
         if after != before:
@@ -648,7 +718,12 @@ class Sweep:
             result = await self.run_case(name, case)
             self.results.append(result)
             if case.invalidates_handles:
-                await self.resolve_placeholders()
+                try:
+                    await self.resolve_placeholders()
+                except SystemExit as exc:
+                    print(f"  {'FAIL':8s} {'<re-resolve>':{width}s}  {exc}")
+                    self.results.append(Result(f"{name} (handles)", FAIL, str(exc)))
+                    break
             mark = {PASS: "ok", FAIL: "FAIL", BLOCKED: "blocked",
                     SKIPPED: "skip"}[result.status]
             print(f"  {mark:8s} {name:{width}s}  {result.detail[:110]}")

@@ -38,24 +38,6 @@ typedef struct {
 
 // --- Constants ---
 static NSString * const kStructureStorylineName = @"SpliceKit Structure";
-static NSString * const kBasicTitleTemplate =
-    @"Bumper:Opener.localized/Basic Title.localized/Basic Title.moti";
-
-// --- Color definitions (RGBA) ---
-typedef struct { CGFloat r, g, b, a; } SBColor;
-
-static SBColor SBColorForLabel(NSString *label) {
-    NSString *lower = [label lowercaseString];
-    if ([lower hasPrefix:@"intro"])     return (SBColor){0.40, 0.45, 0.55, 0.90};
-    if ([lower hasPrefix:@"outro"])     return (SBColor){0.40, 0.45, 0.55, 0.90};
-    if ([lower hasPrefix:@"verse"])     return (SBColor){0.20, 0.50, 0.85, 0.90};
-    if ([lower hasPrefix:@"chorus"])    return (SBColor){0.95, 0.55, 0.10, 0.90};
-    if ([lower hasPrefix:@"bridge"])    return (SBColor){0.55, 0.25, 0.75, 0.90};
-    if ([lower hasPrefix:@"drop"])      return (SBColor){0.90, 0.15, 0.15, 0.90};
-    if ([lower hasPrefix:@"pre-chorus"])return (SBColor){0.80, 0.45, 0.15, 0.90};
-    if ([lower hasPrefix:@"breakdown"]) return (SBColor){0.30, 0.60, 0.50, 0.90};
-    return (SBColor){0.50, 0.50, 0.50, 0.80}; // default gray
-}
 
 // --- Frame arithmetic helpers ---
 
@@ -85,79 +67,6 @@ static id SB_newGap(SB_CMTime duration, SB_CMTime sampleDuration) {
     if (![gapClass respondsToSelector:gapSel]) return nil;
     return ((id (*)(id, SEL, SB_CMTime, SB_CMTime))objc_msgSend)(
         gapClass, gapSel, duration, sampleDuration);
-}
-
-static id SB_newTitleGenerator(long long durationFrames, int fdNum, int fdDen) {
-    Class genClass = objc_getClass("FFAnchoredGeneratorComponent");
-    if (!genClass) return nil;
-    SEL createSel = NSSelectorFromString(@"newGeneratorForEffectIDContainingSubstring:duration:sampleDuration:");
-    if (![genClass respondsToSelector:createSel]) return nil;
-    SB_CMTime sampleDuration = SB_makeTime(1, fdNum, fdDen);
-    SB_CMTime duration = SB_makeTime(MAX(durationFrames, 1), fdNum, fdDen);
-    return ((id (*)(id, SEL, id, SB_CMTime, SB_CMTime))objc_msgSend)(
-        genClass, createSel, kBasicTitleTemplate, duration, sampleDuration);
-}
-
-// --- Text and color application ---
-
-static BOOL SB_setGeneratorText(id generator, NSString *text) {
-    if (!generator || !text) return NO;
-    SEL effectSel = NSSelectorFromString(@"effect");
-    if (![generator respondsToSelector:effectSel]) return NO;
-    id effect = ((id (*)(id, SEL))objc_msgSend)(generator, effectSel);
-    if (!effect) return NO;
-
-    // Try setText:forField: on the effect
-    SEL setTextSel = NSSelectorFromString(@"setText:forField:");
-    if ([effect respondsToSelector:setTextSel]) {
-        NSAttributedString *attr = [[NSAttributedString alloc] initWithString:text attributes:@{
-            NSFontAttributeName: [NSFont boldSystemFontOfSize:36],
-            NSForegroundColorAttributeName: [NSColor whiteColor],
-        }];
-        // Normalize if possible
-        SEL normSel = NSSelectorFromString(@"_newAttributedString:forField:");
-        if ([effect respondsToSelector:normSel]) {
-            id normalized = ((id (*)(id, SEL, id, NSUInteger))objc_msgSend)(effect, normSel, attr, 0);
-            if (normalized) attr = normalized;
-        }
-        @try {
-            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(effect, setTextSel, attr, 0);
-            // Persist
-            SEL saveSel = NSSelectorFromString(@"saveDirtyTextToEffectValues");
-            if ([effect respondsToSelector:saveSel]) {
-                ((void (*)(id, SEL))objc_msgSend)(effect, saveSel);
-            }
-            return YES;
-        } @catch (NSException *e) {}
-    }
-
-    // Fallback: try CHChannelText
-    SEL chFolderSel = NSSelectorFromString(@"channelFolder");
-    if (![effect respondsToSelector:chFolderSel]) return NO;
-    id folder = ((id (*)(id, SEL))objc_msgSend)(effect, chFolderSel);
-    if (!folder) return NO;
-
-    Class textChannelClass = objc_getClass("CHChannelText");
-    if (!textChannelClass) return NO;
-
-    SEL subchannelsSel = NSSelectorFromString(@"subchannels");
-    if (![folder respondsToSelector:subchannelsSel]) return NO;
-    NSArray *subchannels = ((id (*)(id, SEL))objc_msgSend)(folder, subchannelsSel);
-
-    for (id ch in subchannels) {
-        if ([ch isKindOfClass:textChannelClass]) {
-            SEL setAttrSel = NSSelectorFromString(@"setAttributedString:");
-            if ([ch respondsToSelector:setAttrSel]) {
-                NSAttributedString *attr = [[NSAttributedString alloc] initWithString:text attributes:@{
-                    NSFontAttributeName: [NSFont boldSystemFontOfSize:36],
-                    NSForegroundColorAttributeName: [NSColor whiteColor],
-                }];
-                ((void (*)(id, SEL, id))objc_msgSend)(ch, setAttrSel, attr);
-                return YES;
-            }
-        }
-    }
-    return NO;
 }
 
 // --- Removal ---

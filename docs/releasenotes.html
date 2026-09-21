@@ -354,7 +354,7 @@
 
 			<ul>
 				<li><strong>LiveCam</strong> &mdash; native webcam booth that records direct to your Library or active timeline without leaving Final Cut Pro. Live preview with looks, color/exposure/contrast/saturation/temperature/sharpness/glow adjustments, audio meter, mirror, date/time stamp overlay, and Library / Timeline placement (Append, At Playhead, or Connected Above). Subject-lift green screen uses Visions <code>VNGenerateForegroundInstanceMaskRequest</code> (macOS 14+) for a tight, edge-aware matte that works on people and objects, with a custom Metal pipeline that runs joint-bilateral edge refinement, signed choke, temporal smoothing, spill suppression, and light wrap every frame; falls back to person segmentation on macOS 12-13.</li>
-				<li><strong>Transparent recording</strong> &mdash; pick &ldquo;Transparent&rdquo; as the green-screen color and LiveCam writes ProRes 4444 with a real alpha plane via <code>CIRenderDestination</code> + <code>kVTCompressionPropertyKey_AlphaChannelMode</code>, so the clip drops onto your timeline ready to composite without an external keyer. Open via the LiveCam toolbar button, the Enhancements menu, the Command Palette, or <code>liveCam.show</code> / <code>open_livecam</code>.</li>
+				<li><strong>Transparent recording</strong> &mdash; pick &ldquo;Transparent&rdquo; as the green-screen color and LiveCam writes ProRes 4444 with a real alpha plane via <code>CIRenderDestination</code> + <code>kVTCompressionPropertyKey_AlphaChannelMode</code>, so the clip drops onto your timeline ready to composite without an external keyer. Open via the LiveCam toolbar button, the Enhancements menu, the Command Palette, or <code>liveCam.show</code> / <code>livecam_open</code>.</li>
 			</ul>
 
 			<h2>🔨 Improvements</h2>

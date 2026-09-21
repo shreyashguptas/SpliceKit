@@ -3773,41 +3773,6 @@ static BOOL SpliceKitCaption_isGeneratorTitleObject(id obj) {
     return NO;
 }
 
-static id SpliceKitCaption_hostItemForTime(id sequence, double seconds, int timescale) {
-    id primary = SpliceKitCaption_primaryObjectForSequence(sequence);
-    if (!primary) return nil;
-
-    SpliceKitCaption_CMTime targetTime = SpliceKitCaption_makeCMTime(seconds, timescale);
-    SEL containedAtTimeSel = NSSelectorFromString(@"containedItemAtTime:");
-    if ([primary respondsToSelector:containedAtTimeSel]) {
-        id item = ((id (*)(id, SEL, SpliceKitCaption_CMTime))objc_msgSend)(
-            primary, containedAtTimeSel, targetTime);
-        if (item) return item;
-    }
-
-    SEL itemsSel = NSSelectorFromString(@"containedItems");
-    NSArray *items = [primary respondsToSelector:itemsSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(primary, itemsSel)
-        : nil;
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return nil;
-
-    id bestItem = nil;
-    double bestStart = -DBL_MAX;
-
-    for (id item in items) {
-        double start = 0.0, end = 0.0;
-        if (SpliceKitCaption_effectiveRangeForObject(primary, item, &start, &end)) {
-            if (seconds >= start && seconds <= end) return item;
-            if (start <= seconds && start > bestStart) {
-                bestStart = start;
-                bestItem = item;
-            }
-        }
-    }
-
-    return bestItem ?: [items lastObject];
-}
-
 static BOOL SpliceKitCaption_setChannelDouble(id channel, double value) {
     if (!channel) return NO;
     @try {
@@ -3829,39 +3794,6 @@ static id SpliceKitCaption_subChannel(id parentChannel, NSString *axis) {
     SEL selector = NSSelectorFromString(selectorName);
     if (![parentChannel respondsToSelector:selector]) return nil;
     return ((id (*)(id, SEL))objc_msgSend)(parentChannel, selector);
-}
-
-static BOOL SpliceKitCaption_applyTransformToTitle(id titleObject, CGFloat yOffset, CGFloat scalePercent) {
-    if (!titleObject) return NO;
-
-    @try {
-        Class cutawayEffects = objc_getClass("FFCutawayEffects");
-        if (!cutawayEffects) return NO;
-
-        SEL transformSel = NSSelectorFromString(@"transformEffectForObject:createIfAbsent:");
-        if (![cutawayEffects respondsToSelector:transformSel]) return NO;
-
-        id xformEffect = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-            cutawayEffects, transformSel, titleObject, YES);
-        if (!xformEffect) return NO;
-
-        id position3D = [xformEffect respondsToSelector:NSSelectorFromString(@"positionChannel3D")]
-            ? ((id (*)(id, SEL))objc_msgSend)(xformEffect, NSSelectorFromString(@"positionChannel3D"))
-            : nil;
-        id scale3D = [xformEffect respondsToSelector:NSSelectorFromString(@"scaleChannel3D")]
-            ? ((id (*)(id, SEL))objc_msgSend)(xformEffect, NSSelectorFromString(@"scaleChannel3D"))
-            : nil;
-
-        BOOL changed = NO;
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(position3D, @"x"), 0.0);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(position3D, @"y"), yOffset);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(scale3D, @"x"), scalePercent);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(scale3D, @"y"), scalePercent);
-        return changed;
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Captions] Failed to apply title transform: %@", e.reason);
-    }
-    return NO;
 }
 
 static BOOL SpliceKitCaption_applyGeneratorPositionYOffset(id titleObject, CGFloat yOffset) {

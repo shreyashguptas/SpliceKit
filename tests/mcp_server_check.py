@@ -463,6 +463,12 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "beat_sync_blade": {"file_path": str(workdir / "missing.wav")},
         "song_structure_blocks": {"file_path": str(workdir / "missing.wav")},
         "song_structure_sections": {"file_path": str(workdir / "missing.wav")},
+        "montage_plan_edit": {
+            "beats": "[0.0, 1.0, 2.0]",
+            "clips": '[{"handle": "obj_1", "duration": 1.0, "score": 1.0}]',
+            "style": "beat",
+        },
+        "playback_action": {"action": "goToStart"},
     }
 
 

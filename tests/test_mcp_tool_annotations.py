@@ -178,9 +178,9 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "mixer_open_bus_effect",
             "mixer_set_bus_effect_enabled",
             "mixer_remove_bus_effect",
-            "open_livecam",
-            "close_livecam",
-            "get_livecam_status",
+            "livecam_open",
+            "livecam_close",
+            "livecam_status",
         }
         self.assertTrue(expected.issubset(self.tools.keys()))
 
@@ -196,11 +196,13 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "timeline_destructive_action": {"readOnlyHint": False, "destructiveHint": True},
             "history_action": {"readOnlyHint": False, "destructiveHint": True},
             "call_method": {"readOnlyHint": False, "destructiveHint": True},
-            "manage_handles": {"readOnlyHint": False, "destructiveHint": False},
             "list_handles": {"readOnlyHint": True, "destructiveHint": False},
-            "open_livecam": {"readOnlyHint": False, "destructiveHint": False},
-            "close_livecam": {"readOnlyHint": False, "destructiveHint": False},
-            "get_livecam_status": {"readOnlyHint": True, "destructiveHint": False},
+            "inspect_handle": {"readOnlyHint": True, "destructiveHint": False},
+            "release_handle": {"readOnlyHint": False, "destructiveHint": False},
+            "release_all_handles": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_open": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_close": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_status": {"readOnlyHint": True, "destructiveHint": False},
         }
         for name, expected in checks.items():
             annotations = self.tools[name]["annotations"]
@@ -759,9 +761,9 @@ class MCPToolAnnotationTests(unittest.TestCase):
 
         self.module.bridge.call = fake_call
 
-        self.module.open_livecam()
-        self.module.close_livecam()
-        self.module.get_livecam_status()
+        self.module.livecam_open()
+        self.module.livecam_close()
+        self.module.livecam_status()
 
         self.assertEqual(
             calls,

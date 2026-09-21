@@ -49,10 +49,29 @@ NSArray *SpliceKit_classesInImage(const char *imageName);
 NSDictionary *SpliceKit_methodsForClass(Class cls);
 NSArray *SpliceKit_allLoadedClasses(void);
 
+#pragma mark - Bridge allowed values (RPC validation)
+
+NSString *SpliceKit_joinAllowedValues(NSArray<NSString *> *values);
+NSString *SpliceKit_errorUnknownValue(NSString *label,
+                                      NSString *value,
+                                      NSArray<NSString *> *allowed,
+                                      NSString *hintTool);
+NSArray<NSString *> *SpliceKit_debugPresetNames(void);
+NSArray<NSString *> *SpliceKit_debugResetConfigScopes(void);
+NSDictionary<NSString *, NSString *> *SpliceKit_playbackActionMap(void);
+NSArray<NSString *> *SpliceKit_playbackActionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeBooleanOptionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeValueOptionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeOptionNames(void);
+NSArray<NSString *> *SpliceKit_directTimelineActionNames(void);
+NSArray<NSString *> *SpliceKit_captionStylePresetIDs(void);
+
 // Run a block on the main thread and wait for it to finish.
 // Uses CFRunLoopPerformBlock so it works even during modal dialogs
 // (dispatch_sync deadlocks in that situation because the main queue stalls).
 void SpliceKit_executeOnMainThread(dispatch_block_t block);
+// Running total of main-thread dispatches abandoned at the 20s timeout.
+unsigned SpliceKit_mainThreadDispatchTimeoutCount(void);
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block);
 BOOL SpliceKit_isMainThreadInRPCDispatch(void);
 

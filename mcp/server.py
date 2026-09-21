@@ -232,7 +232,8 @@ SPEECH / TEXT-BASED EDITING (SpliceKit's Text-Based Editor, not FCP's Transcribe
   open_transcript, get_transcript, search_transcript, delete_transcript_words,
   move_transcript_words, delete_transcript_silences, set_transcript_speaker,
   set_silence_threshold. Captions: open_captions, set_caption_style, set_caption_grouping,
-  generate_captions, verify_captions, generate_native_captions, cleanup_temp_projects.
+  generate_captions, verify_captions, generate_native_captions, remove_captions,
+  cleanup_temp_projects.
 UNDO / GROUPING: history_action("undo" | "redo"). begin_edit("Rough cut") ... end_edit() makes
   everything in between ONE undo step (Flexo's internal term: one undoable action) -- always
   call end_edit.
@@ -252,10 +253,10 @@ FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_
   search_commands / execute_command (the Command
   Palette's commands).
 ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_object_property,
-  raw_call, debug_eval; explore_class / search_methods find a selector; manage_handles releases
+  raw_call, debug_eval; explore_class / search_methods find a selector; release_all_handles releases
   handles. lua_execute runs Lua inside FCP.
 Not routed here on purpose (developer tooling; their docstrings say what they do): debug_*,
-  visionpro_*, livecam, events_*, plugin_*, bridge_* internals, runtime introspection beyond
+  visionpro_*, livecam_*, events_*, plugin_*, bridge_* internals, runtime introspection beyond
   explore_class / search_methods, lua extras, deploy_and_restart.
 
 ## The action dispatchers (FCP's own commands on the current selection / playhead)
@@ -371,7 +372,7 @@ READ_ONLY_TOOLS = {
     "list_effects",
     "list_transitions",
     "search_commands",
-    "get_livecam_status",
+    "livecam_status",
     "visionpro_status",
     "visionpro_list_clients",
     "list_menus",
@@ -386,7 +387,7 @@ READ_ONLY_TOOLS = {
     "detect_beats",
     "analyze_song_structure",
     "toggle_structure_blocks",
-    "get_sections",
+    "sections_get",
     "flexmusic_list_songs",
     "flexmusic_get_song",
     "flexmusic_get_timing",
@@ -481,13 +482,14 @@ DESTRUCTIVE_TOOLS = {
     "export_captions_srt",
     "export_captions_txt",
     "generate_native_captions",
+    "remove_captions",
     "cleanup_temp_projects",
     "blade_scene_changes",
     "beat_sync_blade",
     "song_structure_blocks",
     "song_structure_sections",
     "remove_structure_blocks",
-    "hide_sections",
+    "sections_hide",
     "ai_command_gemma",
     "deploy_and_restart",
     "lua_execute",
@@ -514,7 +516,6 @@ LOCAL_WRITE_TOOLS = {
     "begin_edit",
     "capture_clip_frame",
     "close_captions",
-    "close_livecam",
     "close_transcript",
     "debug_breakpoint",
     "debug_crash_handler",
@@ -534,7 +535,8 @@ LOCAL_WRITE_TOOLS = {
     "export_xml",
     "hide_command_palette",
     "import_srt_as_markers",
-    "manage_handles",
+    "livecam_close",
+    "livecam_open",
     "mark_scene_changes",
     "mixer_open_bus_effect",
     "mixer_set_mute",
@@ -542,7 +544,6 @@ LOCAL_WRITE_TOOLS = {
     "mixer_volume_begin",
     "mixer_volume_end",
     "open_captions",
-    "open_livecam",
     "open_project",
     "open_transcript",
     "playback_action",
@@ -585,13 +586,13 @@ IDEMPOTENT_LOCAL_WRITE_TOOLS = {
     "assign_role",
     "capture_clip_frame",
     "close_captions",
-    "close_livecam",
     "close_transcript",
     "end_edit",
     "hide_command_palette",
+    "livecam_close",
+    "livecam_open",
     "mixer_volume_begin",
     "mixer_volume_end",
-    "open_livecam",
     "open_project",
     "seek_to_time",
     "select_clip_in_lane",
@@ -617,7 +618,6 @@ CUSTOM_TOOL_TITLES = {
     "batch_export": "Batch Export Clips",
     "verify_action": "Verify Timeline Action",
     "call_method_with_args": "Call Method With Args",
-    "manage_handles": "Manage Object Handles",
     "list_handles": "List Object Handles",
     "inspect_handle": "Inspect Object Handle",
     "release_handle": "Release Object Handle",
@@ -655,9 +655,9 @@ CUSTOM_TOOL_TITLES = {
     "move_transcript_words": "Move Transcript Words",
     "close_transcript": "Close Transcript Panel",
     "search_transcript": "Search Transcript",
-    "open_livecam": "Open LiveCam",
-    "close_livecam": "Close LiveCam",
-    "get_livecam_status": "Get LiveCam Status",
+    "livecam_open": "Open LiveCam",
+    "livecam_close": "Close LiveCam",
+    "livecam_status": "Get LiveCam Status",
     "visionpro_status": "Vision Pro Status",
     "visionpro_open_panel": "Open Vision Pro Panel",
     "visionpro_close_panel": "Close Vision Pro Panel",
@@ -706,8 +706,8 @@ CUSTOM_TOOL_TITLES = {
     "song_structure_sections": "Song Structure Sections",
     "toggle_structure_blocks": "Toggle Structure Blocks",
     "remove_structure_blocks": "Remove Structure Blocks",
-    "get_sections": "Get Sections",
-    "hide_sections": "Hide Sections",
+    "sections_get": "Get Sections",
+    "sections_hide": "Hide Sections",
     "flexmusic_list_songs": "List FlexMusic Songs",
     "flexmusic_get_song": "Get FlexMusic Song",
     "flexmusic_get_timing": "Get FlexMusic Timing",
@@ -757,6 +757,7 @@ CUSTOM_TOOL_TITLES = {
     "export_captions_txt": "Export Captions Text",
     "set_caption_words": "Set Caption Words",
     "generate_native_captions": "Generate Native Captions",
+    "remove_captions": "Remove Captions",
     "cleanup_temp_projects": "Cleanup Temp Import Projects",
     "verify_native_captions": "Verify Native Captions",
     "mark_scene_changes": "Mark Scene Changes",
@@ -920,7 +921,10 @@ def _handle_management_response(action: str, handle: str = "") -> str:
     elif action == "release_all":
         r = bridge.call("object.release", all=True)
     else:
-        return "Usage: manage_handles(action='list|inspect|release|release_all', handle='obj_N')"
+        return (
+            "Unknown handle action. Use list_handles(), inspect_handle(handle), "
+            "release_handle(handle), or release_all_handles()."
+        )
 
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -979,12 +983,18 @@ class BridgeConnection:
             except OSError:
                 pass
 
-    def call(self, method: str, params_dict=None, timeout: float = None, **params) -> dict:
+    def call(self, method: str, params_dict=None, /, *, timeout: float = None, **params) -> dict:
         """Send a JSON-RPC request and wait for the response.
 
         Accepts params as keyword args OR as a single dict positional arg:
             bridge.call("method", key="value")       # kwargs
             bridge.call("method", {"key": "value"})  # dict
+
+        `method` and `params_dict` are positional-only so that an RPC parameter of
+        the same name cannot collide with them. bridge.describe takes a parameter
+        literally called "method", and before this that call raised
+        "got multiple values for argument 'method'" instead of reaching the bridge.
+        An RPC parameter named "timeout" still has to go through the dict form.
 
         `timeout` (seconds) bounds this one round trip instead of the usual READ_TIMEOUT;
         the import-time plugin probe uses it so a Final Cut Pro whose main thread is busy
@@ -1146,8 +1156,11 @@ def _parse_markers_list(value: str) -> list:
     return [{"time": t} for t in times]
 
 
-def _call_or_error(method: str, **params) -> str:
+def _call_or_error(method: str, /, **params) -> str:
     """Call the bridge and return formatted JSON, or an error string.
+
+    `method` is positional-only: an RPC parameter of the same name would otherwise
+    collide with it (see BridgeConnection.call).
 
     This is the common pattern used by most tools — call the bridge,
     check for errors, format the result. Having it in one place means
@@ -1168,8 +1181,10 @@ class BridgeError(Exception):
     pass
 
 
-def _call(method: str, **params) -> dict:
-    """Call the bridge and return the result dict. Raises BridgeError on failure."""
+def _call(method: str, /, **params) -> dict:
+    """Call the bridge and return the result dict. Raises BridgeError on failure.
+
+    `method` is positional-only for the same reason as _call_or_error."""
     r = bridge.call(method, **params)
     if _err(r):
         raise BridgeError(r.get("error", str(r)))
@@ -1206,7 +1221,7 @@ def bridge_status() -> str:
     """Check if SpliceKit is running and get FCP version info."""
     r = bridge.call("system.version")
     if _err(r):
-        return f"SpliceKit NOT connected: {r.get('error', r)}"  # special error message for status
+        return f"Error: SpliceKit not connected: {r.get('error', r)}"
     return _fmt(r)
 
 
@@ -1464,21 +1479,56 @@ def history_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
+PLAYBACK_ACTIONS = (
+    "playPause",
+    "goToStart",
+    "goToEnd",
+    "nextFrame",
+    "prevFrame",
+    "nextFrame10",
+    "prevFrame10",
+    "playAroundCurrent",
+    "playFromStart",
+    "playInToOut",
+    "playReverse",
+    "stopPlaying",
+    "loop",
+    "fastForward",
+    "rewind",
+    "playRate1X",
+    "playRate2X",
+    "playRate4X",
+    "playRate8X",
+    "playRate16X",
+    "playRate32X",
+    "playRateHalf",
+    "playRateMinusHalf",
+    "playRateMinus1X",
+    "playRateMinus2X",
+    "playRateMinus32X",
+)
+
+
+def _playback_action_doc() -> str:
+    return (
+        "Use this tool to move playback state without changing timeline content.\n\n"
+        f"Actions: {', '.join(PLAYBACK_ACTIONS)}\n\n"
+        "For precise speed control, use set_playback_speed() instead."
+    )
+
+
 @splicekit_tool("playback_action")
 def playback_action(action: str) -> str:
-    """Use this tool to move playback state without changing timeline content.
-
-    Actions: playPause, goToStart, goToEnd, nextFrame, prevFrame,
-             nextFrame10, prevFrame10, playAroundCurrent, playFromStart,
-             playInToOut, playReverse, stopPlaying, loop,
-             fastForward, rewind,
-             playRate1X, playRate2X, playRate4X, playRate8X,
-             playRate16X, playRate32X, playRateHalf, playRateMinusHalf,
-             playRateMinus1X, playRateMinus2X, playRateMinus32X
-
-    For precise speed control, use set_playback_speed() instead.
-    """
+    """Use this tool to move playback state without changing timeline content."""
+    if action not in PLAYBACK_ACTIONS:
+        return (
+            f"Error: unknown playback action '{action}'. "
+            f"Available: {', '.join(PLAYBACK_ACTIONS)}"
+        )
     return _call_or_error("playback.action", action=action)
+
+
+playback_action.__doc__ = _playback_action_doc()
 
 
 @splicekit_tool("set_playback_speed")
@@ -1622,7 +1672,14 @@ def mark_scene_changes(
     handle: str = "",
     file_url: str = "",
 ) -> str:
-    """Add markers at detected scene changes on the resolved timeline clip (see detect_scene_changes)."""
+    """Add markers at detected scene changes on the resolved timeline clip (see detect_scene_changes).
+
+    Args:
+        threshold: Scene-cut sensitivity (0.0–1.0). Lower detects more cuts. Default 0.35.
+        sample_interval: Seconds between sampled frames for detection. Default 0.1.
+        handle: Timeline clip handle from get_timeline_clips(); required for compound/multicam.
+        file_url: If set, analyse this media file only; mark is refused (nothing to map onto).
+    """
     params: dict = {
         "threshold": threshold,
         "action": "markers",
@@ -1645,7 +1702,14 @@ def blade_scene_changes(
     handle: str = "",
     file_url: str = "",
 ) -> str:
-    """Blade the timeline at detected scene changes on the resolved timeline clip (see detect_scene_changes)."""
+    """Blade the timeline at detected scene changes on the resolved timeline clip (see detect_scene_changes).
+
+    Args:
+        threshold: Scene-cut sensitivity (0.0–1.0). Lower detects more cuts. Default 0.35.
+        sample_interval: Seconds between sampled frames for detection. Default 0.1.
+        handle: Timeline clip handle from get_timeline_clips(); required for compound/multicam.
+        file_url: If set, analyse this media file only; blade is refused (nothing to map onto).
+    """
     params: dict = {
         "threshold": threshold,
         "action": "blade",
@@ -2065,12 +2129,16 @@ def call_method_with_args(target: str, selector: str, args: str | list = "[]",
                           class_method: bool = True, return_handle: bool = False) -> str:
     """Call any ObjC method with typed arguments via NSInvocation.
 
-    target: class name (e.g. "FFLibraryDocument") or handle ID (e.g. "obj_3")
-    selector: method selector (e.g. "copyActiveLibraries" or "openProjectAtURL:")
-    args: JSON array of typed arguments (as string or list). Each arg is {"type": "...", "value": ...}
-      Types: string, int, double, float, bool, nil, sender, handle, cmtime, selector
-      cmtime value: {"value": 30000, "timescale": 600}
-    return_handle: if true, store the returned object and return its handle ID
+    Args:
+        target: ObjC class name (e.g. "FFLibraryDocument") or retained handle (e.g. "obj_3").
+        selector: Method selector (e.g. "copyActiveLibraries" or "objectAtIndex:").
+        args: JSON array of typed arguments as a string or Python list. Each element is
+            ``{"type": "...", "value": ...}``. Types: string, int, double, float, bool,
+            nil, sender, handle, cmtime, selector. cmtime value example:
+            ``{"value": 30000, "timescale": 600}``.
+        class_method: When True (default), call ``+[target selector]``; when False, call on the
+            handle instance ``-[target selector]``.
+        return_handle: When True, retain the returned object and include its handle in the response.
 
     Warnings:
       - Selectors with out-parameters (error:, askedRetry:, etc.) are invoked with the raw pointer
@@ -2125,19 +2193,6 @@ def call_method_with_args(target: str, selector: str, args: str | list = "[]",
 # across multiple tool calls. Think of handles as pointers that
 # survive between requests. Always release_all when you're done.
 
-@splicekit_tool("manage_handles")
-def manage_handles(action: str = "list", handle: str = "") -> str:
-    """Use this legacy handle-management tool when you need both inspection and release operations in one interface.
-
-    Actions:
-      list - show all active handles with class names
-      inspect <handle> - get details about a handle
-      release <handle> - release a specific handle
-      release_all - release all handles
-    """
-    return _handle_management_response(action, handle)
-
-
 @splicekit_tool("list_handles")
 def list_handles() -> str:
     """Use this tool to inspect the currently retained bridge object handles."""
@@ -2166,9 +2221,10 @@ def release_all_handles() -> str:
 def get_object_property(handle: str, key: str, return_handle: bool = False) -> str:
     """Use this tool to inspect one property on a retained Objective-C object handle.
 
-    handle: object handle ID (e.g. "obj_3")
-    key: property name (e.g. "displayName", "duration", "containedItems")
-    return_handle: if true, store the returned value as a new handle
+    Args:
+        handle: Retained bridge handle (e.g. "obj_3").
+        key: KVC key or property name (e.g. "displayName", "duration", "containedItems").
+        return_handle: When True, retain the property value and return a new handle for it.
 
     Example: get_object_property("obj_3", "displayName")
     """
@@ -2184,10 +2240,11 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
 
     WARNING: Direct KVC bypasses undo. For undoable edits, use timeline_action() instead.
 
-    handle: object handle ID
-    key: property name
-    value: the value to set (as string, will be converted based on value_type)
-    value_type: string, int, double, bool, nil
+    Args:
+        handle: Retained bridge handle whose property will be written.
+        key: KVC key or property name.
+        value: Value as a string; converted using value_type before sending to the bridge.
+        value_type: One of string, int, double, bool, nil (default string).
     """
     # Convert the string value to the correct Python type before sending to the bridge
     val_spec = {"type": value_type, "value": value}
@@ -2287,7 +2344,14 @@ def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "Sp
     via the otio-fcpx-xml-adapter. Title and transition items (which OTIO doesn't
     model natively) are injected as FCPXML-specific post-processing.
 
-    items: JSON array of timeline items. Each item:
+    Args:
+        event_name: FCP event name embedded in the FCPXML (default "SpliceKit Event").
+        project_name: Sequence/project name in the FCPXML (default "SpliceKit Project").
+        frame_rate: Timeline frame rate as a string: 23.976, 24, 25, 29.97, 30, 48, 50,
+            59.94, or 60 (default "24").
+        width: Project raster width in pixels (default 1920).
+        height: Project raster height in pixels (default 1080).
+        items: JSON array of timeline items (string). Each item:
       {"type": "gap", "duration": 5.0}
       {"type": "gap", "duration": 5.0, "name": "My Gap"}
       {"type": "title", "text": "Hello World", "duration": 5.0}
@@ -3494,7 +3558,14 @@ def search_methods(class_name: str, keyword: str) -> str:
 
 @splicekit_tool("call_method")
 def call_method(class_name: str, selector: str, class_method: bool = True) -> str:
-    """Call a zero-argument ObjC method. For methods WITH arguments, use call_method_with_args instead."""
+    """Call a zero-argument ObjC method. For methods WITH arguments, use call_method_with_args instead.
+
+    Args:
+        class_name: ObjC class name (e.g. "FFLibraryDocument").
+        selector: Zero-argument selector (e.g. "copyActiveLibraries").
+        class_method: When True (default), invoke the class method ``+[class_name selector]``;
+            when False, not supported here — use call_method_with_args with a handle target.
+    """
     r = bridge.call("system.callMethod", className=class_name, selector=selector, classMethod=class_method)
     if _err(r):
         return f"Error: {r.get('error', r)}"
@@ -3503,12 +3574,19 @@ def call_method(class_name: str, selector: str, class_method: bool = True) -> st
 
 @splicekit_tool("raw_call")
 def raw_call(method: str, params: str = "{}") -> str:
-    """Send a raw JSON-RPC call to SpliceKit. Last resort when no other tool fits."""
+    """Send a raw JSON-RPC call to SpliceKit. Last resort when no other tool fits.
+
+    Args:
+        method: Bridge RPC method name (e.g. "timeline.getState").
+        params: JSON object string of keyword arguments for that method (default "{}").
+    """
     try:
         p = json.loads(params)
     except json.JSONDecodeError as e:
         return f"Invalid JSON params: {e}"
     r = bridge.call(method, **p)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
     return _fmt(r)
 
 
@@ -3956,8 +4034,8 @@ def hide_command_palette() -> str:
     return "Command palette closed."
 
 
-@splicekit_tool("open_livecam")
-def open_livecam() -> str:
+@splicekit_tool("livecam_open")
+def livecam_open() -> str:
     """Open the LiveCam panel inside Final Cut Pro."""
     r = bridge.call("liveCam.show")
     if _err(r):
@@ -3965,8 +4043,8 @@ def open_livecam() -> str:
     return _fmt(r)
 
 
-@splicekit_tool("close_livecam")
-def close_livecam() -> str:
+@splicekit_tool("livecam_close")
+def livecam_close() -> str:
     """Close the LiveCam panel."""
     r = bridge.call("liveCam.hide")
     if _err(r):
@@ -3974,8 +4052,8 @@ def close_livecam() -> str:
     return _fmt(r)
 
 
-@splicekit_tool("get_livecam_status")
-def get_livecam_status() -> str:
+@splicekit_tool("livecam_status")
+def livecam_status() -> str:
     """Get the current LiveCam panel state, selected devices, recording flags, and destination."""
     r = bridge.call("liveCam.status")
     if _err(r):
@@ -6035,7 +6113,7 @@ def get_audio_levels(handle: str = "", handles: list[str] | None = None,
     if end_seconds is not None:
         params["endSeconds"] = float(end_seconds)
     # Decoding runs per clip in a helper process; a whole timeline can take minutes.
-    r = bridge.call("timeline.getAudioLevels", params_dict=params, timeout=180.0 if handle else 600.0)
+    r = bridge.call("timeline.getAudioLevels", params, timeout=180.0 if handle else 600.0)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
@@ -7877,8 +7955,8 @@ def song_structure_sections(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@splicekit_tool("get_sections")
-def get_sections() -> str:
+@splicekit_tool("sections_get")
+def sections_get() -> str:
     """Get the current sections displayed in the timeline sections bar."""
     r = bridge.call("sections.get")
     if _err(r):
@@ -7886,8 +7964,8 @@ def get_sections() -> str:
     return _fmt(r)
 
 
-@splicekit_tool("hide_sections")
-def hide_sections() -> str:
+@splicekit_tool("sections_hide")
+def sections_hide() -> str:
     """Hide the sections bar from the timeline."""
     r = bridge.call("sections.hide")
     if _err(r):
@@ -8023,25 +8101,55 @@ def montage_analyze_clips(event_name: str = "") -> str:
 
 
 @splicekit_tool("montage_plan_edit")
-def montage_plan_edit(beats: str, clips: str, style: str = "bar", total_duration: float = 0) -> str:
+def montage_plan_edit(beats: str, clips: str, style: str = "beat",
+                      bars: str = "", sections: str = "",
+                      total_duration: float = 0) -> str:
     """Create an edit decision list (EDL) that maps clips to musical beats.
 
     Takes beat/bar timing data and scored clips, then creates a plan
     that assigns the best clips to each musical segment.
 
+    Each style cuts on a different list, and the list it needs must be supplied:
+    "beat" uses `beats`, "bar" uses `bars`, "section" uses `sections` (falling back
+    to `bars`). flexmusic_get_timing returns all three for a song.
+
     Args:
         beats: JSON array of beat timestamps in seconds (from flexmusic_get_timing).
         clips: JSON array of clip objects with handle, duration, score (from montage_analyze_clips).
         style: Cut rhythm - "beat" (every beat), "bar" (every bar/measure), "section" (at sections).
-        total_duration: Total montage duration in seconds (0 = sum of available clips).
+        bars: JSON array of bar timestamps in seconds. Required when style="bar".
+        sections: JSON array of section-boundary timestamps in seconds. Used when
+                  style="section"; falls back to `bars` when empty.
+        total_duration: Total montage duration in seconds (0 = the last cut point).
 
     Returns an edit decision list with clip assignments, in/out points, and timeline positions.
     """
     import json as _json
-    beats_arr = _json.loads(beats) if isinstance(beats, str) else beats
-    clips_arr = _json.loads(clips) if isinstance(clips, str) else clips
-    r = bridge.call("montage.planEdit", beats=beats_arr, clips=clips_arr,
-                     style=style, totalDuration=total_duration)
+
+    def _arr(value):
+        if not value:
+            return []
+        return _json.loads(value) if isinstance(value, str) else value
+
+    beats_arr, bars_arr, sections_arr = _arr(beats), _arr(bars), _arr(sections)
+    clips_arr = _arr(clips)
+
+    # The default used to be "bar" while this tool sent no bars at all, so every call
+    # that did not override style failed with "Not enough timing data" no matter what
+    # was passed. Say which list is missing instead of making the caller guess.
+    needed = {"beat": ("beats", beats_arr), "bar": ("bars", bars_arr),
+              "section": ("sections", sections_arr or bars_arr)}.get(style)
+    if needed is None:
+        return f"Error: style must be one of beat, bar, section (got {style!r})"
+    name, values = needed
+    if len(values) < 2:
+        return (f"Error: style={style!r} cuts on {name}, and {name} has "
+                f"{len(values)} entries; at least 2 are needed. "
+                "flexmusic_get_timing returns beats, bars and sections for a song.")
+
+    r = bridge.call("montage.planEdit", beats=beats_arr, bars=bars_arr,
+                    sections=sections_arr, clips=clips_arr,
+                    style=style, totalDuration=total_duration)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
@@ -8802,7 +8910,56 @@ def direct_timeline_action(action: str = "", selector: str = "",
               nudgeAnchoredItems, nudgeSpineItems (frames for whole frames, amount for
               seconds; default one project frame when neither is set)
 
-        selector: Raw ObjC selector for fallback (e.g. "actionValidateAndRepair:validateMode:error:")
+        selector: Raw ObjC selector fallback when action is empty (e.g.
+            "actionValidateAndRepair:validateMode:error:"). Passed through to timeline.directAction.
+
+    Shared parameters (only sent when non-default; each action uses a subset):
+
+        Retiming / speed (retimeSetRate, retimeSpeedRamp, retimeInstantReplay, retimeJumpCut,
+        retimeRewind, retimeSetInterpolation, insertFreezeFrame, …):
+            rate: Playback rate for retimeSetRate / retimeInstantReplay (0 skips sending).
+            ripple: When True, ripple the retime to following clips (retimeSetRate).
+            allow_variable_speed: When False, disallow variable-speed retime paths (default True).
+            to_zero: Speed ramp toward zero (retimeSpeedRamp).
+            from_zero: Speed ramp from zero (retimeSpeedRamp).
+            frames_to_jump: Frame count for retimeJumpCut (>0 to send).
+            speed: Rewind speed for retimeRewind (non-zero to send).
+            interpolation: Interpolation mode string for retimeSetInterpolation.
+            add_title: For retimeInstantReplay, whether to add a title (default True; False to send).
+
+        Markers (changeMarkerType, changeMarkerName, markMarkerCompleted, removeMarker):
+            type_: Marker kind for changeMarkerType: "chapter", "todo", or "note".
+            name: New marker name for changeMarkerName / renameDirect / newProject / newEvent.
+            marker: Handle of the marker object (from list_markers).
+            completed: When True, mark a to-do marker completed (markMarkerCompleted).
+
+        Audio (changeAudioVolume, applyAudioFadesDirect, setAudioPlayEnable, setBackgroundMusic):
+            amount: Volume change in dB for changeAudioVolume (non-zero to send).
+            relative: When False, set absolute volume instead of relative (default True).
+            fade_in: When False, apply fade-out only for applyAudioFadesDirect (default True).
+            duration: Fade duration in seconds for applyAudioFadesDirect (non-zero to send).
+            enabled: When False, disable audio play or background music (default True).
+
+        Trim / edit (splitAtTime, trimDuration, removeEdits, joinThroughEdits, nudge*, …):
+            time: Timeline seconds for splitAtTime (>=0 to send; omit for playhead).
+            is_delta: Trim mode flag for trimDuration.
+            replace_with_gap: When True, removeEdits leaves a gap instead of ripple.
+            on_edges / on_left: Ignored on FCP 12.3 for joinThroughEdits (reported in response).
+            frames: Whole frames to nudge (nudgeAnchoredItems, nudgeSpineItems).
+            amount: Seconds to nudge when frames is 0; also used by changeAudioVolume.
+
+        Effects / keywords:
+            effect_id: Effect identifier for removeEffectByID.
+            keywords: Comma-separated keyword strings for addKeywords / removeKeywords.
+
+        Captions / multicam / variants:
+            language: Language code for duplicateCaptions.
+            format_: Export format for duplicateCaptions (e.g. "SRT").
+            multicam: When True, createCompoundClipDirect builds a multicam compound.
+            as_split: When True, alignClipsAtMusicMarkers uses split mode.
+
+        Misc:
+            store_result: When True, retain a direct-action result object as a handle.
 
     Nudge amount (nudgeAnchoredItems, nudgeSpineItems): pass frames=N to move N whole
     frames, or amount=S to move S seconds. Omit both for a one-frame nudge.
@@ -9412,6 +9569,7 @@ def generate_captions(style: str = "", position: str = "center",
 
     Returns the number of caption clips generated, import status,
     and self-verification results (text, fontSize, fontFamily).
+    Remove pasted title captions with remove_captions(native=False).
     """
     params = {}
     if style:
@@ -9521,6 +9679,7 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
         format: Caption format - "ITT" (default), "SRT", or "CEA608"
 
     Returns the number of native captions created and their placement status.
+    Remove them later with remove_captions(native=True).
     """
     params = {
         "grouping": grouping,
@@ -9568,6 +9727,81 @@ def verify_native_captions() -> str:
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
+
+
+def _format_caption_removal_item(row: dict) -> str:
+    label = row.get("displayName") or row.get("text") or row.get("class") or "?"
+    text = row.get("text")
+    if text and text != label:
+        return f'  "{label}" — {text}'
+    return f'  "{label}"'
+
+
+def _render_remove_captions(r: dict) -> str:
+    native = r.get("native", True)
+    pipeline = (
+        "native FFAnchoredCaption (generate_native_captions)"
+        if native
+        else "Motion title captions (generate_captions)"
+    )
+    found = int(r.get("foundCount", 0))
+    removed = int(r.get("removedCount", 0))
+    not_removed = r.get("notRemoved") or []
+    items = r.get("items") or []
+
+    if r.get("dryRun"):
+        if found == 0:
+            return f"Dry run: no {pipeline} items found on the timeline."
+        lines = [f"Dry run — would remove {found} {pipeline} item(s):"]
+        for row in items:
+            lines.append(_format_caption_removal_item(row))
+        return "\n".join(lines)
+
+    if found == 0:
+        return f"No {pipeline} items found on the timeline."
+
+    lines = [
+        f"Removed {removed} of {found} {pipeline} item(s) "
+        f"(Edit > Undo \"Remove Captions\")."
+    ]
+    if not_removed:
+        lines.append(f"Could not remove {len(not_removed)} item(s):")
+        for row in not_removed:
+            line = _format_caption_removal_item(row).lstrip()
+            reason = row.get("reason")
+            if reason:
+                line += f" — {reason}"
+            lines.append(f"  {line}")
+    elif removed and items:
+        lines.append("Removed:")
+        for row in items[:min(len(items), removed)]:
+            lines.append(_format_caption_removal_item(row))
+    return "\n".join(lines)
+
+
+@splicekit_tool("remove_captions")
+def remove_captions(native: bool = True, dry_run: bool = False) -> str:
+    """Delete caption items from the open sequence.
+
+    Removes captions placed by SpliceKit caption pipelines — not scratch import
+    projects (use cleanup_temp_projects for those).
+
+    Args:
+        native: When True (default), delete FCP native ``FFAnchoredCaption`` objects
+            from the caption lane (the pipeline behind generate_native_captions).
+            When False, delete connected Motion title clips produced by
+            generate_captions (social-style title captions).
+        dry_run: When True, report how many caption items would be removed without
+            changing the timeline.
+
+    Reports foundCount and removedCount separately. Only caption items from the
+    chosen pipeline are considered; ordinary clips are never touched. Any item
+    the bridge could not delete is listed under notRemoved with a reason.
+    """
+    r = bridge.call("nativeCaptions.remove", native=native, dryRun=dry_run)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _render_remove_captions(r)
 
 
 # ── Lua Scripting ────────────────────────────────────────────────────────────
@@ -9758,7 +9992,11 @@ def reload_plugin_tools() -> str:
     added = _register_plugin_tools()
     if added:
         _forbid_unknown_tool_arguments()  # newly registered tools need it too
-    return json.dumps({"added": added, "total_plugin_tools": len(_registered_plugin_tools), "status": "ok"})
+    total = len(_registered_plugin_tools)
+    return (
+        f"Plugin tools reloaded: {added} new tool(s) registered "
+        f"({total} plugin tool(s) total). Re-list MCP tools to see new names."
+    )
 
 
 # ============================================================
@@ -10005,7 +10243,7 @@ get_timeline_clips() returns handles for each item — use handles in subsequent
 
 ## Error Recovery
 - timeline_action("undo") to reverse the last edit
-- manage_handles(action="release_all") to clean up leaked object handles
+- release_all_handles() to clean up leaked object handles
 - bridge_status() to check if the connection is still alive
 """
 
@@ -10300,6 +10538,37 @@ def _primary_storyline_targets_from_playhead(clip_count: int) -> tuple[list[dict
     return targets, None
 
 
+def _format_batch_clip_results(title: str, undo_name: str, clips_out: list[dict],
+                               applied: int, extra_line: str = "") -> str:
+    """Human-readable summary for batch_apply_effect / batch_color_correct."""
+    total = len(clips_out)
+    errors = total - applied
+    lines = [f"{title}: {applied} of {total} clip(s) applied (Edit > Undo \"{undo_name}\")"]
+    if errors:
+        lines.append(f"  Errors: {errors}")
+    if extra_line:
+        lines.append(f"  {extra_line}")
+    for c in clips_out:
+        ok = c.get("success")
+        tag = "ok" if ok else "FAILED"
+        head = f"  [{tag}] {c.get('handle', '?')} \"{c.get('name', '')}\""
+        if c.get("index") is not None:
+            head += f" (spine {c['index']}"
+            start = c.get("start_seconds")
+            if isinstance(start, (int, float)):
+                head += f" @ {float(start):.3f}s"
+            head += ")"
+        if ok:
+            if c.get("effect"):
+                head += f" — {c['effect']}"
+            elif c.get("correction"):
+                head += f" — {c['correction']}"
+        else:
+            head += f" — {c.get('error', 'unknown error')}"
+        lines.append(head)
+    return "\n".join(lines)
+
+
 def _batch_select_clip_by_handle(handle: str) -> dict | None:
     """Select one spine/connected clip by handle; return bridge error dict or None on success."""
     r = bridge.call("timeline.selectItems", handles=[handle], mode="replace")
@@ -10379,20 +10648,18 @@ def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) 
     finally:
         bridge.call("timeline.endEdit", name=undo_name)
 
-    errors = len(clips_out) - applied
     if applied == 0:
         return (
-            f"Error: batch apply failed on all {len(clips_out)} clip(s): "
-            + json.dumps(clips_out, default=str)
+            "Error: batch apply failed on all "
+            + _format_batch_clip_results("Batch Apply Effect", undo_name, clips_out, 0)
         )
 
-    return json.dumps({
-        "applied": applied,
-        "errors": errors,
-        "total": len(clips_out),
-        "undo": undo_name,
-        "clips": clips_out,
-    }, indent=2, default=str)
+    effect_line = ""
+    if name:
+        effect_line = f"Effect name: {name}"
+    elif effectID:
+        effect_line = f"Effect ID: {effectID}"
+    return _format_batch_clip_results("Batch Apply Effect", undo_name, clips_out, applied, effect_line)
 
 
 @splicekit_tool("batch_color_correct")
@@ -10463,21 +10730,15 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
     finally:
         bridge.call("timeline.endEdit", name=undo_name)
 
-    errors = len(clips_out) - applied
     if applied == 0:
         return (
-            f"Error: batch color correct failed on all {len(clips_out)} clip(s): "
-            + json.dumps(clips_out, default=str)
+            "Error: batch color correct failed on all "
+            + _format_batch_clip_results("Batch Color Correct", undo_name, clips_out, 0,
+                                         f"Correction: {correction}")
         )
 
-    return json.dumps({
-        "applied": applied,
-        "errors": errors,
-        "total": len(clips_out),
-        "correction": correction,
-        "undo": undo_name,
-        "clips": clips_out,
-    }, indent=2, default=str)
+    return _format_batch_clip_results(
+        "Batch Color Correct", undo_name, clips_out, applied, f"Correction: {correction}")
 
 
 # ============================================================

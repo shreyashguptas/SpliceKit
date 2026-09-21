@@ -9,6 +9,7 @@ address overrides and the reported version.
 import inspect
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -250,16 +251,26 @@ class ServerV2Tests(unittest.TestCase):
         m.bridge.call = fake_call
         return calls, original
 
+    def _batch_applied_total(self, text: str) -> tuple[int, int]:
+        m = re.search(r":\s*(\d+)\s+of\s+(\d+)\s+clip", text)
+        self.assertIsNotNone(m, text)
+        return int(m.group(1)), int(m.group(2))
+
+    @staticmethod
+    def _batch_handles(text: str) -> list[str]:
+        return re.findall(r"\[(?:ok|FAILED)\] (obj_\w+)", text)
+
     def test_batch_loops_iterate_actual_clips_and_never_repeat_one(self):
         m = self.module
 
         # (a) playhead at timeline start -> all three clips, once each
         calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
         try:
-            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
-            self.assertEqual(out["total"], 3)
-            self.assertEqual(out["applied"], 3)
-            handles = [c["handle"] for c in out["clips"]]
+            out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
+            applied, total = self._batch_applied_total(out)
+            self.assertEqual(total, 3)
+            self.assertEqual(applied, 3)
+            handles = self._batch_handles(out)
             self.assertEqual(handles, ["obj_a", "obj_b", "obj_c"])
             self.assertEqual(len(set(handles)), 3)
             action_calls = [p for meth, p in calls if meth == "timeline.action"]
@@ -271,18 +282,20 @@ class ServerV2Tests(unittest.TestCase):
         # (b) playhead inside second clip -> second and third only
         calls, original = self._install_batch_bridge(self._three_clip_detailed_state(15.0))
         try:
-            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
-            self.assertEqual(out["total"], 2)
-            self.assertEqual([c["handle"] for c in out["clips"]], ["obj_b", "obj_c"])
+            out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
+            applied, total = self._batch_applied_total(out)
+            self.assertEqual(total, 2)
+            self.assertEqual(self._batch_handles(out), ["obj_b", "obj_c"])
         finally:
             m.bridge.call = original
 
         # (c) clip_count limits to first target only
         calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
         try:
-            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=1))
-            self.assertEqual(out["total"], 1)
-            self.assertEqual(out["clips"][0]["handle"], "obj_a")
+            out = m.batch_color_correct(correction="addColorBoard", clip_count=1)
+            applied, total = self._batch_applied_total(out)
+            self.assertEqual(total, 1)
+            self.assertEqual(self._batch_handles(out), ["obj_a"])
         finally:
             m.bridge.call = original
 
@@ -309,8 +322,8 @@ class ServerV2Tests(unittest.TestCase):
         ]
         calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0, items=spine))
         try:
-            out = json.loads(m.batch_apply_effect(name="Gaussian Blur", clip_count=0))
-            result_handles = [c["handle"] for c in out["clips"]]
+            out = m.batch_apply_effect(name="Gaussian Blur", clip_count=0)
+            result_handles = self._batch_handles(out)
             self.assertEqual(result_handles, ["obj_a", "obj_b"])
             self.assertNotIn("obj_gap", result_handles)
             self.assertNotIn("obj_xfade", result_handles)
@@ -323,10 +336,11 @@ class ServerV2Tests(unittest.TestCase):
             fail_select_handle="obj_b",
         )
         try:
-            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
-            self.assertEqual(out["total"], 3)
-            self.assertEqual(out["applied"], 2)
-            self.assertFalse(out["clips"][1]["success"])
+            out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
+            applied, total = self._batch_applied_total(out)
+            self.assertEqual(total, 3)
+            self.assertEqual(applied, 2)
+            self.assertIn("[FAILED] obj_b", out)
             begin_idxs = [i for i, (meth, _) in enumerate(calls) if meth == "timeline.beginEdit"]
             end_idxs = [i for i, (meth, _) in enumerate(calls) if meth == "timeline.endEdit"]
             self.assertEqual(len(begin_idxs), 1)
