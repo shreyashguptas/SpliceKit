@@ -10119,21 +10119,23 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            // Show folder picker
-            NSURL *folderURL = nil;
-            if (folderPath) {
-                folderURL = [NSURL fileURLWithPath:folderPath];
-            } else {
-                NSOpenPanel *openPanel = [NSOpenPanel openPanel];
-                openPanel.canChooseFiles = NO;
-                openPanel.canChooseDirectories = YES;
-                openPanel.canCreateDirectories = YES;
-                openPanel.prompt = @"Export Here";
-                openPanel.message = @"Choose destination folder for batch export";
-                NSModalResponse resp = [openPanel runModal];
-                if (resp != NSModalResponseOK) { result = @{@"status": @"cancelled"}; return; }
-                folderURL = openPanel.URL;
+            // `folder` is required over the bridge.
+            //
+            // This used to open an NSOpenPanel and call -runModal right here — inside the
+            // bridge's own main-thread dispatch. That parks the main thread in a modal run
+            // loop, so the bridge's 20-second watchdog gives up and abandons the work with
+            // the panel still on screen and the export half-run. It is also the shape that
+            // has crashed Final Cut Pro before: a modal run loop reached from a bridge call,
+            // with an undo transaction open. And nothing could have answered the panel
+            // anyway — a save/open panel cannot be confirmed over the bridge, only cancelled.
+            if (folderPath.length == 0) {
+                result = @{@"error": @"batch_export needs a `folder` to export into. The "
+                                     @"folder picker can only be answered by a person at the "
+                                     @"machine, and a save/open panel cannot be confirmed "
+                                     @"over the bridge. Pass folder=\"/path/to/output\"."};
+                return;
             }
+            NSURL *folderURL = [NSURL fileURLWithPath:folderPath];
             if (!folderURL) { result = @{@"error": @"No folder selected"}; return; }
             [[NSFileManager defaultManager] createDirectoryAtURL:folderURL
                                      withIntermediateDirectories:YES attributes:nil error:nil];
@@ -23749,16 +23751,136 @@ static NSDictionary *SpliceKit_handleMixerSetAllVolumes(NSDictionary *params) {
 
 #pragma mark - Share/Export Handler
 
+// The title of the item Final Cut Pro marks as the default share destination, e.g.
+// "Export File (default)…". Main thread only.
+static NSString *SpliceKit_defaultShareDestinationTitle(void) {
+    @try {
+        id app = ((id (*)(id, SEL))objc_msgSend)(
+            objc_getClass("NSApplication"), @selector(sharedApplication));
+        NSMenu *mainMenu = ((id (*)(id, SEL))objc_msgSend)(app, @selector(mainMenu));
+        for (NSMenuItem *fileItem in mainMenu.itemArray) {
+            if (![fileItem.title isEqualToString:@"File"] || !fileItem.hasSubmenu) continue;
+            for (NSMenuItem *shareItem in fileItem.submenu.itemArray) {
+                if (![shareItem.title isEqualToString:@"Share"] || !shareItem.hasSubmenu) continue;
+                NSString *firstEnabled = nil;
+                for (NSMenuItem *dest in shareItem.submenu.itemArray) {
+                    if (dest.isSeparatorItem || dest.title.length == 0) continue;
+                    if ([dest.title containsString:@"(default)"]) return dest.title;
+                    if (!firstEnabled && dest.isEnabled &&
+                        ![dest.title hasPrefix:@"Add Destination"]) {
+                        firstEnabled = dest.title;
+                    }
+                }
+                return firstEnabled;
+            }
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[Share] could not read the Share menu: %@", e.reason);
+    }
+    return nil;
+}
+
+// Fire a File > Share destination without waiting for it.
+//
+// Every share destination opens the Export sheet and sits there until a person answers
+// it. Going through SpliceKit_handleMenuExecute means that sheet opens inside the
+// bridge's own main-thread dispatch, so the 20-second watchdog gives up and reports
+// "main thread stayed busy" with the sheet still on screen — which is exactly what
+// share_project did. The item is located on the main thread (cheap, no modal) and its
+// action is fired on a later turn of the run loop, so the bridge answers immediately and
+// says the sheet is open, the way create_project does.
+static NSDictionary *SpliceKit_shareDestinationAsyncNoWait(NSString *destination) {
+    __block NSMenuItem *target = nil;
+    __block NSMutableArray *available = [NSMutableArray array];
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id app = ((id (*)(id, SEL))objc_msgSend)(
+                objc_getClass("NSApplication"), @selector(sharedApplication));
+            NSMenu *mainMenu = ((id (*)(id, SEL))objc_msgSend)(app, @selector(mainMenu));
+            for (NSMenuItem *fileItem in mainMenu.itemArray) {
+                if (![fileItem.title isEqualToString:@"File"] || !fileItem.hasSubmenu) continue;
+                for (NSMenuItem *shareItem in fileItem.submenu.itemArray) {
+                    if (![shareItem.title isEqualToString:@"Share"] || !shareItem.hasSubmenu) continue;
+                    for (NSMenuItem *dest in shareItem.submenu.itemArray) {
+                        if (dest.isSeparatorItem || dest.title.length == 0) continue;
+                        [available addObject:dest.title];
+                        NSString *bare = [dest.title stringByReplacingOccurrencesOfString:@"…"
+                                                                               withString:@""];
+                        if ([dest.title caseInsensitiveCompare:destination] == NSOrderedSame ||
+                            [bare caseInsensitiveCompare:destination] == NSOrderedSame) {
+                            target = dest;
+                        }
+                    }
+                }
+            }
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[Share] could not read the Share menu: %@", e.reason);
+        }
+    });
+
+    if (!target) {
+        return @{@"error": [NSString stringWithFormat:
+            @"No share destination called '%@' in File > Share. Available: %@",
+            destination, [available componentsJoinedByString:@", "]]};
+    }
+    if (!target.isEnabled) {
+        return @{@"error": [NSString stringWithFormat:
+            @"The share destination '%@' is disabled right now. A project has to be open "
+            @"and, for Share Selection, a range selected.", target.title]};
+    }
+
+    NSString *title = target.title;
+    SEL action = target.action;
+    id actionTarget = target.target;
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+        @try {
+            id app = ((id (*)(id, SEL))objc_msgSend)(
+                objc_getClass("NSApplication"), @selector(sharedApplication));
+            ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+                app, @selector(sendAction:to:from:), action, actionTarget, target);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[Share] async %@ exception: %@", title, e.reason);
+        }
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
+
+    return @{
+        @"status": @"ok",
+        @"destination": title,
+        @"dialogPending": @YES,
+        @"message": [NSString stringWithFormat:
+            @"Final Cut Pro is opening the Export sheet for '%@'. It has to be answered at "
+            @"the machine — the bridge can read it with detect_dialog and cancel it with "
+            @"dismiss_dialog(action=\"cancel\"), but it cannot confirm a save panel.", title]
+    };
+}
+
 static NSDictionary *SpliceKit_handleShareExport(NSDictionary *params) {
     NSString *destination = params[@"destination"]; // optional: specific share destination
 
     if (destination) {
-        // Try to use specific share destination via menu
-        return SpliceKit_handleMenuExecute(@{@"menuPath": @[@"File", @"Share", destination]});
-    } else {
-        // Use default share
-        return SpliceKit_sendAppAction(@"shareDefaultDestination:");
+        return SpliceKit_shareDestinationAsyncNoWait(destination);
     }
+
+    // No destination: use whichever one Final Cut Pro marks as the default.
+    //
+    // This used to send -shareDefaultDestination: down the responder chain. Nothing on
+    // FCP 12.3 answers it, so share_project() with no argument always failed with "No
+    // responder handled shareDefaultDestination:". The default destination is an ordinary
+    // item in File > Share, titled "… (default)", so it is read from the menu and invoked
+    // the same way a named destination is.
+    __block NSString *title = nil;
+    SpliceKit_executeOnMainThread(^{ title = SpliceKit_defaultShareDestinationTitle(); });
+    if (title.length == 0) {
+        return @{@"error": @"No share destination found in File > Share. Add one in Final "
+                           @"Cut Pro's Settings > Destinations, or pass `destination` with "
+                           @"the exact menu title."};
+    }
+    NSDictionary *r = SpliceKit_shareDestinationAsyncNoWait(title);
+    if (![r isKindOfClass:[NSDictionary class]] || r[@"error"]) return r;
+    NSMutableDictionary *out = [r mutableCopy];
+    out[@"usedDefault"] = @YES;
+    return out;
 }
 
 #pragma mark - Library/Project Management

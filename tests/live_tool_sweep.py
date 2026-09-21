@@ -97,6 +97,13 @@ class Case:
     select_before: str = ""
 
 
+# The names SpliceKit's own pipelines generate, matched whole, the same shapes
+# SpliceKit_isScratchImportProjectName and SpliceKit_isScratchImportEventName use.
+SCRATCH_NAME = re.compile(
+    r"^(?:SpliceKit Caption Import \d+|SK Structure \d+|_SKPaste_\d+"
+    r"|SpliceKit Captions|SpliceKit Structure)(?: \d+)*$")
+
+
 def read(expect: str | None = None, timeout: float = 60.0, **args) -> Case:
     return Case(args=args, kind="read", expect=expect, timeout=timeout)
 
@@ -533,8 +540,18 @@ CASES.update({
     "create_project": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
     "create_event": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
     "create_library": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
+    # Opens Final Cut Pro's Export sheet and returns dialogPending straight away; the
+    # sheet is cancelled in cleanup. It used to send -shareDefaultDestination: down the
+    # responder chain, which nothing on FCP 12.3 answers.
     "share_project": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
-    "batch_export": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
+    # Was modal, and so never ran: with no folder it opened a picker from inside the
+    # bridge's main-thread dispatch and hung until the watchdog gave up. It takes a
+    # folder now, so it has a real happy path. Rendering every clip takes a while.
+    # scope="selected" with one clip, not "all": exporting the whole timeline renders
+    # about 840 MB and takes 40 seconds, for no more proof than one clip gives.
+    "batch_export": Case(args={"scope": "selected", "folder": "$EXPORT_DIR"},
+                         kind="write", select_before="$SPINE_CLIP", timeout=300,
+                         expect=r"clips? queued"),
     "open_project": Case(args={"name": EXPECTED_PROJECT}, kind="write",
                          invalidates_handles=True),
     # FCP 12.3 has no setRangeStart:/setRangeEnd: on FFAnchoredTimelineModule, so the
@@ -645,16 +662,30 @@ class Sweep:
         m = re.search(r'"effectStackHandle":\s*"(obj_\d+)"', props)
         self.placeholders["$EFFECT_STACK"] = m.group(1) if m else ""
 
+        # Anything SpliceKit's own pipelines left behind goes before the run reads the
+        # browser. A scratch project left by a previous run's song_structure_blocks or
+        # generate_native_captions is empty, and Final Cut Pro reports an empty, unopened
+        # project as a clip — isProject false, sequenceType "clip" — so it was picked as
+        # $BROWSER_CLIP and handed to add_clip_to_timeline and browser_append_clip, which
+        # refused it once FCP had loaded the sequence and could tell. That is three
+        # failures in a run, caused by the run before it.
+        await self.call("cleanup_temp_projects", {})
+
         # A source clip, not a project: browser_list_clips marks projects with
-        # isProject true, and the place/append tools rightly refuse one.
+        # isProject true, and the place/append tools rightly refuse one. Scratch names are
+        # skipped by name as well, for the empty-project case FCP cannot label correctly.
         browser = await self.call("browser_list_clips", {})
         source = ""
         for block in re.findall(r"\{[^{}]*\}", browser, re.S):
-            if '"isProject": false' in block:
-                h = re.search(r'"handle":\s*"(obj_\d+)"', block)
-                if h:
-                    source = h.group(1)
-                    break
+            if '"isProject": false' not in block:
+                continue
+            name = re.search(r'"name":\s*"([^"]*)"', block)
+            if name and SCRATCH_NAME.match(name.group(1)):
+                continue
+            h = re.search(r'"handle":\s*"(obj_\d+)"', block)
+            if h:
+                source = h.group(1)
+                break
         if not source:
             m = re.search(r"(obj_\d+)", browser)
             source = m.group(1) if m else ""
@@ -721,13 +752,27 @@ class Sweep:
         self.placeholders["$PROBE_MEDIA"] = str(probe)
         self.placeholders["$PROBE_NAME"] = probe.stem
 
+        # batch_export needs somewhere to write. Its own scratch directory, removed with
+        # the rest of self.tmp at the end of the run.
+        export_dir = self.tmp / f"batch-export-{token}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        self.placeholders["$EXPORT_DIR"] = str(export_dir)
+
         # import_url wants a URL. Serving the scratch directory keeps the sweep off the
         # network and still exercises the whole download-and-import path.
         self.placeholders["$PROBE_URL"] = f"{self.serve()}/{probe.name}"
 
+        # The event the QA project lives in — never a "SpliceKit Structure 2" or
+        # "SpliceKit Captions 3" a previous run's pipeline declared, which is what
+        # import_media was handed when the first event in the listing happened to be one
+        # of those. It had been swept away by then, so the import failed outright.
         browser_json = await self.call("browser_list_clips", {})
-        m = re.search(r'"event":\s*"([^"]+)"', browser_json)
-        self.placeholders["$EVENT_NAME"] = m.group(1) if m else ""
+        event = ""
+        for candidate in re.findall(r'"event":\s*"([^"]+)"', browser_json):
+            if not SCRATCH_NAME.match(candidate):
+                event = candidate
+                break
+        self.placeholders["$EVENT_NAME"] = event
 
         # Real FCPXML for the two FCPXML importers: this project, exported, with the
         # project name rewritten so each import lands beside the original instead of

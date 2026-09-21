@@ -2086,17 +2086,17 @@ def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
 @splicekit_tool("batch_export")
 def batch_export(scope: str = "all", folder: str = "") -> str:
     """Batch export every clip from the active timeline as individual files.
-    A folder picker appears once, then all clips are exported automatically
-    with effects/color grading baked in. No further interaction needed.
 
-    If no folder path is given, FCP may open a modal save/open panel. While that
-    panel is open the bridge cannot serve main-thread RPC; bridge_alive still
-    responds. Save/open panels cannot be confirmed from the bridge — only
-    dismiss_dialog(action=\"cancel\") closes them.
+    All clips are exported automatically with effects and color grading baked in.
+
+    `folder` is required. Without it the bridge would have to open a folder picker and
+    wait for someone to answer it, which parks Final Cut Pro's main thread and leaves the
+    export half-run — a save/open panel cannot be confirmed over the bridge at all, only
+    cancelled. Pass the path you want instead; the folder is created if it is not there.
 
     Args:
-        scope: "all" exports every clip, "selected" exports only selected clips
-        folder: Optional output folder path. If empty, a folder picker dialog appears.
+        scope: "all" exports every clip, "selected" exports only selected clips.
+        folder: Output folder path. Required. Created if it does not exist.
     """
     params = {"scope": scope}
     if folder:
@@ -4999,17 +4999,23 @@ def mixer_set_all_volumes(volumes: list) -> str:
 
 @splicekit_tool("share_project")
 def share_project(destination: str = "") -> str:
-    """Share/export the project using a specific or default destination.
+    """Share/export the project using a specific or the default destination.
 
-    May open FCP share or save panels. While a modal save/open panel is open the
-    bridge cannot serve main-thread RPC; bridge_alive still responds. Save/open
-    panels cannot be confirmed from the bridge — only dismiss_dialog(action=\"cancel\")
-    closes them.
+    This starts the export and returns straight away with `dialogPending: true` and the
+    destination it used. It does not finish the export: Final Cut Pro opens its Export
+    sheet and waits for someone at the machine to answer it. The bridge can read that
+    sheet with detect_dialog() and close it with dismiss_dialog(action="cancel"), but it
+    cannot confirm a save panel, so nothing is written until a person clicks through.
+
+    With no destination it uses whichever one Final Cut Pro marks "(default)" in
+    File > Share, and tells you which that was.
 
     Args:
-        destination: Share destination name (e.g. "Export File", "Apple Devices 1080p",
-                     "YouTube & Facebook"). Leave empty for default destination.
-                     Use list_menus(menu="File") to see available Share destinations.
+        destination: Share destination name exactly as File > Share lists it (e.g.
+                     "Export File (default)…", "Apple Devices 1080p…", "Social
+                     Platforms…"). A trailing ellipsis may be left off. Leave empty for
+                     the default destination. On a miss the error lists every destination
+                     the menu actually has; list_menus(menu="File") shows them too.
     """
     params = {}
     if destination:
