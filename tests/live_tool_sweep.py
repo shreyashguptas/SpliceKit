@@ -799,41 +799,67 @@ class Sweep:
         args = self.fill(case.args)
         before = await self.shape()
 
+        # Every early return below used to skip restore(), and with it case.cleanup — the
+        # step that takes the imported clip or project back out of the library. An import
+        # that timed out client-side, or failed after the browser item had already landed,
+        # left it there for good: the sweep's own names ("SpliceKit Sweep Import <pid>")
+        # match nothing cleanup_temp_projects sweeps, so there was no second chance. The
+        # finally runs the cleanup steps on every path that did not already reach restore().
+        cleaned = False
         try:
-            out = await self.call(tool, args, case.timeout)
-        except asyncio.TimeoutError:
-            return Result(tool, FAIL, f"timed out after {case.timeout:.0f}s",
-                          time.monotonic() - started)
-        except Exception as exc:
-            return Result(tool, FAIL, f"{type(exc).__name__}: {exc}"[:400],
-                          time.monotonic() - started)
+            try:
+                out = await self.call(tool, args, case.timeout)
+            except asyncio.TimeoutError:
+                return Result(tool, FAIL, f"timed out after {case.timeout:.0f}s",
+                              time.monotonic() - started)
+            except Exception as exc:
+                return Result(tool, FAIL, f"{type(exc).__name__}: {exc}"[:400],
+                              time.monotonic() - started)
 
-        elapsed = time.monotonic() - started
-        snippet = " ".join(out.split())[:300]
-        errored = out.lstrip().lower().startswith("error")
+            elapsed = time.monotonic() - started
+            snippet = " ".join(out.split())[:300]
+            errored = out.lstrip().lower().startswith("error")
 
-        # A tool that needs something not installed here passes only when it says so.
-        if case.kind == "dependency":
-            low = out.lower()
-            if any(marker.lower() in low for marker in case.dependency_markers):
-                return Result(tool, BLOCKED, snippet, elapsed)
-            if errored:
+            # A tool that needs something not installed here passes only when it says so.
+            if case.kind == "dependency":
+                low = out.lower()
+                if any(marker.lower() in low for marker in case.dependency_markers):
+                    return Result(tool, BLOCKED, snippet, elapsed)
+                if errored:
+                    return Result(tool, FAIL,
+                                  f"failed without naming the missing dependency: {snippet}",
+                                  elapsed)
+                return Result(tool, PASS, snippet, elapsed)
+
+            if errored and not (case.expect and re.search(case.expect, out)):
+                return Result(tool, FAIL, snippet, elapsed)
+            if case.expect and not re.search(case.expect, out):
                 return Result(tool, FAIL,
-                              f"failed without naming the missing dependency: {snippet}",
-                              elapsed)
+                              f"answer did not match /{case.expect}/: {snippet}", elapsed)
+
+            # Put the project back. restore() runs case.cleanup itself, first.
+            cleaned = True
+            restored = await self.restore(case, before)
+            if restored:
+                return Result(tool, FAIL, f"{snippet} | {restored}", elapsed)
             return Result(tool, PASS, snippet, elapsed)
+        finally:
+            if not cleaned:
+                await self.cleanup_only(case)
 
-        if errored and not (case.expect and re.search(case.expect, out)):
-            return Result(tool, FAIL, snippet, elapsed)
-        if case.expect and not re.search(case.expect, out):
-            return Result(tool, FAIL,
-                          f"answer did not match /{case.expect}/: {snippet}", elapsed)
+    async def cleanup_only(self, case: Case) -> None:
+        """Run just case.cleanup, for a case that failed before restore() was reached.
 
-        # Put the project back.
-        restored = await self.restore(case, before)
-        if restored:
-            return Result(tool, FAIL, f"{snippet} | {restored}", elapsed)
-        return Result(tool, PASS, snippet, elapsed)
+        Never raises: the case has already failed and the report belongs to that failure,
+        not to a cleanup that could not run. Anything that goes wrong is printed so a
+        leftover in the library is at least visible in the log.
+        """
+        for tool, args in case.cleanup:
+            try:
+                await self.call(tool, self.fill(args), case.timeout)
+            except Exception as exc:
+                print(f"    ! cleanup {tool} after failure raised "
+                      f"{type(exc).__name__}: {exc}", flush=True)
 
     async def restore(self, case: Case, before: tuple) -> str:
         """Undo or clean up after a case. Returns "" when the timeline is back."""

@@ -11181,6 +11181,38 @@ static id SpliceKit_libraryItemForSequence(id sequence) {
             @catch (NSException *e) { child = nil; }
             if (child && !(eventRecordClass && [child isKindOfClass:eventRecordClass])) return child;
         }
+
+        // -childItemNamed: answers nil for a project with no content in it — an empty
+        // scratch project left from an earlier session reports -sequenceType "clip",
+        // -isProject NO and -targetSequenceRecord nil, so every route above comes up empty
+        // and cleanup could find it by name but never remove it. The event's own child
+        // records do contain it, so the last resort is to walk them and match the name.
+        if (container && name.length > 0) {
+            for (NSString *listSel in @[@"childItems", @"sequenceRecords"]) {
+                SEL sel = NSSelectorFromString(listSel);
+                if (![container respondsToSelector:sel]) continue;
+                id kids = nil;
+                @try { kids = ((id (*)(id, SEL))objc_msgSend)(container, sel); }
+                @catch (NSException *e) { kids = nil; }
+                if (!kids) continue;
+                // -childItems answers an NSSet on this build and an NSArray on others.
+                if ([kids respondsToSelector:@selector(allObjects)]) {
+                    @try { kids = ((id (*)(id, SEL))objc_msgSend)(kids, @selector(allObjects)); }
+                    @catch (NSException *e) { continue; }
+                }
+                if (![kids isKindOfClass:[NSArray class]]) continue;
+                for (id kid in (NSArray *)kids) {
+                    if (eventRecordClass && [kid isKindOfClass:eventRecordClass]) continue;
+                    if (![kid respondsToSelector:displayNameSel]) continue;
+                    NSString *kidName = nil;
+                    @try { kidName = ((id (*)(id, SEL))objc_msgSend)(kid, displayNameSel); }
+                    @catch (NSException *e) { kidName = nil; }
+                    if ([kidName isKindOfClass:[NSString class]] && [kidName isEqualToString:name]) {
+                        return kid;
+                    }
+                }
+            }
+        }
     }
     return nil;
 }
@@ -11204,11 +11236,22 @@ static id SpliceKit_libraryForSequence(id sequence, id libraryItem) {
 static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *label) {
     if (!library || !libraryItem) return NO;
 
+    // Each of the three is wrapped on its own. They are dynamic calls into Flexo, and a
+    // raise from one used to unwind past the caller's loop over looseProjects/eventsToRemove,
+    // so one awkward item silently stopped the rest of the sweep from being processed at all.
+    // A throw here is now just "that API did not work", and the next one is tried.
     NSError *error = nil;
     SEL trashActionSel = NSSelectorFromString(@"actionMoveLibraryItemToTrash:actionName:error:");
     if ([library respondsToSelector:trashActionSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-            library, trashActionSel, libraryItem, @"SpliceKit Cleanup", &error);
+        BOOL ok = NO;
+        @try {
+            ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
+                library, trashActionSel, libraryItem, @"SpliceKit Cleanup", &error);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[SpliceKit] actionMoveLibraryItemToTrash raised for '%@': %@",
+                          label ?: @"?", e.reason);
+            ok = NO;
+        }
         if (ok) return YES;
         if (error) {
             SpliceKit_log(@"[SpliceKit] actionMoveLibraryItemToTrash failed for '%@': %@",
@@ -11219,8 +11262,15 @@ static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *lab
 
     SEL trashSel = NSSelectorFromString(@"trashLibraryItem:immediately:error:");
     if ([library respondsToSelector:trashSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
-            library, trashSel, libraryItem, NO, &error);
+        BOOL ok = NO;
+        @try {
+            ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+                library, trashSel, libraryItem, NO, &error);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[SpliceKit] trashLibraryItem raised for '%@': %@",
+                          label ?: @"?", e.reason);
+            ok = NO;
+        }
         if (ok) return YES;
         if (error) {
             SpliceKit_log(@"[SpliceKit] trashLibraryItem failed for '%@': %@",
@@ -11231,8 +11281,15 @@ static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *lab
 
     SEL removeSel = NSSelectorFromString(@"removeLibraryItem:error:");
     if ([library respondsToSelector:removeSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
-            library, removeSel, libraryItem, &error);
+        BOOL ok = NO;
+        @try {
+            ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
+                library, removeSel, libraryItem, &error);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[SpliceKit] removeLibraryItem raised for '%@': %@",
+                          label ?: @"?", e.reason);
+            ok = NO;
+        }
         if (ok) return YES;
         if (error) {
             SpliceKit_log(@"[SpliceKit] removeLibraryItem failed for '%@': %@",
@@ -18679,6 +18736,8 @@ static NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params) {
             SEL removeSel = NSSelectorFromString(@"removeOwnedClipsObject:");
             NSMutableArray *removed = [NSMutableArray array];
             NSMutableArray *searched = [NSMutableArray array];
+            NSMutableArray *matches = [NSMutableArray array];
+            NSMutableArray *failed = [NSMutableArray array];
             NSUInteger projectCount = 0;
 
             for (id library in (NSArray *)libs) {
@@ -18709,6 +18768,9 @@ static NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params) {
                         ? ((id (*)(id, SEL))objc_msgSend)(event, @selector(project)) : nil;
                     if (!project || ![project respondsToSelector:removeSel]) continue;
 
+                    // Collect first, remove afterwards. Removing inside the walk meant a name
+                    // that happened to match in two events took both, silently, and a raise
+                    // part way through threw away the record of what had already gone.
                     for (id clip in SpliceKit_browserClipsOfEvent(event)) {
                         NSString *clipName = [clip respondsToSelector:dnSel]
                             ? ((id (*)(id, SEL))objc_msgSend)(clip, dnSel) : nil;
@@ -18726,15 +18788,58 @@ static NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params) {
                             return;
                         }
 
-                        if (!dryRun) {
-                            ((void (*)(id, SEL, id))objc_msgSend)(project, removeSel, clip);
-                        }
-                        [removed addObject:@{@"name": clipName ?: @"",
-                                            @"event": eventName ?: @"",
-                                            @"kind": clipIsProject ? @"project" : @"clip"}];
-                        if (clipIsProject) projectCount++;
+                        [matches addObject:@[clip, project, clipName ?: @"", eventName ?: @"",
+                                             @(clipIsProject)]];
                     }
                 }
+            }
+
+            // A name is not unique across a library, let alone across every open library. One
+            // call used to take every clip that happened to share the name, in every event, and
+            // only say "Removed 3 clips". For something that deletes, ambiguity is an error.
+            if (!wanted && matches.count > 1) {
+                NSMutableArray *where = [NSMutableArray array];
+                for (NSArray *m in matches) {
+                    [where addObject:[NSString stringWithFormat:@"'%@' in event '%@'%@",
+                        m[2], m[3], [m[4] boolValue] ? @" (a project)" : @""]];
+                }
+                result = @{@"error": [NSString stringWithFormat:
+                    @"'%@' matches %lu items: %@. Nothing was removed. Pass event= (and library= "
+                    @"if more than one is open) to say which, or pass the handle from "
+                    @"browser_list_clips().",
+                    name, (unsigned long)matches.count,
+                    [where componentsJoinedByString:@"; "]]};
+                return;
+            }
+
+            for (NSArray *m in matches) {
+                id clip = m[0], project = m[1];
+                NSString *clipName = m[2], *eventName = m[3];
+                BOOL clipIsProject = [m[4] boolValue];
+                if (!dryRun) {
+                    // Guarded one at a time so a raise on the second item cannot erase the
+                    // record that the first one already went.
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(project, removeSel, clip);
+                    } @catch (NSException *e) {
+                        [failed addObject:@{@"name": clipName,
+                                            @"event": eventName,
+                                            @"reason": e.reason ?: @"unknown"}];
+                        continue;
+                    }
+                }
+                [removed addObject:@{@"name": clipName,
+                                     @"event": eventName,
+                                     @"kind": clipIsProject ? @"project" : @"clip"}];
+                if (clipIsProject) projectCount++;
+            }
+
+            if (removed.count == 0 && failed.count > 0) {
+                result = @{@"status": @"error",
+                           @"removed": removed,
+                           @"failed": failed,
+                           @"error": @"Every matching item failed to remove; see `failed`."};
+                return;
             }
 
             if (removed.count == 0) {
@@ -18752,6 +18857,7 @@ static NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params) {
                 @"status": @"ok",
                 @"dryRun": @(dryRun),
                 @"removed": removed,
+                @"failed": failed,
                 // Say which it was: "1 clip" when a project went is the sort of answer that
                 // makes someone think their timeline is still there.
                 @"message": [NSString stringWithFormat:@"%@ %lu %@ from the browser.%@",
@@ -34155,6 +34261,15 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // Anything that changes the document waits while Final Cut Pro is busy; see
     // SpliceKit_blockingModalWindow and SpliceKit_timelineIsTracking for the three
     // crashes this prevents.
+    //
+    // This narrows the window, it does not close it. The check is its own main-thread
+    // hop, and the handler takes another one further down, so a drag that starts in
+    // between is not seen. Closing that properly means checking -isTracking inside the
+    // same main-thread block that performs the edit, which is every handler's own
+    // dispatch, not this one place. Two things keep the exposure small: the gap is a
+    // few lines of bridge-thread work, and an async request re-enters
+    // SpliceKit_handleRequest when the job actually runs, so it is re-checked then
+    // rather than being cleared once and executed much later.
     if (!SpliceKit_methodIsAllowedWhileBusy(method)) {
         if (SpliceKit_timelineIsTracking()) {
             return @{@"error": @{

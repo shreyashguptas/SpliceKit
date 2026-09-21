@@ -76,5 +76,93 @@ class OTIORoundTripTests(unittest.TestCase):
                                  f"{clip.name} has no available_range")
 
 
+# A compound clip can hold another compound clip. Those inner <ref-clip> elements live in
+# <resources>, which the flattening pass never walked to, so one used to be copied through
+# untouched and then resolved against the asset index — where a <media> id matches no
+# <asset> — turning into a clip with a MissingReference while the note still claimed the
+# compound clip had been flattened.
+NESTED_FCPXML = """<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p2997" frameDuration="1001/30000s"
+            width="1920" height="1080"/>
+    <asset id="a1" name="A" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/a.mov"/>
+    </asset>
+    <asset id="a2" name="B" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/b.mov"/>
+    </asset>
+    <media id="m_inner" name="Inner">
+      <sequence format="r1" duration="600600/30000s">
+        <spine>
+          <asset-clip ref="a1" name="A" offset="0s" start="0s" duration="300300/30000s" format="r1"/>
+          <asset-clip ref="a2" name="B" offset="300300/30000s" start="0s" duration="300300/30000s" format="r1"/>
+        </spine>
+      </sequence>
+    </media>
+    <media id="m_outer" name="Outer">
+      <sequence format="r1" duration="600600/30000s">
+        <spine>
+          <ref-clip ref="m_inner" name="Inner" offset="0s" start="0s" duration="600600/30000s"/>
+        </spine>
+      </sequence>
+    </media>
+  </resources>
+  <library>
+    <event name="E">
+      <project name="Nested">
+        <sequence format="r1" duration="600600/30000s">
+          <spine>
+            <ref-clip ref="m_outer" name="Outer" offset="0s" start="0s" duration="600600/30000s"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
+"""
+
+
+class NestedCompoundClipTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_server_module()
+        result = cls.module._otio_read_fcpx_string(NESTED_FCPXML)
+        cls.timeline = cls.module._otio_first_timeline(result)
+
+    def test_a_compound_clip_inside_a_compound_clip_is_flattened_too(self):
+        clips = list(self.timeline.find_clips())
+        self.assertEqual([c.name for c in clips], ["A", "B"],
+                         "the inner compound clip was not flattened")
+
+    def test_the_clips_inside_the_nested_compound_keep_their_media(self):
+        for clip in self.timeline.find_clips():
+            self.assertIsInstance(
+                clip.media_reference, otio.schema.ExternalReference,
+                f"{clip.name} came back as a MissingReference: the nested <ref-clip> "
+                "was resolved against the asset index instead of being expanded")
+
+    def test_the_nested_flattening_is_reported(self):
+        notes = self.timeline.metadata.get("splicekit_notes") or []
+        self.assertTrue(any("nested inside another one" in n for n in notes),
+                        f"nothing said the nested compound clip was flattened: {notes}")
+
+
+SELF_NESTED_FCPXML = NESTED_FCPXML.replace(
+    '<ref-clip ref="m_inner" name="Inner" offset="0s" start="0s" duration="600600/30000s"/>',
+    '<ref-clip ref="m_outer" name="Outer" offset="0s" start="0s" duration="600600/30000s"/>')
+
+
+class SelfNestedCompoundClipTests(unittest.TestCase):
+    def test_a_compound_clip_containing_itself_does_not_hang(self):
+        # Malformed, but it must not spin forever or blow the stack.
+        module = load_server_module()
+        result = module._otio_read_fcpx_string(SELF_NESTED_FCPXML)
+        timeline = module._otio_first_timeline(result)
+        notes = timeline.metadata.get("splicekit_notes") or []
+        self.assertTrue(any("nested inside itself" in n for n in notes),
+                        f"the cycle was not reported: {notes}")
+
+
 if __name__ == "__main__":
     unittest.main()

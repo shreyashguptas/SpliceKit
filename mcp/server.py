@@ -6471,13 +6471,28 @@ def _otio_fcpx_media_spine(resources_elem, ref):
     return None
 
 
-def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine):
-    """One ``<ref-clip>`` as the clips it actually contains, trimmed as it is trimmed."""
+_OTIO_FCPX_MAX_COMPOUND_DEPTH = 8
+
+
+def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine, resources_elem=None,
+                               notes=None, _seen=frozenset()):
+    """One ``<ref-clip>`` as the clips it actually contains, trimmed as it is trimmed.
+
+    A compound clip can hold another compound clip. Those inner ``<ref-clip>`` elements
+    live in ``<resources>``, not under the project, so the flattening pass never walked
+    to them: one was copied through untouched and later resolved against the asset index,
+    where a ``<media>`` id matches no ``<asset>``, so it turned into a clip with a
+    MissingReference while the note still said the compound clip had been flattened.
+    Expansion now recurses, carrying the resource index with it, and refuses to follow a
+    compound clip that contains itself.
+    """
     import copy
 
     ref_offset = _otio_fcpx_fraction(ref_clip.get("offset"))
     ref_start = _otio_fcpx_fraction(ref_clip.get("start"))
     ref_end = ref_start + _otio_fcpx_fraction(ref_clip.get("duration"))
+    if notes is None:
+        notes = []
 
     expanded = []
     for inner in inner_spine:
@@ -6496,16 +6511,47 @@ def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine):
             clip.set("start", _otio_fcpx_format_time(
                 _otio_fcpx_fraction(inner.get("start")) + (visible_from - inner_offset)))
         clip.attrib.pop("lane", None)
+
+        # A compound clip inside this one. `clip` already carries timeline offset and the
+        # in-point into the nested media, which is exactly what this function expects.
+        if clip.tag == "ref-clip" and resources_elem is not None:
+            nested_ref = clip.get("ref", "")
+            name = clip.get("name", "?")
+            if nested_ref in _seen or len(_seen) >= _OTIO_FCPX_MAX_COMPOUND_DEPTH:
+                notes.append(
+                    f"compound clip {name!r} kept as is: it is nested inside itself"
+                    if nested_ref in _seen else
+                    f"compound clip {name!r} kept as is: nested more than "
+                    f"{_OTIO_FCPX_MAX_COMPOUND_DEPTH} compound clips deep")
+                expanded.append(clip)
+                continue
+            nested_spine = _otio_fcpx_media_spine(resources_elem, nested_ref)
+            if nested_spine is None:
+                notes.append(f"compound clip {name!r} kept as is: "
+                             "its contents are not in this document")
+                expanded.append(clip)
+                continue
+            sub = _otio_fcpx_expand_ref_clip(clip, nested_spine, resources_elem,
+                                             notes, _seen | {nested_ref})
+            if sub:
+                notes.append(f"compound clip {name!r} nested inside another one "
+                             f"flattened into {len(sub)} clip(s)")
+                expanded.extend(sub)
+                continue
+            expanded.append(clip)
+            continue
+
         expanded.append(clip)
 
     # The compound clip's own connected clips move onto whichever of the expanded
     # clips now covers the moment they were anchored at. An anchored offset is in its
     # parent's local time, so it is converted to timeline time and back again.
+    visible_span_end = ref_offset + (ref_end - ref_start)
     for child in list(ref_clip):
         if child.tag not in _FCPX_TIMED_TAGS or not child.get("lane"):
             continue
         anchored_at = ref_offset + (_otio_fcpx_fraction(child.get("offset")) - ref_start)
-        host = expanded[0] if expanded else None
+        host = None
         for candidate in expanded:
             candidate_offset = _otio_fcpx_fraction(candidate.get("offset"))
             if candidate_offset <= anchored_at < candidate_offset + _otio_fcpx_fraction(
@@ -6513,6 +6559,20 @@ def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine):
                 host = candidate
                 break
         if host is None:
+            # It used to fall back to expanded[0], which silently moved a connected clip
+            # anchored in a trimmed-away part of the compound clip onto the first visible
+            # clip, at an offset that meant nothing. If the moment it was anchored to is
+            # not on the timeline any more, neither is it — and that gets reported.
+            if not (ref_offset <= anchored_at < visible_span_end):
+                notes.append(
+                    f"connected clip {child.get('name', '?')!r} dropped: it was anchored "
+                    f"inside the part of compound clip {ref_clip.get('name', '?')!r} that "
+                    "is trimmed off")
+            else:
+                notes.append(
+                    f"connected clip {child.get('name', '?')!r} dropped: nothing in "
+                    f"compound clip {ref_clip.get('name', '?')!r} covers the moment it "
+                    "was anchored at")
             continue
         moved = copy.deepcopy(child)
         moved.set("offset", _otio_fcpx_format_time(
@@ -6545,7 +6605,8 @@ def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
                 notes.append(f"compound clip {child.get('name', '?')!r} kept as is: "
                              "its contents are not in this document")
                 continue
-            expanded = _otio_fcpx_expand_ref_clip(child, inner_spine)
+            expanded = _otio_fcpx_expand_ref_clip(child, inner_spine, resources_elem,
+                                                  notes, frozenset({child.get("ref", "")}))
             if not expanded:
                 rebuilt.append(child)
                 continue
@@ -7463,14 +7524,47 @@ def deploy_and_restart(skip_build: bool = False) -> str:
         except Exception:
             return False
 
+    def _quit_through_bridge() -> bool:
+        """Ask Final Cut Pro to quit itself, the way the Quit menu item does.
+
+        SIGTERM is not good enough here. Final Cut Pro flushes its library metadata on a
+        real -[NSApplication terminate:], not on a signal: killed with pkill it comes back
+        with library changes from the session undone, which is how three scratch projects
+        that had just been removed reappeared after a restart. This tool runs against the
+        user's real libraries, so it asks the app to quit and only falls back to a signal
+        when the bridge cannot be reached at all.
+
+        This is the app's own AppKit method called in-process over the bridge. It is not
+        AppleScript, not a synthetic key event and not the accessibility API.
+        """
+        try:
+            app = bridge.call(
+                "system.callMethodWithArgs",
+                target="NSApplication", selector="sharedApplication",
+                args=[], classMethod=True, returnHandle=True,
+            )
+            handle = (app or {}).get("handle")
+            if not handle:
+                return False
+            bridge.call(
+                "system.callMethodWithArgs",
+                target=handle, selector="terminate:",
+                args=[{"type": "nil"}], classMethod=False,
+            )
+            return True
+        except Exception:
+            return False
+
     # Step 2: Quit FCP before deploy (make deploy removes the in-app framework)
     if _fcp_is_running():
-        try:
-            subprocess.run(
-                ["pkill", "-x", "Final Cut Pro"], capture_output=True, timeout=5
-            )
-        except Exception as e:
-            return f"Error sending quit to Final Cut Pro: {e}"
+        if not _quit_through_bridge():
+            results.append("Bridge unreachable; fell back to SIGTERM")
+            try:
+                subprocess.run(
+                    ["pkill", "-x", "Final Cut Pro"], capture_output=True, timeout=5
+                )
+            except Exception as e:
+                return f"Error sending quit to Final Cut Pro: {e}"
 
         quit_deadline = _time.time() + 30
         while _time.time() < quit_deadline:
@@ -9789,13 +9883,23 @@ def remove_browser_clip(handle: str = "", name: str = "", event: str = "",
     Refuses a project unless include_projects is set: removing a project removes a whole
     timeline. cleanup_temp_projects removes SpliceKit's own scratch projects without it.
 
+    A name is not unique. If `name` matches more than one item — the same clip name in two
+    events, or in two open libraries — nothing is removed and the error lists every match
+    with its event, so you can narrow it with `event=` or pass the handle instead. A handle
+    is unambiguous by definition and never triggers this.
+
+    Returns `removed` (each with name, event and whether it was a clip or a project) and
+    `failed` (anything that matched but Final Cut Pro refused to remove, with the reason).
+    A partial result still reports both lists rather than reading as a total failure.
+
     Args:
-        handle: A handle from browser_list_clips() or import_media().
+        handle: A handle from browser_list_clips() or import_media(). Unambiguous; preferred.
         name: The clip's name exactly as the browser shows it, when no handle is given.
+            Matched in full, case-sensitively, not as a substring.
         event: Substring match for the event name (case-insensitive), to narrow the search.
         library: Substring match for the library display name.
         include_projects: Allow removing a project (a whole timeline), not just a source clip.
-        dry_run: Report what would be removed and change nothing.
+        dry_run: Report what would be removed and change nothing. Default False.
     """
     params: dict = {}
     if handle:
