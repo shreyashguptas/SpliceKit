@@ -6632,6 +6632,29 @@ def _otio_fcpx_media_spine(resources_elem, ref):
 _OTIO_FCPX_MAX_COMPOUND_DEPTH = 8
 
 
+def _otio_fcpx_ref_clip_as_gap(ref_clip):
+    """A ``<gap>`` holding the place of a ``<ref-clip>`` that cannot be expanded.
+
+    Leaving the raw ``<ref-clip>`` in the spine looks harmless — it keeps the timing —
+    but its ``ref`` points at a ``<media>`` id, and nothing downstream resolves one: it
+    becomes a Clip with a MissingReference, which is a clip the receiving application
+    cannot play, with nothing in the clip itself to say why. A gap says the same thing
+    honestly and keeps the timeline the right length, which is what the note alongside it
+    describes.
+    """
+    import xml.etree.ElementTree as _ET
+    gap = _ET.Element("gap")
+    gap.set("name", ref_clip.get("name", "gap"))
+    gap.set("offset", ref_clip.get("offset", "0s"))
+    gap.set("duration", ref_clip.get("duration", "0s"))
+    gap.set("start", "0s")
+    # Anything anchored to it travels with it; it is still at that point on the timeline.
+    for child in list(ref_clip):
+        if child.tag in _FCPX_TIMED_TAGS and child.get("lane"):
+            gap.append(child)
+    return gap
+
+
 def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine, resources_elem=None,
                                notes=None, _seen=frozenset()):
     """One ``<ref-clip>`` as the clips it actually contains, trimmed as it is trimmed.
@@ -6677,17 +6700,17 @@ def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine, resources_elem=None,
             name = clip.get("name", "?")
             if nested_ref in _seen or len(_seen) >= _OTIO_FCPX_MAX_COMPOUND_DEPTH:
                 notes.append(
-                    f"compound clip {name!r} kept as is: it is nested inside itself"
+                    f"compound clip {name!r} replaced with a gap: it is nested inside itself"
                     if nested_ref in _seen else
-                    f"compound clip {name!r} kept as is: nested more than "
+                    f"compound clip {name!r} replaced with a gap: nested more than "
                     f"{_OTIO_FCPX_MAX_COMPOUND_DEPTH} compound clips deep")
-                expanded.append(clip)
+                expanded.append(_otio_fcpx_ref_clip_as_gap(clip))
                 continue
             nested_spine = _otio_fcpx_media_spine(resources_elem, nested_ref)
             if nested_spine is None:
-                notes.append(f"compound clip {name!r} kept as is: "
+                notes.append(f"compound clip {name!r} replaced with a gap: "
                              "its contents are not in this document")
-                expanded.append(clip)
+                expanded.append(_otio_fcpx_ref_clip_as_gap(clip))
                 continue
             sub = _otio_fcpx_expand_ref_clip(clip, nested_spine, resources_elem,
                                              notes, _seen | {nested_ref})

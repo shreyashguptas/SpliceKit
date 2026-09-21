@@ -153,15 +153,62 @@ SELF_NESTED_FCPXML = NESTED_FCPXML.replace(
     '<ref-clip ref="m_outer" name="Outer" offset="0s" start="0s" duration="600600/30000s"/>')
 
 
+# Two compound clips that contain each other. A 2-cycle rather than a direct
+# self-reference, which the `_seen` set has to catch just the same.
+MUTUAL_FCPXML = NESTED_FCPXML.replace(
+    '<ref-clip ref="m_inner" name="Inner" offset="0s" start="0s" duration="600600/30000s"/>',
+    '<ref-clip ref="m_outer" name="Outer" offset="0s" start="0s" duration="600600/30000s"/>'
+).replace(
+    '<media id="m_inner" name="Inner">',
+    '<media id="m_inner_unused" name="Inner">')
+
+
 class SelfNestedCompoundClipTests(unittest.TestCase):
+    def _read(self, xml):
+        module = load_server_module()
+        return module, module._otio_first_timeline(module._otio_read_fcpx_string(xml))
+
     def test_a_compound_clip_containing_itself_does_not_hang(self):
         # Malformed, but it must not spin forever or blow the stack.
-        module = load_server_module()
-        result = module._otio_read_fcpx_string(SELF_NESTED_FCPXML)
-        timeline = module._otio_first_timeline(result)
+        _, timeline = self._read(SELF_NESTED_FCPXML)
         notes = timeline.metadata.get("splicekit_notes") or []
         self.assertTrue(any("nested inside itself" in n for n in notes),
                         f"the cycle was not reported: {notes}")
+
+    def test_a_cycle_leaves_a_gap_and_never_an_unplayable_clip(self):
+        # The note is not enough on its own. Leaving the raw <ref-clip> in the spine
+        # produced a Clip whose media_reference was a MissingReference — a clip the
+        # receiving application cannot play, with nothing in the clip to say why — while
+        # the note alongside it made the read look like it had succeeded.
+        for label, xml in (("self-reference", SELF_NESTED_FCPXML),
+                           ("mutual reference", MUTUAL_FCPXML)):
+            with self.subTest(label):
+                _, timeline = self._read(xml)
+                for clip in timeline.find_clips():
+                    self.assertNotIsInstance(
+                        clip.media_reference, otio.schema.MissingReference,
+                        f"{label}: {clip.name!r} came back unplayable")
+                notes = timeline.metadata.get("splicekit_notes") or []
+                self.assertTrue(any("replaced with a gap" in n for n in notes),
+                                f"{label}: nothing said a gap was put in its place: {notes}")
+
+    def test_a_cycle_keeps_the_timeline_the_right_length(self):
+        # The gap stands in for the compound clip, so the timeline does not shrink.
+        _, timeline = self._read(SELF_NESTED_FCPXML)
+        duration = timeline.duration()
+        self.assertAlmostEqual(duration.value / duration.rate, 20.02, places=2)
+
+    def test_a_compound_clip_whose_contents_are_missing_becomes_a_gap(self):
+        # Same treatment when the <media> the ref-clip points at is not in the document
+        # at all, which is what a partial or hand-edited FCPXML looks like.
+        xml = NESTED_FCPXML.replace('<media id="m_inner" name="Inner">',
+                                    '<media id="m_absent" name="Inner">')
+        _, timeline = self._read(xml)
+        for clip in timeline.find_clips():
+            self.assertNotIsInstance(clip.media_reference, otio.schema.MissingReference,
+                                     f"{clip.name!r} came back unplayable")
+        notes = timeline.metadata.get("splicekit_notes") or []
+        self.assertTrue(any("not in this document" in n for n in notes), notes)
 
 
 if __name__ == "__main__":
