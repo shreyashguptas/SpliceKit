@@ -3936,10 +3936,26 @@ def execute_command(action: str, type: str = "timeline") -> str:
     return _fmt(r)
 
 
+_AI_COMMAND_ENGINES = ("standard", "agentic", "gemma")
+
+
 @splicekit_tool("ai_command")
-def ai_command(query: str) -> str:
+def ai_command(query: str, engine: str = "") -> str:
     """Use Apple Intelligence (on-device LLM) to interpret a natural language
     editing instruction and execute the appropriate FCP actions.
+
+    FCP's default AI engine is **agentic** (Apple Intelligence+, multi-turn).
+    Calls on that path can take several minutes. Use engine="standard" for the
+    fast single-shot Apple Intelligence path (fixed action schema, ~60s on the
+    bridge).
+
+    Args:
+        query: Natural language editing instruction.
+        engine: Optional override of the palette's configured engine:
+            "standard" — single-shot Apple Intelligence;
+            "agentic" — Apple Intelligence+ agent loop (FCP default);
+            "gemma" — Gemma 4 via MLX (requires mlx-lm server).
+            Omit or pass "" to use the palette setting (usually agentic).
 
     Examples:
       "cut at 3 seconds"
@@ -3951,8 +3967,17 @@ def ai_command(query: str) -> str:
     The LLM translates your description into a sequence of FCP actions and
     executes them automatically. Falls back to keyword matching if Apple
     Intelligence is not available on this Mac.
+
+    The MCP client waits up to ~5.5 minutes (330s) so it outlasts the bridge's
+    300s agentic/Gemma deadline; standard mode usually finishes sooner.
     """
-    r = bridge.call("command.ai", query=query)
+    if engine and engine not in _AI_COMMAND_ENGINES:
+        allowed = ", ".join(_AI_COMMAND_ENGINES)
+        return f"Error: invalid engine '{engine}'. Use one of: {allowed}."
+    call_params = {"query": query, "timeout": 330.0}
+    if engine:
+        call_params["engine"] = engine
+    r = bridge.call("command.ai", **call_params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
@@ -4039,8 +4064,12 @@ def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bi
     Args:
         query: Natural language editing instruction
         model: HuggingFace model ID (default: unsloth/gemma-4-E4B-it-UD-MLX-4bit)
+
+    The Gemma path uses a multi-turn agentic loop (local MLX model) and can take
+    several minutes; the MCP client waits up to ~5.5 minutes so it outlasts the
+    bridge handler's own deadline.
     """
-    r = bridge.call("command.aiGemma", query=query, model=model)
+    r = bridge.call("command.aiGemma", query=query, model=model, timeout=330.0)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return r.get("summary", "Done.")
