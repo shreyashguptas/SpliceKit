@@ -2883,6 +2883,7 @@ NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
 static NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
 static void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
 extern NSString *SpliceKit_otioToFCPXML(NSString *otioPath);
+extern NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName);
 
 // Convert .otio file → FCPXML via the native ObjC converter.
 // This produces better FCPXML than the Python adapter (correct transitions,
@@ -2901,7 +2902,8 @@ static NSDictionary *SpliceKit_handleOTIOToFCPXML(NSDictionary *params) {
         path = tmpPath;
     }
 
-    NSString *fcpxml = SpliceKit_otioToFCPXML(path);
+    NSString *eventName = [params[@"event"] isKindOfClass:[NSString class]] ? params[@"event"] : nil;
+    NSString *fcpxml = SpliceKit_otioToFCPXMLInEvent(path, eventName);
 
     // Clean up temp file
     if (tmpPath) {

@@ -7170,7 +7170,7 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
 
 
 @splicekit_tool("import_otio")
-def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
+def import_otio(path: str = "", otio_json: str = "", rate: float = 0, event: str = "") -> str:
     """Import a timeline file into FCP via OpenTimelineIO.
 
     Universal import that handles all OTIO-supported formats including FCPXML.
@@ -7193,12 +7193,13 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
                    If both path and otio_json are provided, path takes priority.
         rate:      Frame rate for EDL import (e.g. 23.98, 24, 29.97, 30).
                    Required for .edl files with drop-frame timecodes. If 0, defaults to 24.
+        event:     Event to import into, by name. Empty uses the library's first event,
+                   which is where import_media puts things too.
 
     Where it lands:
-        A NEW project, in a new event named after the timeline in the file. The project
-        you have open is not touched. Verified on FCP 12.3 against a four-clip timeline
-        with a connected clip: offsets, durations, source in-points and the connected
-        clip's lane all came back matching.
+        A NEW project, in an existing event. The project you have open is not touched.
+        Verified on FCP 12.3 against a four-clip timeline with a connected clip: offsets,
+        durations, source in-points and the connected clip's lane all came back matching.
 
     What OTIO cannot carry:
         A compound clip. export_otio flattens one into the clips it contains and says so
@@ -7245,9 +7246,10 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
         native_ok = False
         try:
             if path and ext == "otio":
-                r = bridge.call("otio.toFCPXML", path=path)
+                r = bridge.call("otio.toFCPXML", path=path, event=event)
             elif otio_json:
-                r = bridge.call("otio.toFCPXML", path="/dev/null", otio_json=otio_json)
+                r = bridge.call("otio.toFCPXML", path="/dev/null", otio_json=otio_json,
+                                event=event)
             else:
                 r = {"error": "no input"}
 
@@ -10145,13 +10147,22 @@ def cleanup_temp_projects(dry_run: bool = False) -> str:
     ``generate_native_captions``, ``song_structure_blocks`` (and related
     structure-caption import) and the FCPXML pasteboard route create temporary
     import projects named ``SpliceKit Caption Import *``, ``SK Structure *`` or
-    ``_SKPaste_*``. They should be deleted automatically when each run finishes;
-    this tool finds any that were left behind and moves them to the library Trash.
+    ``_SKPaste_*``, inside events named ``SpliceKit Captions`` or
+    ``SpliceKit Structure``. They should be deleted automatically when each run
+    finishes; this tool finds any that were left behind and moves them to the
+    library Trash.
+
+    An event SpliceKit's own FCPXML created, holding nothing but SpliceKit scratch,
+    goes as a unit. That is also the only way to clear a scratch project Final Cut
+    Pro has not loaded, which is every one left over from an earlier session.
+
+    Your own projects and clips are never touched: it matches only the three names
+    above, all of which SpliceKit generates itself.
 
     Args:
         dry_run: When true, only list matching project names without deleting.
 
-    Returns found/removed project names, plus any that failed to delete.
+    Returns found/removed project and event names, plus any that failed to delete.
     """
     r = bridge.call("captions.cleanup", dryRun=dry_run)
     if _err(r):

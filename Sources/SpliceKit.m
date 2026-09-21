@@ -1015,7 +1015,36 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
 
 /// Parse a .otio JSON file and convert to FCPXML 1.14 string.
 /// Handles multi-track, transitions, titles, markers, source trimming, connected clips.
-NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
+/// The event an OTIO import should land in: the library's first event, so an import
+/// does not sprinkle a new event across the library every time.
+///
+/// The converter used to name the event after the timeline, which meant every
+/// import_otio call left an event behind — and once its project was removed, an empty
+/// one. Final Cut Pro's own importer needs SOME <event name=...>, so this picks the one
+/// already there.
+static NSString *otio_defaultEventName(void) {
+    @try {
+        Class libDocClass = objc_getClass("FFLibraryDocument");
+        if (!libDocClass) return nil;
+        id libs = ((id (*)(id, SEL))objc_msgSend)((id)libDocClass,
+            NSSelectorFromString(@"copyActiveLibraries"));
+        if (![libs isKindOfClass:[NSArray class]] || [(NSArray *)libs count] == 0) return nil;
+        for (id lib in (NSArray *)libs) {
+            SEL eventsSel = NSSelectorFromString(@"events");
+            if (![lib respondsToSelector:eventsSel]) continue;
+            id events = ((id (*)(id, SEL))objc_msgSend)(lib, eventsSel);
+            if (![events isKindOfClass:[NSArray class]] || [(NSArray *)events count] == 0) continue;
+            id event = [(NSArray *)events firstObject];
+            if ([event respondsToSelector:@selector(displayName)]) {
+                NSString *name = ((id (*)(id, SEL))objc_msgSend)(event, @selector(displayName));
+                if (name.length > 0) return name;
+            }
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName) {
     NSData *data = [NSData dataWithContentsOfFile:otioPath];
     if (!data) { SpliceKit_log(@"[OTIO] Could not read: %@", otioPath); return nil; }
 
@@ -1656,7 +1685,9 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
     [xml appendString:effectXml]; // clip effect resources
     [xml appendString:assetXml];
     [xml appendString:@"    </resources>\n"];
-    [xml appendFormat:@"    <event name=\"%@\">\n", otio_esc(projectName)];
+    NSString *targetEvent = eventName.length > 0 ? eventName
+                                                : (otio_defaultEventName() ?: projectName);
+    [xml appendFormat:@"    <event name=\"%@\">\n", otio_esc(targetEvent)];
 
     // Asset-clip browser items (so clips appear in FCP's event browser)
     for (NSString *url in assets) {
@@ -1718,6 +1749,10 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
         otioPath.lastPathComponent, (unsigned long)xml.length,
         (unsigned long)spineItems.count, (unsigned long)assets.count);
     return xml;
+}
+
+NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
+    return SpliceKit_otioToFCPXMLInEvent(otioPath, nil);
 }
 
 #pragma mark - OpenTimelineIO Import / Export
