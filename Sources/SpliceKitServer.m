@@ -34031,12 +34031,42 @@ static NSWindow *SpliceKit_blockingModalWindow(void) {
     return blocking;
 }
 
-// Methods allowed while a modal is up: the dialog tools themselves (otherwise nothing
-// could answer the dialog) and the connection-level namespaces, which never touch the
-// document. Everything else goes by its bridge.describe safety tag; an untagged method
-// counts as state_dependent, which is what SpliceKitBridgeMetadata.m says to assume
-// when in doubt, so a newly added method is refused rather than crashing the app.
-static BOOL SpliceKit_methodIsAllowedDuringModal(NSString *method) {
+// True while Final Cut Pro's timeline is in the middle of a drag.
+//
+// The same class of crash as the modal one, from the other side. A drag over the
+// timeline holds a temporary transaction open, and ending it runs the same undo
+// handler; with a bridge edit having opened and closed an undo scope underneath it,
+// Final Cut Pro segfaulted there too:
+//
+//   objc_msgSend
+//   -[FFUndoHandler undoableEnd:option:error:]
+//   -[FFAnchoredTimelineModule(FFTLKDataSource) _endTemporaryTransactionWithCommit:error:]
+//   -[FFAnchoredTimelineModule(FFTLKDataSource) _handlerDidStopTracking:]
+//   -[TLKTimelineView draggingExited:] ... NSCoreDragTrackingProc ... CoreDragMessageHandler
+//
+// -isTracking is Final Cut Pro's own flag, and it gates its own actions on the same
+// thing (-disableActionWhileTracking:).
+static BOOL SpliceKit_timelineIsTracking(void) {
+    __block BOOL tracking = NO;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            SEL sel = NSSelectorFromString(@"isTracking");
+            if (timeline && [timeline respondsToSelector:sel]) {
+                tracking = ((BOOL (*)(id, SEL))objc_msgSend)(timeline, sel);
+            }
+        } @catch (NSException *e) { tracking = NO; }
+    });
+    return tracking;
+}
+
+// Methods allowed while Final Cut Pro is busy — a modal dialog on screen, or a drag in
+// progress in the timeline: the dialog tools themselves (otherwise nothing could answer
+// the dialog) and the connection-level namespaces, which never touch the document.
+// Everything else goes by its bridge.describe safety tag; an untagged method counts as
+// state_dependent, which is what SpliceKitBridgeMetadata.m says to assume when in doubt,
+// so a newly added method is refused rather than crashing the app.
+static BOOL SpliceKit_methodIsAllowedWhileBusy(NSString *method) {
     if ([method hasPrefix:@"dialog."]) return YES;
     if ([method hasPrefix:@"bridge."]) return YES;
     if ([method hasPrefix:@"events."]) return YES;
@@ -34062,9 +34092,21 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // Auto-dismiss known blocking dialogs before processing any request
     SpliceKit_autoDismissBlockingDialogs();
 
-    // Anything a dialog has not been answered for waits; see
-    // SpliceKit_blockingModalWindow for the crash this prevents.
-    if (!SpliceKit_methodIsAllowedDuringModal(method)) {
+    // Anything that changes the document waits while Final Cut Pro is busy; see
+    // SpliceKit_blockingModalWindow and SpliceKit_timelineIsTracking for the three
+    // crashes this prevents.
+    if (!SpliceKit_methodIsAllowedWhileBusy(method)) {
+        if (SpliceKit_timelineIsTracking()) {
+            return @{@"error": @{
+                @"code": @(-32001),
+                @"message": [NSString stringWithFormat:
+                    @"Something is being dragged in the Final Cut Pro timeline, so '%@' "
+                    @"cannot run: an edit landing in the middle of a drag has crashed "
+                    @"Final Cut Pro in its own undo handler. Let go of the mouse and retry.",
+                    method],
+                @"dragPending": @YES,
+            }};
+        }
         NSWindow *blocking = SpliceKit_blockingModalWindow();
         if (blocking) {
             __block NSString *title = nil;
