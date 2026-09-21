@@ -384,7 +384,6 @@ READ_ONLY_TOOLS = {
     "detect_scene_changes",
     "detect_beats",
     "analyze_song_structure",
-    "toggle_structure_blocks",
     "sections_get",
     "flexmusic_list_songs",
     "flexmusic_get_song",
@@ -488,6 +487,14 @@ DESTRUCTIVE_TOOLS = {
     "song_structure_blocks",
     "song_structure_sections",
     "remove_structure_blocks",
+    # Write to a caller-supplied path and overwrite whatever is there, with no existence
+    # check and no dry run — the same disk-write risk export_captions_srt/txt are marked for.
+    "export_xml",
+    "export_otio",
+    # Deletes the structure storyline whenever one is on the timeline: same code path as
+    # remove_structure_blocks. It was READ_ONLY and idempotent, which invited an agent to
+    # call it speculatively and silently lose the blocks.
+    "toggle_structure_blocks",
     "sections_hide",
     "ai_command_gemma",
     "deploy_and_restart",
@@ -527,8 +534,6 @@ LOCAL_WRITE_TOOLS = {
     "dual_timeline_sync_root",
     "dual_timeline_toggle_panel",
     "end_edit",
-    "export_otio",
-    "export_xml",
     "hide_command_palette",
     "import_srt_as_markers",
     "livecam_close",
@@ -673,7 +678,7 @@ CUSTOM_TOOL_TITLES = {
     "beat_sync_blade": "Beat Sync Blade",
     "song_structure_blocks": "Song Structure Blocks",
     "song_structure_sections": "Song Structure Sections",
-    "toggle_structure_blocks": "Toggle Structure Blocks",
+    "toggle_structure_blocks": "Remove Structure Blocks (Toggle)",
     "remove_structure_blocks": "Remove Structure Blocks",
     "sections_get": "Get Sections",
     "sections_hide": "Hide Sections",
@@ -8203,10 +8208,14 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
 
 @splicekit_tool("toggle_structure_blocks")
 def toggle_structure_blocks() -> str:
-    """Toggle visibility of song structure blocks on the timeline.
+    """Remove the song structure block storyline from the timeline, if one is there.
 
-    If structure blocks exist, removes them. If they don't exist,
-    returns an error (use song_structure_blocks to create them first).
+    This is not a visibility toggle and it is not reversible: when structure blocks are
+    on the timeline it DELETES them, by the same code path as ``remove_structure_blocks``.
+    Calling it a second time does not bring them back — it returns an error, because there
+    is now nothing to remove. Rebuild them with ``song_structure_blocks``.
+
+    Returns how many structure block storylines were removed.
     """
     r = bridge.call("structure.toggle")
     if _err(r):

@@ -288,7 +288,9 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"structure.generateBlocks": meta(@"destructive", @"Generates structure blocks on the timeline from analysis."),
             @"structure.generateCaptions": meta(@"destructive", @"Generates structure caption titles on the timeline."),
             @"structure.remove": meta(@"destructive", @"Removes generated structure items."),
-            @"structure.toggle": meta(@"state_dependent", @"Toggles structure overlay visibility."),
+            // Not a visibility toggle: with blocks on the timeline this is structure.remove,
+            // the same SB_removeStoryline call, and the blocks do not come back on a second call.
+            @"structure.toggle": meta(@"destructive", @"Removes the structure block storyline when one is on the timeline, or generates it when sections are passed. Not a visibility toggle."),
 
             // debug config / runtime export (additional)
             @"debug.getConfig": meta(@"safe", @"Reads FCP debug and log configuration keys."),
