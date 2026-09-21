@@ -2662,11 +2662,14 @@ def batch_timeline_actions(actions: str, undo_name: str = "Batch Actions") -> st
     summary = f"Executed {len(action_list)} actions"
     if errors:
         summary += f" ({errors} failed)"
+    # The colon introduces the per-action lines. It belongs on this line: appending
+    # it after the undo-group line produced "Undo group: Batch Actions:".
+    summary += ":"
     if undo_group_opened:
         summary += f"\nUndo group: {undo_name}"
     if begin_edit_note:
         summary += f"\n{begin_edit_note}"
-    return summary + ":\n" + "\n".join(results)
+    return summary + "\n" + "\n".join(results)
 
 
 # ============================================================
@@ -4336,7 +4339,8 @@ def set_inspector_property(property: str, value: float | str | bool) -> str:
     """Set a property on the selected clip's effect parameters.
 
     Args:
-        property: Property name to set:
+        property: Property key to set. These are keys like positionX, not inspector
+                  labels like Position X.
                   "opacity" - 0.0 to 1.0 (0% to 100%)
                   "positionX" - horizontal position in pixels (0 = center)
                   "positionY" - vertical position in pixels (0 = center)
@@ -4347,7 +4351,7 @@ def set_inspector_property(property: str, value: float | str | bool) -> str:
                   "anchorX" - anchor point X
                   "anchorY" - anchor point Y
                   "volume" - audio volume (linear gain, 1.0 = 0dB)
-                  "handle:<handle_id>" - set any channel directly by handle
+                  "handle:<handle_id>" - set any channel directly by its object handle
         value: New numeric value to set
 
     Changes are undoable (Cmd+Z). Creates the transform effect if it doesn't exist yet.
@@ -7665,31 +7669,38 @@ def beat_sync_blade(file_path: str, cut_on: str = "bar",
     if not times:
         return "No cut points remain after filtering"
 
-    # Build summary
+    # Build summary. The numbered rows are the blade points. The song's end is
+    # not a cut (there is nothing to blade there); it is printed afterwards and
+    # is not part of cut_rows, so the "Cuts:" count and the numbered list are
+    # the same list. Counting len(times) and then numbering the end as one more
+    # row made the header say 16 while the list ran to 17.
     structure = data.get("structure", [])
     struct_summary = ""
     if structure:
         labels = [s["label"] for s in structure]
         struct_summary = f"\nSong structure: {' → '.join(labels)}"
 
+    cut_rows = []
+    prev = 0.0
+    for t in times:
+        cut_rows.append((t, t - prev))
+        prev = t
+
     header = (
         f"Beat Sync Blade: {os.path.basename(file_path)}\n"
-        f"BPM: {bpm}  Cut on: {level_desc}  Cuts: {len(times)}{struct_summary}\n"
+        f"BPM: {bpm}  Cut on: {level_desc}  Cuts: {len(cut_rows)}{struct_summary}\n"
     )
 
     if dry_run:
         lines = [header + "DRY RUN — no cuts applied\n"]
         lines.append("Planned cuts:")
-        prev = 0.0
-        for i, t in enumerate(times):
-            clip_dur = t - prev
+        for i, (t, clip_dur) in enumerate(cut_rows):
             lines.append(f"  {i+1:3d}. {t:7.2f}s  (clip: {clip_dur:.2f}s)")
-            prev = t
-        # Final clip to end
         duration = data.get("duration", 0)
-        if duration > 0 and times:
-            lines.append(f"  {len(times)+1:3d}. {duration:7.2f}s  (clip: {duration - times[-1]:.2f}s)  [end]")
-        lines.append(f"\nShortest clip: {min(times[i] - (times[i-1] if i > 0 else 0) for i in range(len(times))):.2f}s")
+        if duration > 0 and cut_rows:
+            last_t = cut_rows[-1][0]
+            lines.append(f"  end {duration:7.2f}s  (clip: {duration - last_t:.2f}s)  [end]")
+        lines.append(f"\nShortest clip: {min(clip_dur for _, clip_dur in cut_rows):.2f}s")
         return "\n".join(lines)
 
     # Execute the blade
@@ -7832,6 +7843,13 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
             "Final Cut Pro may append gap media and lengthen the project."
         )
         lines.append("")
+    if r.get("appendedSpineGapRecorded"):
+        lines.append(
+            f"Recorded pre-paste duration {r.get('prePasteDurationSeconds')}s. "
+            "remove_structure_blocks() deletes the primary-storyline gap that begins at or after it, "
+            "including after Final Cut Pro restarts."
+        )
+        lines.append("")
     for s in structure:
         lines.append(f"  {s['label'].upper():15s}  {s['start']:7.1f}s - {s['end']:7.1f}s  ({s['duration']:.1f}s)")
 
@@ -7858,17 +7876,23 @@ def toggle_structure_blocks() -> str:
 
 @splicekit_tool("remove_structure_blocks")
 def remove_structure_blocks(dry_run: bool = False) -> str:
-    """Remove song structure block storylines and structure captions from the timeline.
+    """Remove song structure block storylines, structure captions, and the gap they appended.
 
     Only deletes captions created by ``song_structure_blocks`` (session registry, or
     fallback match on exact generated section labels like INTRO, VERSE1 — never by role).
+    Also deletes trailing primary-storyline gap generators that begin at or after the
+    sequence duration recorded before that paste. A gap that starts earlier is left alone.
+    The duration is stored in Final Cut Pro's preferences, so it survives a restart.
     """
     r = bridge.call("structure.remove", dryRun=dry_run)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     storylines = int(r.get("removedStorylines", 0))
     captions = int(r.get("removedCaptions", 0))
+    gaps = int(r.get("removedSpineGaps", 0))
     caption_rows = r.get("captions") or []
+    gap_rows = r.get("spineGaps") or []
+    pre_paste = r.get("prePasteDurationSeconds")
 
     def _format_caption_row(row: dict) -> str:
         text = row.get("text", "?")
@@ -7878,9 +7902,29 @@ def remove_structure_blocks(dry_run: bool = False) -> str:
             return f'  "{text}"  {float(start):.3f}s – {float(end):.3f}s'
         return f'  "{text}"'
 
+    def _format_gap_row(row: dict) -> str:
+        cls = row.get("class") or "gap"
+        name = row.get("name") or "Gap"
+        start = row.get("startSeconds")
+        end = row.get("endSeconds")
+        if start is not None and end is not None:
+            return f'  {cls} "{name}"  {float(start):.3f}s – {float(end):.3f}s'
+        return f'  {cls} "{name}"'
+
+    def _gap_heading(count: int) -> str:
+        if pre_paste is None:
+            return f"  {count} primary-storyline gap(s):"
+        return (
+            f"  {count} primary-storyline gap(s) beginning at or after "
+            f"{float(pre_paste):.3f}s:"
+        )
+
     if dry_run:
-        if storylines == 0 and captions == 0:
-            return "Dry run: no structure block storylines or structure captions would be removed."
+        if storylines == 0 and captions == 0 and gaps == 0:
+            return (
+                "Dry run: no structure block storylines, structure captions, "
+                "or appended primary-storyline gaps would be removed."
+            )
         lines = ["Dry run — would remove:"]
         if storylines:
             lines.append(f"  {storylines} storyline(s) named SpliceKit Structure")
@@ -7888,10 +7932,17 @@ def remove_structure_blocks(dry_run: bool = False) -> str:
             lines.append(f"  {captions} structure caption(s):")
             for row in caption_rows:
                 lines.append(_format_caption_row(row))
+        if gaps:
+            lines.append(_gap_heading(gaps))
+            for row in gap_rows:
+                lines.append(_format_gap_row(row))
         return "\n".join(lines)
 
-    if storylines == 0 and captions == 0:
-        return "No structure block storylines or structure captions were found on the timeline."
+    if storylines == 0 and captions == 0 and gaps == 0:
+        return (
+            "No structure block storylines, structure captions, "
+            "or appended primary-storyline gaps were found on the timeline."
+        )
 
     lines = ["Removed structure blocks:"]
     if storylines:
@@ -7900,6 +7951,10 @@ def remove_structure_blocks(dry_run: bool = False) -> str:
         lines.append(f"  {captions} structure caption(s):")
         for row in caption_rows:
             lines.append(_format_caption_row(row))
+    if gaps:
+        lines.append(_gap_heading(gaps))
+        for row in gap_rows:
+            lines.append(_format_gap_row(row))
     return "\n".join(lines)
 
 

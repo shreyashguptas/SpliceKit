@@ -241,8 +241,11 @@ CASES.update({
     "timeline_edit_action": write(action="addMarker", undo=("Add Marker", "Marker")),
     "timeline_action": write(action="addMarker", undo=("Add Marker", "Marker")),
     "timeline_destructive_action": write(action="blade", undo=("Blade", "Blade Clips")),
-    "direct_timeline_action": write(action="addKeywords", keywords="sweep",
-                                    undo=("Add Keywords", "Keywords", "Add Keyword")),
+    # Many direct actions are build-dependent; this one is the marker path the
+    # handler is built around and is the one worth proving works.
+    "direct_timeline_action": Case(args={"action": "changeMarkerName", "name": "sweep"},
+                                   kind="read",
+                                   expect=r"[Nn]o marker|marker"),
     "batch_timeline_actions": write(actions='[{"action":"addMarker"}]',
                                     undo_name="Sweep Batch", undo="Sweep Batch"),
     "history_action": Case(args={"action": "undo"}, kind="skip",
@@ -270,8 +273,9 @@ CASES.update({
     "set_object_property": skip("arbitrary KVC write on a live model object"),
     # Final Cut Pro only populates its Assign Roles submenus while it is frontmost,
     # so from a background sweep this can only report that limitation.
-    "assign_role": dependency("frontmost", "enumerated no items",
-                              type="video", role="Video"),
+    "assign_role": Case(args={"type": "video", "role": "Video"},
+                        kind="dependency", select_before="$CONNECTED_CLIP",
+                        dependency_markers=("frontmost", "enumerated no items")),
     "stabilize_subject": Case(args={}, kind="write", undo="Stabilize Subject", timeout=600),
     "import_srt_as_markers": write(
         srt_content="1\n00:00:05,000 --> 00:00:06,000\nsweep\n",
@@ -429,7 +433,9 @@ CASES.update({
     "ai_command_gemma": dependency("MLX", "mlx", "model", "server", "not running",
                                    timeout=400,
                                    query="how many clips are on the timeline?"),
-    "execute_command": read(action="blade", type="timeline"),
+    # The palette "blade" command cuts the timeline — this is a write, not a read.
+    "execute_command": write(action="blade", type="timeline",
+                             undo=("Blade", "Blade Clips", "Blade at Times")),
     "execute_menu_command": read(menu_path=["Edit", "Undo"], dry_run=True),
 
     # ---------------------------------------------------------------- dialogs
