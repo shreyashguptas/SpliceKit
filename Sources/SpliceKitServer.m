@@ -11059,6 +11059,10 @@ static NSDictionary *SpliceKit_handleCaptionsVerify(NSDictionary *params) {
 // further down this file) imports into a uniquely named project and switches back, and
 // three of those were found sitting in the QA library reporting
 // "No scratch import projects found".
+// Defined with the browser handlers further down; cleanup needs the same walk so it
+// sees exactly the projects browser.listClips reports.
+static NSArray *SpliceKit_browserClipsOfEvent(id event);
+
 static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
     if (name.length == 0) return NO;
     return [name hasPrefix:@"SpliceKit Caption Import"]
@@ -11066,18 +11070,68 @@ static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
         || [name hasPrefix:@"_SKPaste_"];
 }
 
+// The library item to trash when we want a PROJECT gone.
+//
+// -[FFAnchoredSequence libraryItem] and -containerObject both answer the
+// FFEventRecord the project lives IN, not the project's own record. Trashing that
+// would take the whole event with it — for the QA timeline that is the event holding
+// every source clip. -targetSequenceRecord is the project's own FFSequenceRecord and
+// is the only one of the three that is safe to trash, so it is tried first and an
+// event record is refused outright.
+// The events SpliceKit's own FCPXML declares (<event name="SpliceKit Captions"> and
+// <event name="SpliceKit Structure">). Final Cut Pro de-duplicates an imported event name
+// by appending a number, so each import leaves behind "SpliceKit Captions 3", "… 4", "… 5".
+// Only ours, and only ever removed once emptied — see the sweep in captions.cleanup.
+static BOOL SpliceKit_isScratchImportEventName(NSString *name) {
+    if (name.length == 0) return NO;
+    return [name hasPrefix:@"SpliceKit Captions"] || [name hasPrefix:@"SpliceKit Structure"];
+}
+
 static id SpliceKit_libraryItemForSequence(id sequence) {
     if (!sequence) return nil;
     SEL selectors[] = {
+        NSSelectorFromString(@"targetSequenceRecord"),
         NSSelectorFromString(@"libraryItem"),
         NSSelectorFromString(@"containerObject"),
         NSSelectorFromString(@"targetLibraryItem"),
     };
+    Class eventRecordClass = objc_getClass("FFEventRecord");
     for (NSUInteger i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
         SEL sel = selectors[i];
         if (![sequence respondsToSelector:sel]) continue;
-        id item = ((id (*)(id, SEL))objc_msgSend)(sequence, sel);
-        if (item) return item;
+        id item = nil;
+        @try { item = ((id (*)(id, SEL))objc_msgSend)(sequence, sel); }
+        @catch (NSException *e) { item = nil; }
+        if (!item) continue;
+        if (eventRecordClass && [item isKindOfClass:eventRecordClass]) {
+            SpliceKit_log(@"[SpliceKit] Refusing to trash an event: -%@ on a sequence answers "
+                          @"the enclosing event, not the project",
+                          NSStringFromSelector(sel));
+            continue;
+        }
+        return item;
+    }
+
+    // Nothing usable yet. -targetSequenceRecord is nil until Final Cut Pro has actually
+    // loaded the sequence, which is the state every scratch project left over from an
+    // earlier session is in. The enclosing event is an FFLibraryItem, so ask it for the
+    // child record by name.
+    SEL containerSel = NSSelectorFromString(@"containerObject");
+    SEL namedSel = NSSelectorFromString(@"childItemNamed:");
+    SEL displayNameSel = NSSelectorFromString(@"displayName");
+    if ([sequence respondsToSelector:containerSel] && [sequence respondsToSelector:displayNameSel]) {
+        id container = nil;
+        NSString *name = nil;
+        @try {
+            container = ((id (*)(id, SEL))objc_msgSend)(sequence, containerSel);
+            name = ((id (*)(id, SEL))objc_msgSend)(sequence, displayNameSel);
+        } @catch (NSException *e) { container = nil; }
+        if (container && name.length > 0 && [container respondsToSelector:namedSel]) {
+            id child = nil;
+            @try { child = ((id (*)(id, SEL, id))objc_msgSend)(container, namedSel, name); }
+            @catch (NSException *e) { child = nil; }
+            if (child && !(eventRecordClass && [child isKindOfClass:eventRecordClass])) return child;
+        }
     }
     return nil;
 }
@@ -11093,6 +11147,53 @@ static id SpliceKit_libraryForSequence(id sequence, id libraryItem) {
         if (library) return library;
     }
     return nil;
+}
+
+// Move one library item (a project record, or an event record we created ourselves) to
+// the library trash. FCP 12.3's FFLibrary answers all three of these; they are tried in
+// order because the action variant is the one that shows up in Edit > Undo.
+static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *label) {
+    if (!library || !libraryItem) return NO;
+
+    NSError *error = nil;
+    SEL trashActionSel = NSSelectorFromString(@"actionMoveLibraryItemToTrash:actionName:error:");
+    if ([library respondsToSelector:trashActionSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
+            library, trashActionSel, libraryItem, @"SpliceKit Cleanup", &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] actionMoveLibraryItemToTrash failed for '%@': %@",
+                          label ?: @"?", error.localizedDescription);
+            error = nil;
+        }
+    }
+
+    SEL trashSel = NSSelectorFromString(@"trashLibraryItem:immediately:error:");
+    if ([library respondsToSelector:trashSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+            library, trashSel, libraryItem, NO, &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] trashLibraryItem failed for '%@': %@",
+                          label ?: @"?", error.localizedDescription);
+            error = nil;
+        }
+    }
+
+    SEL removeSel = NSSelectorFromString(@"removeLibraryItem:error:");
+    if ([library respondsToSelector:removeSel]) {
+        BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
+            library, removeSel, libraryItem, &error);
+        if (ok) return YES;
+        if (error) {
+            SpliceKit_log(@"[SpliceKit] removeLibraryItem failed for '%@': %@",
+                          label ?: @"?", error.localizedDescription);
+        }
+    }
+
+    SpliceKit_log(@"[SpliceKit] Warning: could not trash '%@': library trash APIs failed",
+                  label ?: @"?");
+    return NO;
 }
 
 BOOL SpliceKit_deleteSequenceLibraryItem(id sequence) {
@@ -11118,48 +11219,11 @@ BOOL SpliceKit_deleteSequenceLibraryItem(id sequence) {
         return NO;
     }
 
-    NSError *error = nil;
-    SEL trashActionSel = NSSelectorFromString(@"actionMoveLibraryItemToTrash:actionName:error:");
-    if ([library respondsToSelector:trashActionSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-            library, trashActionSel, libraryItem, @"SpliceKit Cleanup", &error);
-        if (ok) return YES;
-        if (error) {
-            SpliceKit_log(@"[SpliceKit] actionMoveLibraryItemToTrash failed for '%@': %@",
-                          projectName ?: @"?", error.localizedDescription);
-            error = nil;
-        }
-    }
-
-    SEL trashSel = NSSelectorFromString(@"trashLibraryItem:immediately:error:");
-    if ([library respondsToSelector:trashSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
-            library, trashSel, libraryItem, NO, &error);
-        if (ok) return YES;
-        if (error) {
-            SpliceKit_log(@"[SpliceKit] trashLibraryItem failed for '%@': %@",
-                          projectName ?: @"?", error.localizedDescription);
-            error = nil;
-        }
-    }
-
-    SEL removeSel = NSSelectorFromString(@"removeLibraryItem:error:");
-    if ([library respondsToSelector:removeSel]) {
-        BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
-            library, removeSel, libraryItem, &error);
-        if (ok) return YES;
-        if (error) {
-            SpliceKit_log(@"[SpliceKit] removeLibraryItem failed for '%@': %@",
-                          projectName ?: @"?", error.localizedDescription);
-        }
-    }
-
-    SpliceKit_log(@"[SpliceKit] Warning: could not delete temp project '%@': library trash APIs failed",
-                  projectName ?: @"?");
-    return NO;
+    return SpliceKit_trashLibraryItem(library, libraryItem, projectName);
 }
 
-// Clean up stale scratch import projects (caption + song-structure FCPXML temps).
+// Clean up stale scratch import projects (caption + song-structure FCPXML temps) and the
+// events SpliceKit's own FCPXML created to hold them.
 static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
     BOOL dryRun = [params[@"dryRun"] boolValue];
     __block NSDictionary *result = nil;
@@ -11172,11 +11236,21 @@ static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
                 return;
             }
             id library = [(NSArray *)activeLibs objectAtIndex:0];
-            id seqSet = ((id (*)(id, SEL))objc_msgSend)(library,
-                NSSelectorFromString(@"_deepLoadedSequences"));
-            NSArray *allSeqs = ((id (*)(id, SEL))objc_msgSend)(seqSet,
-                NSSelectorFromString(@"allObjects"));
-            if (![allSeqs isKindOfClass:[NSArray class]]) {
+
+            // Walk the library's events, not -_deepLoadedSequences.
+            //
+            // _deepLoadedSequences only answers the sequences Final Cut Pro currently has
+            // loaded in memory. A scratch project that was imported, copied from and
+            // switched away from is not loaded, so it was invisible here: three _SKPaste_*
+            // projects sat in the QA library while this handler reported "No scratch import
+            // projects found" and browser.listClips listed all three. This is the same walk
+            // browser.listClips makes, so anything the browser shows, cleanup can see.
+            SEL eventsSel = NSSelectorFromString(@"events");
+            NSArray *events = nil;
+            if ([library respondsToSelector:eventsSel]) {
+                events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
+            }
+            if (![events isKindOfClass:[NSArray class]]) {
                 result = @{
                     @"status": @"ok",
                     @"dryRun": @(dryRun),
@@ -11185,51 +11259,103 @@ static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
                     @"foundNames": @[],
                     @"removedNames": @[],
                     @"failedNames": @[],
-                    @"message": @"No sequences found"
+                    @"foundEventNames": @[],
+                    @"removedEventNames": @[],
+                    @"message": @"No events found"
                 };
                 return;
             }
 
-            NSMutableArray *foundNames = [NSMutableArray array];
-            NSMutableArray *toDelete = [NSMutableArray array];
-            for (id seq in allSeqs) {
-                NSString *name = nil;
-                SEL dnSel = NSSelectorFromString(@"displayName");
-                if ([seq respondsToSelector:dnSel]) {
-                    name = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel);
+            SEL dnSel = NSSelectorFromString(@"displayName");
+            NSMutableArray *foundNames = [NSMutableArray array];   // scratch projects
+            NSMutableArray *looseProjects = [NSMutableArray array]; // ones not in a scratch event
+            NSMutableArray *foundEvents = [NSMutableArray array];
+            NSMutableArray *eventsToRemove = [NSMutableArray array];
+            NSMutableArray *eventProjectNames = [NSMutableArray array]; // parallel to eventsToRemove
+
+            for (id event in events) {
+                NSString *eventName = nil;
+                if ([event respondsToSelector:dnSel]) {
+                    eventName = ((id (*)(id, SEL))objc_msgSend)(event, dnSel);
                 }
-                if (!SpliceKit_isScratchImportProjectName(name)) continue;
-                [foundNames addObject:name ?: @"?"];
-                [toDelete addObject:seq];
+                NSArray *items = SpliceKit_browserClipsOfEvent(event);
+
+                NSMutableArray *scratchHere = [NSMutableArray array];
+                BOOL everythingIsScratch = YES;
+                for (id item in items) {
+                    // Matched on name alone, deliberately. -isProject only answers YES once
+                    // Final Cut Pro has actually loaded the sequence, so right after launch
+                    // every project except the open one reads NO and gating on it made this
+                    // handler report "No scratch import projects found" with three scratch
+                    // projects sitting in the browser. The names below are ones SpliceKit
+                    // itself generates, so the name is the reliable signal.
+                    NSString *name = nil;
+                    if ([item respondsToSelector:dnSel]) {
+                        name = ((id (*)(id, SEL))objc_msgSend)(item, dnSel);
+                    }
+                    if (SpliceKit_isScratchImportProjectName(name)) {
+                        [scratchHere addObject:@[name ?: @"?", item]];
+                    } else {
+                        everythingIsScratch = NO;
+                    }
+                }
+
+                // An event SpliceKit's own FCPXML declared, holding nothing but SpliceKit
+                // scratch, goes as a unit. That is both tidier and the only way to clear a
+                // scratch project Final Cut Pro has not loaded: an unloaded sequence has no
+                // reachable FFSequenceRecord to trash, but its event always does.
+                BOOL eventIsOurs = SpliceKit_isScratchImportEventName(eventName) && everythingIsScratch;
+                NSMutableArray *namesHere = [NSMutableArray array];
+                for (NSArray *pair in scratchHere) {
+                    [foundNames addObject:pair[0]];
+                    [namesHere addObject:pair[0]];
+                    if (!eventIsOurs) [looseProjects addObject:pair];
+                }
+                if (eventIsOurs) {
+                    [foundEvents addObject:eventName ?: @"?"];
+                    [eventsToRemove addObject:event];
+                    [eventProjectNames addObject:namesHere];
+                }
             }
 
             NSMutableArray *removedNames = [NSMutableArray array];
+            NSMutableArray *removedEvents = [NSMutableArray array];
             NSMutableArray *failedNames = [NSMutableArray array];
             if (!dryRun) {
-                for (id seq in toDelete) {
-                    NSString *name = nil;
-                    SEL dnSel = NSSelectorFromString(@"displayName");
-                    if ([seq respondsToSelector:dnSel]) {
-                        name = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel);
-                    }
-                    if (SpliceKit_deleteSequenceLibraryItem(seq)) {
-                        [removedNames addObject:name ?: @"?"];
+                for (NSArray *pair in looseProjects) {
+                    if (SpliceKit_deleteSequenceLibraryItem(pair[1])) {
+                        [removedNames addObject:pair[0]];
                     } else {
-                        [failedNames addObject:name ?: @"?"];
+                        [failedNames addObject:pair[0]];
+                    }
+                }
+                for (NSUInteger i = 0; i < eventsToRemove.count; i++) {
+                    NSString *eventName = foundEvents[i];
+                    if (SpliceKit_trashLibraryItem(library, eventsToRemove[i], eventName)) {
+                        [removedEvents addObject:eventName];
+                        // The projects inside went with it.
+                        [removedNames addObjectsFromArray:eventProjectNames[i]];
+                    } else {
+                        [failedNames addObject:eventName];
+                        [failedNames addObjectsFromArray:eventProjectNames[i]];
                     }
                 }
             }
 
             NSString *message = nil;
             if (dryRun) {
-                message = foundNames.count > 0
-                    ? [NSString stringWithFormat:@"Would remove %lu scratch import project(s)",
-                        (unsigned long)foundNames.count]
+                message = (foundNames.count + foundEvents.count) > 0
+                    ? [NSString stringWithFormat:
+                        @"Would remove %lu scratch import project(s) and %lu scratch event(s)",
+                        (unsigned long)foundNames.count, (unsigned long)foundEvents.count]
                     : @"No scratch import projects found";
-            } else if (removedNames.count > 0) {
-                message = [NSString stringWithFormat:@"Removed %lu scratch import project(s)",
-                    (unsigned long)removedNames.count];
-            } else if (foundNames.count > 0) {
+            } else if ((removedNames.count + removedEvents.count) > 0) {
+                message = [NSString stringWithFormat:
+                    @"Removed %lu scratch import project(s) and %lu scratch event(s). "
+                    @"They are in the library trash until File > Delete Generated Library Files "
+                    @"or emptying the trash clears them.",
+                    (unsigned long)removedNames.count, (unsigned long)removedEvents.count];
+            } else if (foundNames.count + foundEvents.count > 0) {
                 message = @"Found scratch import projects but could not remove any (see failedNames)";
             } else {
                 message = @"No scratch import projects found";
@@ -11243,6 +11369,8 @@ static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
                 @"foundNames": foundNames,
                 @"removedNames": removedNames,
                 @"failedNames": failedNames,
+                @"foundEventNames": foundEvents,
+                @"removedEventNames": removedEvents,
                 @"message": message
             };
         } @catch (NSException *e) {
@@ -15673,11 +15801,14 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
         }
 
         // --- Clean up temp project ---
+        // -[FFAnchoredTimelineModule deleteSequence:] was asked to do this and silently
+        // did nothing — the module is back on the user's sequence by now, not the scratch
+        // one — which is how three _SKPaste_* projects came to be sitting in the library.
+        // Trash the project's own library record instead, and say so if it fails.
         @try {
-            SEL delSel = NSSelectorFromString(@"deleteSequence:");
-            id tm = SpliceKit_getActiveTimelineModule();
-            if (tm && [tm respondsToSelector:delSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(tm, delSel, tempSeq);
+            if (!SpliceKit_deleteSequenceLibraryItem(tempSeq)) {
+                SpliceKit_log(@"[FCPXMLPaste] Could not remove temp project '%@' — "
+                              @"cleanup_temp_projects will pick it up", tempProjectName);
             }
         } @catch (NSException *e) {
             SpliceKit_log(@"[FCPXMLPaste] Cleanup error: %@", e);
@@ -17028,6 +17159,54 @@ static NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params)
 // overview, the song-cut clip pool) goes through this, so an index from one listing
 // names the same clip in the others. browser.placeClip used to ask ownedClips only, which FCP 12.3's
 // FFEventRecord does not answer as an array, so name and index never resolved.
+// Drop the items sitting in the library trash.
+//
+// -displayOwnedClips keeps answering an item after it has been moved to the library
+// trash — renamed with a random suffix, "_SKPaste_10705" becoming
+// "_SKPaste_10705-AWx2h5" — even though Final Cut Pro's own browser no longer shows it.
+// That made cleanup_temp_projects report the same three scratch projects again
+// immediately after trashing them, and browser.listClips offer trashed projects as clips
+// to place. FFLibrary's -_itemInTrash: is the test, and it wants the item's library
+// RECORD, not the FFAnchoredSequence: asked about the sequence it answers NO for a
+// project that is demonstrably in __Trash/ on disk.
+//
+// -targetLibraryItem answers the FFSequenceRecord for a project but only the enclosing
+// FFEventRecord for a source clip, so a source clip can only be judged by its event. An
+// item we cannot positively identify as trashed is kept.
+static NSArray *SpliceKit_browserRemoveTrashedItems(id event, NSArray *items) {
+    if (items.count == 0) return items;
+    SEL inTrashSel = NSSelectorFromString(@"_itemInTrash:");
+    id library = nil;
+    SEL librarySel = NSSelectorFromString(@"library");
+    if ([event respondsToSelector:librarySel]) {
+        @try { library = ((id (*)(id, SEL))objc_msgSend)(event, librarySel); }
+        @catch (NSException *e) { library = nil; }
+    }
+    if (!library || ![library respondsToSelector:inTrashSel]) return items;
+
+    SEL recordSels[] = {
+        NSSelectorFromString(@"targetSequenceRecord"),
+        NSSelectorFromString(@"targetLibraryItem"),
+    };
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:items.count];
+    for (id item in items) {
+        id record = nil;
+        for (NSUInteger i = 0; i < sizeof(recordSels) / sizeof(recordSels[0]) && !record; i++) {
+            if (![item respondsToSelector:recordSels[i]]) continue;
+            @try { record = ((id (*)(id, SEL))objc_msgSend)(item, recordSels[i]); }
+            @catch (NSException *e) { record = nil; }
+        }
+        BOOL trashed = NO;
+        if (record) {
+            @try {
+                trashed = ((BOOL (*)(id, SEL, id))objc_msgSend)(library, inTrashSel, record);
+            } @catch (NSException *e) { trashed = NO; }
+        }
+        if (!trashed) [kept addObject:item];
+    }
+    return kept;
+}
+
 static NSArray *SpliceKit_browserClipsOfEvent(id event) {
     if (!event) return @[];
     for (NSString *name in @[@"displayOwnedClips", @"ownedClips", @"childItems", @"items"]) {
@@ -17036,7 +17215,7 @@ static NSArray *SpliceKit_browserClipsOfEvent(id event) {
         id clips = nil;
         @try { clips = ((id (*)(id, SEL))objc_msgSend)(event, sel); } @catch (NSException *e) { clips = nil; }
         NSArray *arr = SpliceKit_mixerArrayFromContainer(clips);
-        if (arr) return arr;
+        if (arr) return SpliceKit_browserRemoveTrashedItems(event, arr);
     }
     return @[];
 }
