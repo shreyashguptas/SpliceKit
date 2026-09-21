@@ -9726,11 +9726,11 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
 def cleanup_temp_projects(dry_run: bool = False) -> str:
     """Remove stale scratch projects left by caption and song-structure pipelines.
 
-    ``generate_native_captions`` and ``song_structure_blocks`` (and related
-    structure-caption import) create temporary FCPXML import projects named
-    ``SpliceKit Caption Import *`` or ``SK Structure *``. They should be
-    deleted automatically when each run finishes; this tool finds any that
-    were left behind and moves them to the library Trash.
+    ``generate_native_captions``, ``song_structure_blocks`` (and related
+    structure-caption import) and the FCPXML pasteboard route create temporary
+    import projects named ``SpliceKit Caption Import *``, ``SK Structure *`` or
+    ``_SKPaste_*``. They should be deleted automatically when each run finishes;
+    this tool finds any that were left behind and moves them to the library Trash.
 
     Args:
         dry_run: When true, only list matching project names without deleting.

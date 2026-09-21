@@ -586,9 +586,20 @@ class Sweep:
         m = re.search(r'"effectStackHandle":\s*"(obj_\d+)"', props)
         self.placeholders["$EFFECT_STACK"] = m.group(1) if m else ""
 
+        # A source clip, not a project: browser_list_clips marks projects with
+        # isProject true, and the place/append tools rightly refuse one.
         browser = await self.call("browser_list_clips", {})
-        m = re.search(r"(obj_\d+)", browser)
-        self.placeholders["$BROWSER_CLIP"] = m.group(1) if m else ""
+        source = ""
+        for block in re.findall(r"\{[^{}]*\}", browser, re.S):
+            if '"isProject": false' in block:
+                h = re.search(r'"handle":\s*"(obj_\d+)"', block)
+                if h:
+                    source = h.group(1)
+                    break
+        if not source:
+            m = re.search(r"(obj_\d+)", browser)
+            source = m.group(1) if m else ""
+        self.placeholders["$BROWSER_CLIP"] = source
 
         # The mixer hands out its own handles: a volume channel and an effect stack
         # per fader. A clip's effect-stack handle from get_inspector_properties is not

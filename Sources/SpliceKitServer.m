@@ -11053,9 +11053,17 @@ static NSDictionary *SpliceKit_handleCaptionsVerify(NSDictionary *params) {
     return result ?: @{@"error": @"Verification failed"};
 }
 
+// Every scratch project SpliceKit creates for an import must be named here, or
+// cleanup_temp_projects walks straight past it and it stays in the library for good.
+// "_SKPaste_" was missing: the FCPXML pasteboard route (see the tempProjectName built
+// further down this file) imports into a uniquely named project and switches back, and
+// three of those were found sitting in the QA library reporting
+// "No scratch import projects found".
 static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
     if (name.length == 0) return NO;
-    return [name hasPrefix:@"SpliceKit Caption Import"] || [name hasPrefix:@"SK Structure"];
+    return [name hasPrefix:@"SpliceKit Caption Import"]
+        || [name hasPrefix:@"SK Structure"]
+        || [name hasPrefix:@"_SKPaste_"];
 }
 
 static id SpliceKit_libraryItemForSequence(id sequence) {
