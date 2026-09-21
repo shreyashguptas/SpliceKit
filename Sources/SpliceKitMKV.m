@@ -15,7 +15,7 @@ extern void MTRegisterPluginFormatReaderBundleDirectory(CFURLRef directoryURL);
 extern void MTRegisterProfessionalVideoWorkflowFormatReaders(void);
 extern void VTRegisterProfessionalVideoWorkflowVideoDecoders(void);
 
-// ProCore private registration entry point — same symbol BRAW uses.
+// ProCore private registration entry point.
 typedef int64_t (*MKVPCRegisterFormatReadersFromDirectoryFn)(CFURLRef, bool);
 typedef int64_t (*MKVPCRegisterFormatReadersFromAppBundleFn)(bool);
 typedef int64_t (*MKVPCRegisterMediaExtensionFormatReadersFn)(void);
@@ -36,7 +36,7 @@ static BOOL SpliceKitMKVIsMatroskaUTIString(NSString *identifier) {
 
 // Matroska UTIs conform to these "gate" types so AVFoundation / FCP stop
 // treating the file as unknown. We intentionally keep the list narrow to
-// media-shaped types — same policy BRAW uses.
+// media-shaped types.
 static BOOL SpliceKitMKVShouldConformMatroskaTo(NSString *targetIdentifier) {
     if (targetIdentifier.length == 0) return NO;
     return [targetIdentifier isEqualToString:@"public.movie"] ||
@@ -132,7 +132,7 @@ static NSDictionary *SpliceKitMKVOptionsWithMIMEOverride(NSURL *url, NSDictionar
 
     NSMutableDictionary *modified = options ? [options mutableCopy] : [NSMutableDictionary dictionary];
     if (!modified[AVURLAssetOverrideMIMETypeKey]) {
-        // Route through AVFoundation's QuickTime path — same trick BRAW uses.
+        // Route through AVFoundation's QuickTime path.
         // Our MT plugin's CMMatchingInfo then routes the inner container parse
         // to libwebm via the UTI/extension match.
         modified[AVURLAssetOverrideMIMETypeKey] = @"video/quicktime";
@@ -401,7 +401,7 @@ void SpliceKitMKV_Bootstrap(void) {
 
     // 5. Kick the professional-workflow registration paths. These load
     //    additional Apple format readers + video decoders that the standard
-    //    AVFoundation plugin sweep skips in non-pro apps. BRAW depends on
+    //    AVFoundation plugin sweep skips in non-pro apps. MKV depends on
     //    this being called too — same helper symbols.
     @try {
         MTRegisterProfessionalVideoWorkflowFormatReaders();
@@ -440,7 +440,7 @@ void SpliceKitMKV_Bootstrap(void) {
         SpliceKit_log(@"[MKVHost] ProCore register-from-app-bundle result=%lld", result);
     }
 
-    // BRAW parity: ProCore's MediaExtension format-reader helper. Even though
+    // ProCore's MediaExtension format-reader helper. Even though
     // we don't ship a MediaExtension appex, triggering this ensures the MT
     // plugin registry gets fully flushed into ProCore's importer cache.
     MKVPCRegisterMediaExtensionFormatReadersFn registerMediaExt =

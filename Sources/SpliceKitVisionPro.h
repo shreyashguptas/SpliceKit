@@ -84,11 +84,6 @@ extern NSString * const SpliceKitVisionProStateDidChangeNotification;
           yCbCrMatrix:(NSInteger)yCbCrMatrix
                 error:(NSError **)error;
 
-- (BOOL)pushBRAWFrameAtPath:(NSString *)path
-                 frameIndex:(uint32_t)frameIndex
-                  scaleHint:(uint32_t)scaleHint
-                      error:(NSError **)error;
-
 // Snapshot of state for RPC consumers.
 - (NSDictionary<NSString *, id> *)stateSnapshot;
 

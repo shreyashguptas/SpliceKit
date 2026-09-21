@@ -64,37 +64,6 @@ TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
 PARAKEET_BIN = $(BUILD_DIR)/parakeet-transcriber
 WHISPER_BIN = $(BUILD_DIR)/whisper-transcriber
 
-BRAW_SOURCE_DIR = Plugins/BRAW/Sources
-BRAW_PRIVATE_DIR = $(BRAW_SOURCE_DIR)/Private
-BRAW_BUILD_DIR = $(BUILD_DIR)/braw-prototype
-BRAW_SDK_FRAMEWORK_DIR = /Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Libraries
-BRAW_SDK_FRAMEWORK = $(BRAW_SDK_FRAMEWORK_DIR)/BlackmagicRawAPI.framework
-BRAW_IMPORT_BUNDLE = $(BRAW_BUILD_DIR)/FormatReaders/SpliceKitBRAWImport.bundle
-BRAW_IMPORT_EXEC = $(BRAW_IMPORT_BUNDLE)/Contents/MacOS/SpliceKitBRAWImport
-BRAW_IMPORT_INFO = Plugins/BRAW/FormatReaders/SpliceKitBRAWImport.bundle/Contents/Info.plist
-BRAW_DECODER_BUNDLE = $(BRAW_BUILD_DIR)/Codecs/SpliceKitBRAWDecoder.bundle
-BRAW_DECODER_EXEC = $(BRAW_DECODER_BUNDLE)/Contents/MacOS/SpliceKitBRAWDecoder
-BRAW_DECODER_INFO = Plugins/BRAW/Codecs/SpliceKitBRAWDecoder.bundle/Contents/Info.plist
-BRAW_COMMON_SOURCES = $(BRAW_SOURCE_DIR)/BRAWCommon.mm
-BRAW_IMPORT_SOURCES = $(BRAW_COMMON_SOURCES) $(BRAW_SOURCE_DIR)/BRAWFormatReader.mm
-BRAW_DECODER_SOURCES = $(BRAW_COMMON_SOURCES) $(BRAW_SOURCE_DIR)/BRAWVideoDecoder.mm
-BRAW_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework MediaToolbox -framework Accelerate
-BRAW_CFLAGS = $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -I $(BRAW_SOURCE_DIR) -I $(BRAW_PRIVATE_DIR)
-BRAW_LDFLAGS = -bundle $(CPP_LIBS)
-BRAW_RAWPROC_DIR = MediaExtensions/BRAWRAWProcessor
-BRAW_RAWPROC_BUNDLE = $(BRAW_BUILD_DIR)/Extensions/SpliceKitBRAWRAWProcessor.appex
-BRAW_RAWPROC_EXEC = $(BRAW_RAWPROC_BUNDLE)/Contents/MacOS/SpliceKitBRAWRAWProcessor
-BRAW_RAWPROC_INFO = $(BRAW_RAWPROC_DIR)/Info.plist
-BRAW_RAWPROC_ENTITLEMENTS = $(BRAW_RAWPROC_DIR)/BRAWRAWProcessor.entitlements
-BRAW_RAWPROC_PROFILE = $(BRAW_RAWPROC_DIR)/embedded.provisionprofile
-BRAW_RAWPROC_SOURCES = $(BRAW_COMMON_SOURCES) $(wildcard $(BRAW_RAWPROC_DIR)/Sources/*.mm)
-BRAW_RAWPROC_FRAMEWORK_DEST = $(BRAW_RAWPROC_BUNDLE)/Contents/Frameworks/BlackmagicRawAPI.framework
-BRAW_RAWPROC_SIGN_ID = $(shell security find-identity -v -p codesigning 2>/dev/null | awk '/"Developer ID Application:/ { print $$2; exit }')
-BRAW_RAWPROC_FRAMEWORKS = -F "$(BRAW_SDK_FRAMEWORK_DIR)" -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework MediaExtension -framework MediaToolbox -framework VideoToolbox -framework BlackmagicRawAPI
-BRAW_RAWPROC_MIN_VERSION = -mmacosx-version-min=15.0
-BRAW_RAWPROC_CFLAGS = $(ARCHS) $(BRAW_RAWPROC_MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -fapplication-extension -I $(BRAW_SOURCE_DIR) -I $(BRAW_PRIVATE_DIR)
-BRAW_RAWPROC_LDFLAGS = $(CPP_LIBS) -Wl,-rpath,@executable_path/../Frameworks
-
 # --- VP9 codec bundle (Plugins/VP9 → FCP.app/Contents/PlugIns/Codecs) --------
 VP9_SOURCE_DIR = Plugins/VP9/Sources
 VP9_PRIVATE_DIR = $(VP9_SOURCE_DIR)/Private
@@ -125,7 +94,7 @@ MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework Core
 MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
 # copy of Final Cut Pro, the MCP server (proven over the wire with
@@ -376,23 +345,6 @@ $(DSYM): $(OUTPUT)
 clean:
 	rm -rf $(BUILD_DIR)
 
-$(BRAW_BUILD_DIR): | $(BUILD_DIR)
-	@mkdir -p "$(BRAW_BUILD_DIR)"
-
-$(BRAW_IMPORT_EXEC): $(BRAW_IMPORT_SOURCES) $(BRAW_IMPORT_INFO) | $(BRAW_BUILD_DIR)
-	@mkdir -p "$(BRAW_IMPORT_BUNDLE)/Contents/MacOS"
-	@cp "$(BRAW_IMPORT_INFO)" "$(BRAW_IMPORT_BUNDLE)/Contents/Info.plist"
-	$(CC) $(BRAW_CFLAGS) $(BRAW_FRAMEWORKS) $(BRAW_IMPORT_SOURCES) $(BRAW_LDFLAGS) -o "$(BRAW_IMPORT_EXEC)"
-	@codesign --force --sign - "$(BRAW_IMPORT_BUNDLE)" >/dev/null
-	@echo "Built: $(BRAW_IMPORT_BUNDLE)"
-
-$(BRAW_DECODER_EXEC): $(BRAW_DECODER_SOURCES) $(BRAW_DECODER_INFO) | $(BRAW_BUILD_DIR)
-	@mkdir -p "$(BRAW_DECODER_BUNDLE)/Contents/MacOS"
-	@cp "$(BRAW_DECODER_INFO)" "$(BRAW_DECODER_BUNDLE)/Contents/Info.plist"
-	$(CC) $(BRAW_CFLAGS) $(BRAW_FRAMEWORKS) $(BRAW_DECODER_SOURCES) $(BRAW_LDFLAGS) -o "$(BRAW_DECODER_EXEC)"
-	@codesign --force --sign - "$(BRAW_DECODER_BUNDLE)" >/dev/null
-	@echo "Built: $(BRAW_DECODER_BUNDLE)"
-
 $(VP9_DECODER_EXEC): $(VP9_DECODER_SOURCES) $(VP9_DECODER_INFO) | $(BUILD_DIR)
 	@mkdir -p "$(VP9_DECODER_BUNDLE)/Contents/MacOS"
 	@cp "$(VP9_DECODER_INFO)" "$(VP9_DECODER_BUNDLE)/Contents/Info.plist"
@@ -413,58 +365,7 @@ $(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
 mkv-prototype: $(MKV_IMPORT_EXEC)
 	@echo "Staged: $(MKV_BUILD_DIR)"
 
-$(BRAW_RAWPROC_EXEC): $(BRAW_RAWPROC_SOURCES) $(BRAW_RAWPROC_INFO) $(BRAW_RAWPROC_ENTITLEMENTS) $(BRAW_RAWPROC_PROFILE) | $(BRAW_BUILD_DIR)
-	@mkdir -p "$(BRAW_RAWPROC_BUNDLE)/Contents/MacOS"
-	@test -d "$(BRAW_SDK_FRAMEWORK)" || { echo "Missing BRAW SDK framework at $(BRAW_SDK_FRAMEWORK)"; exit 1; }
-	@cp "$(BRAW_RAWPROC_INFO)" "$(BRAW_RAWPROC_BUNDLE)/Contents/Info.plist"
-	@cp "$(BRAW_RAWPROC_PROFILE)" "$(BRAW_RAWPROC_BUNDLE)/Contents/embedded.provisionprofile"
-	$(CC) $(BRAW_RAWPROC_CFLAGS) $(BRAW_RAWPROC_FRAMEWORKS) $(BRAW_RAWPROC_SOURCES) $(BRAW_RAWPROC_LDFLAGS) -o "$(BRAW_RAWPROC_EXEC)"
-	@mkdir -p "$(BRAW_RAWPROC_BUNDLE)/Contents/Frameworks"
-	@rm -rf "$(BRAW_RAWPROC_FRAMEWORK_DEST)"
-	@cp -R "$(BRAW_SDK_FRAMEWORK)" "$(BRAW_RAWPROC_FRAMEWORK_DEST)"
-	@sign_id="$(BRAW_RAWPROC_SIGN_ID)"; \
-	if [ -n "$$sign_id" ]; then \
-		echo "Signing appex with Developer ID: $$sign_id"; \
-		codesign --force --sign "$$sign_id" --options runtime "$(BRAW_RAWPROC_FRAMEWORK_DEST)" >/dev/null; \
-		codesign --force --sign "$$sign_id" --options runtime --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(BRAW_RAWPROC_BUNDLE)" >/dev/null; \
-	else \
-		echo "Warning: no Developer ID Application identity; ad-hoc signing (extension will NOT load pluginkit-registered)"; \
-		codesign --force --sign - "$(BRAW_RAWPROC_FRAMEWORK_DEST)" >/dev/null; \
-		if ! codesign --force --sign - --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(BRAW_RAWPROC_BUNDLE)" >/dev/null 2>&1; then \
-			echo "Warning: ad-hoc signing with RAW processor entitlements failed; retrying without entitlements"; \
-			codesign --force --sign - "$(BRAW_RAWPROC_BUNDLE)" >/dev/null; \
-		fi; \
-	fi
-	@echo "Built: $(BRAW_RAWPROC_BUNDLE)"
-
-BRAW_CLI_SRC = tools/braw-decoder/braw-decoder.mm
-BRAW_CLI_BIN = $(BUILD_DIR)/braw-decoder
-BRAW_CLI_FRAMEWORK_DIR = /Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Libraries
-
-# Subprocess CLI that hosts the BRAW SDK in its own process. FCP's SpliceKit
-# framework talks to it over pipes; see tools/braw-decoder/braw-decoder.mm for
-# the wire protocol.
-$(BRAW_CLI_BIN): $(BRAW_CLI_SRC) | $(BUILD_DIR)
-	$(CC) -arch arm64 -arch x86_64 $(MIN_VERSION) $(OBJCXX_FLAGS) -O2 \
-		-F "$(BRAW_CLI_FRAMEWORK_DIR)" \
-		-framework Foundation -framework CoreFoundation -framework BlackmagicRawAPI \
-		-Wl,-rpath,"$(BRAW_CLI_FRAMEWORK_DIR)" \
-		$(BRAW_CLI_SRC) $(CPP_LIBS) -o "$(BRAW_CLI_BIN)"
-	@codesign --force --sign - "$(BRAW_CLI_BIN)" >/dev/null
-	@echo "Built: $(BRAW_CLI_BIN)"
-
-# Enable the BRAW prototype bundles by default during deploy; override with
-# ENABLE_BRAW_PROTOTYPE=0 to skip copying them into the modded FCP app.
-ENABLE_BRAW_PROTOTYPE ?= 1
-ENABLE_BRAW_RAW_PROCESSOR ?= 0
-
-braw-prototype: $(BRAW_IMPORT_EXEC) $(BRAW_DECODER_EXEC) $(BRAW_CLI_BIN)
-	@echo "Staged: $(BRAW_BUILD_DIR)"
-
-braw-raw-processor: $(BRAW_RAWPROC_EXEC)
-	@echo "Staged: $(BRAW_RAWPROC_BUNDLE)"
-
-deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP) braw-prototype vp9-prototype mkv-prototype
+deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP) vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
@@ -515,16 +416,6 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BE
 	@cp -n Scripts/lua/examples/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/examples/" 2>/dev/null || true
 	@cp -n Scripts/lua/menu/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/menu/" 2>/dev/null || true
 	@cp -n Scripts/lua/lib/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/lib/" 2>/dev/null || true
-	@if [ "$(ENABLE_BRAW_PROTOTYPE)" = "1" ]; then \
-		$(MAKE) braw-prototype; \
-		mkdir -p "$(MODDED_APP)/Contents/PlugIns/Codecs"; \
-		mkdir -p "$(MODDED_APP)/Contents/PlugIns/FormatReaders"; \
-		rm -rf "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
-		rm -rf "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; \
-		cp -R "$(BUILD_DIR)/braw-prototype/Codecs/SpliceKitBRAWDecoder.bundle" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
-		cp -R "$(BUILD_DIR)/braw-prototype/FormatReaders/SpliceKitBRAWImport.bundle" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; \
-		echo "Opt-in BRAW prototype bundles copied into FCP.app/Contents/PlugIns"; \
-	fi
 	@$(MAKE) vp9-prototype
 	@mkdir -p "$(MODDED_APP)/Contents/PlugIns/Codecs"
 	@rm -rf "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"
@@ -535,13 +426,6 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BE
 	@rm -rf "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
 	@cp -R "$(MKV_IMPORT_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
 	@echo "MKV/WebM format reader copied into FCP.app/Contents/PlugIns"
-	@if [ "$(ENABLE_BRAW_RAW_PROCESSOR)" = "1" ]; then \
-		$(MAKE) braw-raw-processor; \
-		mkdir -p "$(MODDED_APP)/Contents/Extensions"; \
-		rm -rf "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; \
-		cp -R "$(BUILD_DIR)/braw-prototype/Extensions/SpliceKitBRAWRAWProcessor.appex" "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; \
-		echo "Opt-in BRAW RAW processor copied into FCP.app/Contents/Extensions"; \
-	fi
 	@sign_identity=$$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development:/ { print $$2; exit } /"Developer ID Application:/ && developer == "" { developer = $$2 } /[0-9]+\) [0-9A-F]+ "/ && first == "" { first = $$2 } END { if (developer != "") print developer; else if (first != "") print first }'); \
 	if [ -n "$$sign_identity" ]; then \
 		echo "Using signing identity: $$sign_identity"; \
@@ -549,23 +433,8 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BE
 		sign_identity="-"; \
 		echo "No local codesigning identity found; falling back to ad-hoc signing"; \
 	fi; \
-	if [ -d "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle" ]; then \
-		codesign --force --sign "$$sign_identity" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; \
-	fi; \
-	if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" ]; then \
-		codesign --force --sign "$$sign_identity" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
-	fi; \
 	if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle" ]; then \
 		codesign --force --sign "$$sign_identity" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; \
-	fi; \
-	if [ -d "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" ]; then \
-		appex_sign_id="$(BRAW_RAWPROC_SIGN_ID)"; \
-		if [ -n "$$appex_sign_id" ]; then \
-			echo "Signing deployed appex with Developer ID: $$appex_sign_id"; \
-			codesign --force --sign "$$appex_sign_id" --options runtime --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; \
-		else \
-			codesign --force --sign "$$sign_identity" --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; \
-		fi; \
 	fi; \
 	if [ -d "$(PROAPP_SUPPORT_FRAMEWORK)" ]; then \
 		codesign --force --sign "$$sign_identity" "$(PROAPP_SUPPORT_FRAMEWORK)"; \
@@ -579,18 +448,8 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BE
 			exit 1; \
 		fi; \
 		echo "Developer signing failed; retrying with ad-hoc signature"; \
-		if [ -d "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle" ]; then \
-			codesign --force --sign - "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; \
-		fi; \
-		if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" ]; then \
-			codesign --force --sign - "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
-		fi; \
 		if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle" ]; then \
 			codesign --force --sign - "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; \
-		fi; \
-		if [ -d "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" ]; then \
-			codesign --force --sign - --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" || \
-			codesign --force --sign - "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; \
 		fi; \
 		if [ -d "$(PROAPP_SUPPORT_FRAMEWORK)" ]; then \
 			codesign --force --sign - "$(PROAPP_SUPPORT_FRAMEWORK)"; \

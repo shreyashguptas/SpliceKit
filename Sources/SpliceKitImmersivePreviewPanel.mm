@@ -1,5 +1,4 @@
 #import "SpliceKitImmersivePreviewPanel.h"
-#import "SpliceKitBRAWExports.h"
 #import "SpliceKitVisionPro.h"
 #import "SpliceKit.h"
 
@@ -118,7 +117,7 @@ static SKIPFFPlayerFrameCameraModeIMP sSKIPOriginalFFPlayerFrameCameraMode = NUL
 static std::atomic<bool> sSKIPNativeFCP360ProjectionPatchEnabled(false);
 static std::atomic<uint64_t> sSKIPNativeFCP360ProjectionPatchCalls(0);
 static std::atomic<uint64_t> sSKIPNativeFCP360CameraModeOverrides(0);
-// FFSphericalMode value FCP's 360 viewer should see for BRAW immersive frames.
+// FFSphericalMode value FCP's 360 viewer should see for immersive camera frames.
 // 3 = FFSphericalMode_DualFisheye (Apple Immersive / URSA Immersive default).
 static std::atomic<int> sSKIPNativeFCP360CameraModeOverrideValue(3);
 static thread_local const void *sSKIPNativeFCP360ProjectionOverrideFrame = NULL;
@@ -625,111 +624,40 @@ static NSData *SKIPDecodeEyeBytes(NSString *path,
                                   uint32_t *outWidth,
                                   uint32_t *outHeight,
                                   NSError **error) {
-    uint32_t expectedWidth = 0, expectedHeight = 0;
-    if (SKIPExpectedDecodeDimensions(clipSummary, scaleHint, &expectedWidth, &expectedHeight) &&
-        expectedWidth > 0 && expectedHeight > 0) {
-        CVPixelBufferRef pixelBuffer = NULL;
-        NSDictionary *attrs = @{
-            (id)kCVPixelBufferWidthKey: @(expectedWidth),
-            (id)kCVPixelBufferHeightKey: @(expectedHeight),
-            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-            (id)kCVPixelBufferMetalCompatibilityKey: @YES,
-            (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
-            (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        };
-        CVReturn createStatus = CVPixelBufferCreate(kCFAllocatorDefault,
-                                                    expectedWidth,
-                                                    expectedHeight,
-                                                    kCVPixelFormatType_32BGRA,
-                                                    (__bridge CFDictionaryRef)attrs,
-                                                    &pixelBuffer);
-        if (createStatus == kCVReturnSuccess && pixelBuffer) {
-            uint32_t width = 0, height = 0;
-            BOOL pixelBufferOK = SpliceKitBRAW_DecodeFrameIntoPixelBufferEye((__bridge CFStringRef)path,
-                                                                             frameIndex,
-                                                                             scaleHint,
-                                                                             eyeIndex,
-                                                                             pixelBuffer,
-                                                                             &width,
-                                                                             &height);
-            if (pixelBufferOK && width > 0 && height > 0) {
-                NSData *packed = SKIPCopyPackedBGRADataFromPixelBuffer(pixelBuffer, width, height);
-                CVPixelBufferRelease(pixelBuffer);
-                if (packed.length > 0) {
-                    if (outWidth) *outWidth = width;
-                    if (outHeight) *outHeight = height;
-                    return packed;
-                }
-            } else {
-                CVPixelBufferRelease(pixelBuffer);
-            }
-        }
+    (void)path;
+    (void)frameIndex;
+    (void)scaleHint;
+    (void)eyeIndex;
+    (void)clipSummary;
+    if (outWidth) *outWidth = 0;
+    if (outHeight) *outHeight = 0;
+    if (error) {
+        *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-1
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Immersive frame decoding is not available in this build"}];
     }
-
-    uint32_t width = 0, height = 0, sizeBytes = 0;
-    void *bytes = nullptr;
-    BOOL ok = SpliceKitBRAW_DecodeFrameBytesEye((__bridge CFStringRef)path,
-                                                frameIndex,
-                                                scaleHint,
-                                                eyeIndex,
-                                                1,
-                                                &width,
-                                                &height,
-                                                &sizeBytes,
-                                                &bytes);
-    if (!ok || !bytes || width == 0 || height == 0 || sizeBytes == 0) {
-        if (bytes) free(bytes);
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-1
-                                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Unable to decode %@ eye for frame %u",
-                                                                            eyeIndex == 0 ? @"left" : @"right",
-                                                                            frameIndex]}];
-        }
-        return nil;
-    }
-    if (outWidth) *outWidth = width;
-    if (outHeight) *outHeight = height;
-    return [NSData dataWithBytesNoCopy:bytes length:sizeBytes freeWhenDone:YES];
+    return nil;
 }
 
 static NSDictionary *SKIPDescribeImmersiveClipAtPath(NSString *path, NSError **error) {
     NSString *standardizedPath = path.stringByStandardizingPath ?: @"";
     if (standardizedPath.length == 0) {
-        if (error) *error = SKIPImmersivePreviewError(-21, @"No immersive BRAW path was provided");
+        if (error) *error = SKIPImmersivePreviewError(-21, @"No immersive media path was provided");
         return nil;
     }
     if (!standardizedPath.isAbsolutePath) {
-        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive BRAW path must be absolute");
-        return nil;
-    }
-    if (![[standardizedPath.pathExtension lowercaseString] isEqualToString:@"braw"]) {
-        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive preview only supports .braw files");
+        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive media path must be absolute");
         return nil;
     }
     BOOL isDirectory = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:standardizedPath isDirectory:&isDirectory] || isDirectory) {
-        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive BRAW file does not exist");
+        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive media file does not exist");
         return nil;
     }
 
-    NSDictionary *description = SpliceKit_handleBRAWDescribeImmersive(@{
-        @"path": standardizedPath,
-        @"motionPreviewCount": @4,
-    });
-    NSArray *clips = [description[@"clips"] isKindOfClass:[NSArray class]] ? description[@"clips"] : nil;
-    NSDictionary *clip = [clips.firstObject isKindOfClass:[NSDictionary class]] ? clips.firstObject : nil;
-    NSString *clipError = [clip[@"error"] isKindOfClass:[NSString class]] ? clip[@"error"] : nil;
-    if (!clip || clipError.length > 0) {
-        if (error) {
-            *error = SKIPImmersivePreviewError(-22,
-                                               clipError.length > 0
-                                                ? clipError
-                                                : @"Unable to describe immersive BRAW clip");
-        }
-        return nil;
+    if (error) {
+        *error = SKIPImmersivePreviewError(-22, @"Immersive camera source inspection is not available in this build");
     }
-    return clip;
+    return nil;
 }
 
 static void SKIPSampleBGRA(const uint8_t *src,
@@ -1690,12 +1618,9 @@ static NSString *SKIPResolveFirstPathFromSelection(void) {
         NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
         if (timelinePath.length == 0) return nil;
 
-        NSString *path = SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: @"";
-        if (path.length == 0 || ![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) {
-            return nil;
-        }
-
-        return [[NSURL fileURLWithPath:path] URLByResolvingSymlinksInPath].path.stringByStandardizingPath;
+        if (timelinePath.length == 0) return nil;
+        // Native immersive camera container decoding was removed; custom preview cannot load timeline clips.
+        return nil;
     } @catch (__unused NSException *exception) {
         return nil;
     }
@@ -1858,7 +1783,7 @@ static NSDictionary *SKIPForceNativeFCP360FisheyeConformEffect(id target, NSInte
     return [result copy];
 }
 
-static NSInteger SKIPNativeFCP360SphericalModeForImmersiveBRAW(NSDictionary *clipSummary) {
+static NSInteger SKIPNativeFCP360SphericalModeForImmersiveClip(NSDictionary *clipSummary) {
     NSDictionary *immersive = [clipSummary[@"immersive"] isKindOfClass:[NSDictionary class]]
         ? clipSummary[@"immersive"]
         : nil;
@@ -1870,7 +1795,7 @@ static NSInteger SKIPNativeFCP360SphericalModeForImmersiveBRAW(NSDictionary *cli
         projection = SKIPStringOrEmpty(attributes[@"opticalProjectionKind"]).lowercaseString;
     }
 
-    // The BRAW VT decoder hands FCP per-eye fisheye pixels unchanged. Tag the
+    // The in-process decoder hands FCP per-eye fisheye pixels unchanged. Tag the
     // frame with the matching FFSphericalMode so HE360Transform unwraps it
     // natively — no host-side remap required.
     if ([projection containsString:@"dual"]) return 3;       // FFSphericalMode_DualFisheye
@@ -1880,7 +1805,7 @@ static NSInteger SKIPNativeFCP360SphericalModeForImmersiveBRAW(NSDictionary *cli
     return 3;                                                // default: URSA Immersive / AIV dual-fisheye
 }
 
-static NSInteger SKIPNativeFCP360HeroEyeForImmersiveBRAW(NSDictionary *clipSummary) {
+static NSInteger SKIPNativeFCP360HeroEyeForImmersiveClip(NSDictionary *clipSummary) {
     NSDictionary *immersive = [clipSummary[@"immersive"] isKindOfClass:[NSDictionary class]]
         ? clipSummary[@"immersive"]
         : nil;
@@ -2015,16 +1940,14 @@ static NSDictionary *SKIPCaptureNativeFCP360RestoreState(NSString *resolvedPath,
     if (timelineItem) {
         NSURL *mediaURL = SKIPDirectMediaURLForClipObject(timelineItem);
         NSString *timelinePath = mediaURL.path.stringByStandardizingPath ?: @"";
-        NSString *resolvedTimelinePath = timelinePath.length > 0
-            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
-            : @"";
+        NSString *resolvedTimelinePath = timelinePath.length > 0 ? timelinePath : @"";
         resolvedTimelinePath = resolvedTimelinePath.length > 0
             ? [[NSURL fileURLWithPath:resolvedTimelinePath] URLByResolvingSymlinksInPath].path.stringByStandardizingPath
             : @"";
         if (resolvedPath.length > 0 &&
             resolvedTimelinePath.length > 0 &&
             ![resolvedTimelinePath isEqualToString:resolvedPath]) {
-            if (error) *error = SKIPImmersivePreviewError(-39, @"The active timeline clip no longer matches the selected immersive BRAW file");
+            if (error) *error = SKIPImmersivePreviewError(-39, @"The active timeline clip no longer matches the selected immersive media file");
             return nil;
         }
 
@@ -2221,14 +2144,14 @@ static NSDictionary *SKIPNormalizeNativeFCP360PlayerModules(NSDictionary *clipSu
     };
 }
 
-static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveBRAW(NSString *resolvedPath,
+static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveClip(NSString *resolvedPath,
                                                             NSDictionary *clipSummary,
                                                             NSError **error) {
     if (![NSThread isMainThread]) {
         __block NSDictionary *result = nil;
         __block NSError *mainError = nil;
         SpliceKit_executeOnMainThread(^{
-            result = SKIPPrepareNativeFCP360ForImmersiveBRAW(resolvedPath, clipSummary, &mainError);
+            result = SKIPPrepareNativeFCP360ForImmersiveClip(resolvedPath, clipSummary, &mainError);
         });
         if (!result && error) *error = mainError;
         return result;
@@ -2243,7 +2166,7 @@ static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveBRAW(NSString *resolvedP
     if (!immersiveAvailable) {
         if (error) {
             *error = SKIPImmersivePreviewError(-33,
-                                               @"Selected BRAW is not immersive; leaving normal BRAW viewer settings unchanged");
+                                               @"Selected clip is not immersive; leaving normal viewer settings unchanged");
         }
         return nil;
     }
@@ -2263,8 +2186,8 @@ static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveBRAW(NSString *resolvedP
     BOOL sequenceChanged = NO;
     BOOL changedThisStep = NO;
     NSError *projectionError = nil;
-    NSInteger clipSphericalMode = SKIPNativeFCP360SphericalModeForImmersiveBRAW(clipSummary);
-    NSInteger clipHeroEyeMode = SKIPNativeFCP360HeroEyeForImmersiveBRAW(clipSummary);
+    NSInteger clipSphericalMode = SKIPNativeFCP360SphericalModeForImmersiveClip(clipSummary);
+    NSInteger clipHeroEyeMode = SKIPNativeFCP360HeroEyeForImmersiveClip(clipSummary);
     // Sequence stays in equirect (the 360 viewer's output space); HE360Transform
     // bridges the clip's real projection (e.g. DualFisheye) into equirect so the
     // 360 viewer can project it. Setting the sequence itself to DualFisheye gets
@@ -2291,16 +2214,14 @@ static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveBRAW(NSString *resolvedP
     if (timelineItem) {
         NSURL *mediaURL = SKIPDirectMediaURLForClipObject(timelineItem);
         timelinePath = mediaURL.path.stringByStandardizingPath ?: @"";
-        NSString *resolvedTimelinePath = timelinePath.length > 0
-            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
-            : @"";
+        NSString *resolvedTimelinePath = timelinePath.length > 0 ? timelinePath : @"";
         resolvedTimelinePath = resolvedTimelinePath.length > 0
             ? [[NSURL fileURLWithPath:resolvedTimelinePath] URLByResolvingSymlinksInPath].path.stringByStandardizingPath
             : @"";
         if (resolvedPath.length > 0 &&
             resolvedTimelinePath.length > 0 &&
             ![resolvedTimelinePath isEqualToString:resolvedPath]) {
-            if (error) *error = SKIPImmersivePreviewError(-35, @"The active timeline clip no longer matches the selected immersive BRAW file");
+            if (error) *error = SKIPImmersivePreviewError(-35, @"The active timeline clip no longer matches the selected immersive media file");
             return nil;
         }
 
@@ -2607,7 +2528,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
     NSString *selectedPath = SKIPResolveFirstPathFromSelection();
     if (selectedPath.length == 0) {
-        if (error) *error = SKIPImmersivePreviewError(-31, @"No immersive BRAW clip is selected near the playhead");
+        if (error) *error = SKIPImmersivePreviewError(-31, @"No immersive clip is selected near the playhead");
         return NO;
     }
 
@@ -2666,7 +2587,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
 
     SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
     if (backend.selectedPath.length == 0) {
-        if (error) *error = SKIPImmersivePreviewError(-32, @"No immersive BRAW clip is loaded");
+        if (error) *error = SKIPImmersivePreviewError(-32, @"No immersive clip is loaded");
         return NO;
     }
 
@@ -3308,15 +3229,10 @@ static NSView *SKIPFindLargestPlayerView(void) {
         return ok;
     }
 
-    __block NSString *selectedPath = nil;
-    selectedPath = SKIPResolveFirstPathFromSelection();
-
-    NSString *resolvedPath = selectedPath.length > 0
-        ? (SpliceKitBRAWResolveOriginalPathForPublic(selectedPath) ?: selectedPath)
-        : @"";
-    if (![[resolvedPath.pathExtension lowercaseString] isEqualToString:@"braw"]) {
+    NSString *resolvedPath = SKIPResolveFirstPathFromSelection() ?: @"";
+    if (resolvedPath.length == 0) {
         if (error) {
-            *error = SKIPImmersivePreviewError(-31, @"No BRAW clip is selected near the playhead for FCP's native 360 viewer");
+            *error = SKIPImmersivePreviewError(-31, @"No immersive clip is selected near the playhead for FCP's native 360 viewer");
         }
         return NO;
     }
@@ -3324,7 +3240,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     NSError *describeError = nil;
     NSDictionary *clip = SKIPDescribeImmersiveClipAtPath(resolvedPath, &describeError);
     if (!clip) {
-        if (error) *error = describeError ?: SKIPImmersivePreviewError(-32, @"Unable to describe the selected BRAW clip");
+        if (error) *error = describeError ?: SKIPImmersivePreviewError(-32, @"Unable to describe the selected immersive clip");
         return NO;
     }
 
@@ -3349,11 +3265,11 @@ static NSView *SKIPFindLargestPlayerView(void) {
     SKIPSetNativeFCP360ProjectionPatchEnabled(frameProjectionPatchInstalled);
 
     NSError *prepareError = nil;
-    NSDictionary *nativeStatus = SKIPPrepareNativeFCP360ForImmersiveBRAW(resolvedPath, clip, &prepareError);
+    NSDictionary *nativeStatus = SKIPPrepareNativeFCP360ForImmersiveClip(resolvedPath, clip, &prepareError);
     if (!nativeStatus) {
         SKIPSetNativeFCP360ProjectionPatchEnabled(NO);
         SKIPRestoreNativeFCP360State(restoreState, @"prepareFailed");
-        if (error) *error = prepareError ?: SKIPImmersivePreviewError(-34, @"Unable to prepare FCP's native 360 viewer for the selected BRAW clip");
+        if (error) *error = prepareError ?: SKIPImmersivePreviewError(-34, @"Unable to prepare FCP's native 360 viewer for the selected immersive clip");
         return NO;
     }
 
@@ -3441,14 +3357,14 @@ static NSView *SKIPFindLargestPlayerView(void) {
     NSView *content = self.panel.contentView;
     CGFloat p = 12.0;
 
-    self.statusLabel = [NSTextField labelWithString:@"No immersive BRAW loaded"];
+    self.statusLabel = [NSTextField labelWithString:@"No immersive clip loaded"];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel.font = [NSFont boldSystemFontOfSize:13];
     [content addSubview:self.statusLabel];
 
     self.pathField = [NSTextField textFieldWithString:@""];
     self.pathField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.pathField.placeholderString = @"Paste a .braw path or use Load Selected";
+    self.pathField.placeholderString = @"Paste a clip path or use Load Selected";
     self.pathField.delegate = self;
     [content addSubview:self.pathField];
 
@@ -3878,9 +3794,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
 
     NSURL *mediaURL = SKIPDirectMediaURLForClipObject(item);
     NSString *timelinePath = mediaURL.path.stringByStandardizingPath ?: @"";
-    NSString *resolvedTimelinePath = timelinePath.length > 0
-        ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
-        : @"";
+    NSString *resolvedTimelinePath = timelinePath.length > 0 ? timelinePath : @"";
     resolvedTimelinePath = resolvedTimelinePath.length > 0
         ? [[NSURL fileURLWithPath:resolvedTimelinePath] URLByResolvingSymlinksInPath].path.stringByStandardizingPath
         : @"";
@@ -3982,7 +3896,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     if (path.length == 0) {
         if (error) {
             *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-20
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip is currently selected"}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive clip is currently selected"}];
         }
         return NO;
     }
@@ -4105,7 +4019,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     if (self.selectedPath.length == 0) {
         if (error) {
             *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-22
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip loaded"}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive clip loaded"}];
         }
         return NO;
     }
@@ -4432,7 +4346,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     if (self.selectedPath.length == 0) {
         if (error) {
             *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-22
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip loaded"}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive clip loaded"}];
         }
         return NO;
     }
@@ -4483,14 +4397,15 @@ static NSView *SKIPFindLargestPlayerView(void) {
     if (self.selectedPath.length == 0) {
         if (error) {
             *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-25
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip loaded"}];
+                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive clip loaded"}];
         }
         return NO;
     }
-    return [[SpliceKitVisionPro shared] pushBRAWFrameAtPath:self.selectedPath
-                                                 frameIndex:self.currentFrameIndex
-                                                  scaleHint:self.currentScaleHint
-                                                      error:error];
+    if (error) {
+        *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-34
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Immersive frame decoding is not available in this build"}];
+    }
+    return NO;
 }
 
 - (NSDictionary *)performanceSnapshot {
@@ -4635,14 +4550,14 @@ static NSView *SKIPFindLargestPlayerView(void) {
                                         self.clipSummary[@"height"] ?: @"?",
                                         self.clipSummary[@"frameRate"] ?: @"?"];
     } else {
-        self.statusLabel.stringValue = @"No immersive BRAW loaded";
+        self.statusLabel.stringValue = @"No immersive clip loaded";
     }
     self.infoLabel.stringValue = self.selectedPath.length > 0
         ? [NSString stringWithFormat:@"%@  projection=%@  hero=%@",
-           cameraType.length > 0 ? cameraType : @"BRAW",
+           cameraType.length > 0 ? cameraType : @"Immersive",
            projection.length > 0 ? projection : @"unknown",
            SKIPStringOrEmpty(immersive[@"heroEye"]).length > 0 ? immersive[@"heroEye"] : @"right"]
-        : @"Load a selected immersive BRAW clip or paste a clip path.";
+        : @"Load a selected immersive clip or paste a clip path.";
     self.yawValueLabel.stringValue = [NSString stringWithFormat:@"%.0f°", self.yawSlider.doubleValue];
     self.pitchValueLabel.stringValue = [NSString stringWithFormat:@"%.0f°", self.pitchSlider.doubleValue];
     self.fovValueLabel.stringValue = [NSString stringWithFormat:@"%.0f°", self.fovSlider.doubleValue];
@@ -4655,32 +4570,32 @@ static NSView *SKIPFindLargestPlayerView(void) {
 - (void)loadSelectedClicked:(id)sender {
     NSString *path = SKIPResolveFirstPathFromSelection();
     if (path.length == 0) {
-        [self setMessage:@"No immersive BRAW clip is currently selected"];
+        [self setMessage:@"No immersive clip is currently selected"];
         return;
     }
-    [self setMessage:@"Loading selected immersive BRAW clip..."];
+    [self setMessage:@"Loading selected immersive clip..."];
     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
     [self loadClipAtPathAsync:path completion:^(BOOL ok, NSError *error) {
         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
         if (!strongSelf) return;
-        [strongSelf setMessage:ok ? @"Loaded selected immersive BRAW clip. Click Refresh Preview to decode a frame."
-                                 : (error.localizedDescription ?: @"Failed to load immersive BRAW clip.")];
+        [strongSelf setMessage:ok ? @"Loaded selected immersive clip. Click Refresh Preview to decode a frame."
+                                 : (error.localizedDescription ?: @"Failed to load immersive clip.")];
     }];
 }
 
 - (void)loadPathClicked:(id)sender {
     NSString *path = self.pathField.stringValue ?: @"";
     if (path.length == 0) {
-        [self setMessage:@"Paste a .braw path first."];
+        [self setMessage:@"Paste a clip path first."];
         return;
     }
-    [self setMessage:@"Loading immersive BRAW path..."];
+    [self setMessage:@"Loading immersive media path..."];
     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
     [self loadClipAtPathAsync:path completion:^(BOOL ok, NSError *error) {
         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
         if (!strongSelf) return;
-        [strongSelf setMessage:ok ? @"Loaded immersive BRAW path. Click Refresh Preview to decode a frame."
-                                 : (error.localizedDescription ?: @"Failed to load immersive BRAW path.")];
+        [strongSelf setMessage:ok ? @"Loaded immersive media path. Click Refresh Preview to decode a frame."
+                                 : (error.localizedDescription ?: @"Failed to load immersive media path.")];
     }];
 }
 

@@ -69,7 +69,7 @@
 			<h2>🔨 Improvements</h2>
 
 			<ul>
-				<li>Continues the Apple Immersive/BRAW work-in-progress with safer immersive preview decoding, reduced-resolution playback handling, fisheye/equirect preview improvements, native viewer state hardening, and crash fixes for affected users.</li>
+				<li>Continues the Apple Immersive media work-in-progress with safer immersive preview decoding, reduced-resolution playback handling, fisheye/equirect preview improvements, native viewer state hardening, and crash fixes for affected users.</li>
 			</ul>
 
 			<hr />
@@ -180,7 +180,7 @@
 			<h2>🔨 Improvements</h2>
 
 			<ul>
-				<li>Adds a Vision Pro preview panel, Bonjour discovery for <code>_ivtpreviewclient._tcp</code>, MCP bridge additions for the Vision Pro tools, and the Resolve Immersive BRAW reverse-engineering notes.</li>
+				<li>Adds a Vision Pro preview panel, Bonjour discovery for <code>_ivtpreviewclient._tcp</code>, MCP bridge additions for the Vision Pro tools, and the Resolve Immersive media reverse-engineering notes.</li>
 			</ul>
 
 			<h2>🐞 Bug Fixes</h2>
@@ -336,7 +336,7 @@
 				<li><strong>URL import reliability</strong> &mdash; fixes an FCPXML parse failure when downloaded filenames contain ampersands or other XML-reserved characters (e.g. &lsquo;PS5 &amp; PS5 Pro&rsquo;), replaces the misleading twin-percent progress HUD with a single smooth readout, and vertically aligns the spinner with its label.</li>
 				<li><strong>Share Logs</strong> &mdash; one-click upload of the latest Final Cut Pro crash log plus SpliceKit logs to filebin.net, added to the Patcher status panel.</li>
 				<li>LiveCam mask kernel dispatch and shader-coordinate fix resolves subject-lift / green-screen edge artifacts on some machines.</li>
-				<li>BRAW settings inspector locks to dark appearance to match FCP&rsquo;s other inspectors.</li>
+				<li>Blackmagic RAW settings inspector locks to dark appearance to match FCP&rsquo;s other inspectors.</li>
 				<li>Points the bundled <code>.mcp.json</code> at the <code>mcp-setup venv</code> interpreter so Claude Desktop MCP works without hand-editing Python paths.</li>
 			</ul>
 
@@ -409,7 +409,7 @@
 			<h2>🥳 New Features</h2>
 
 			<ul>
-				<li>Native Blackmagic BRAW Color Grading. New BRAW Settings inspector menu modeled after FCP&rsquo;s ProRes RAW panel &mdash; Gamma / Gamut / Color Science Gen, ISO / Color Temp / Tint / Exposure / Analog Gain, full tone curve (Saturation, Contrast, Midpoint, Highlights, Shadows, Black Level, White Level), Highlight Recovery, Gamut Compression, and 3D LUT Mode. Open it from the Info inspector by clicking &lsquo;Modify BRAW&hellip;&rsquo; on any selected .braw clip. Fixed playback for several BRAW files that were silently dropping persisted color settings on library reopen &mdash; the in-process decoder now primes its settings cache from the asset&rsquo;s persisted dict during render setup, so adjustments apply on the first frame after relaunch instead of only after touching a slider. Also fixed a thumbnail-thread race that could crash FCP on rapid slider drags.</li>
+				<li>Native Blackmagic RAW Color Grading. New RAW Settings inspector menu modeled after FCP&rsquo;s ProRes RAW panel &mdash; Gamma / Gamut / Color Science Gen, ISO / Color Temp / Tint / Exposure / Analog Gain, full tone curve (Saturation, Contrast, Midpoint, Highlights, Shadows, Black Level, White Level), Highlight Recovery, Gamut Compression, and 3D LUT Mode. Open it from the Info inspector by clicking &lsquo;Modify RAW&hellip;&rsquo; on any selected Blackmagic RAW clip. Fixed playback for several Blackmagic RAW files that were silently dropping persisted color settings on library reopen &mdash; the in-process decoder now primes its settings cache from the asset&rsquo;s persisted dict during render setup, so adjustments apply on the first frame after relaunch instead of only after touching a slider. Also fixed a thumbnail-thread race that could crash FCP on rapid slider drags.</li>
 			</ul>
 
 			<hr />
@@ -425,7 +425,7 @@
 			<h2>🐞 Bug Fix</h2>
 
 			<ul>
-				<li>Fix missing BRAW support on fresh installs. The patcher was shipping only the SpliceKit framework dylib &mdash; the VideoToolbox decoder and MediaToolbox format-reader bundles that actually register .braw with Final Cut Pro were never getting installed. Drag-and-drop and Import Media now work out of the box on every machine.</li>
+				<li>Fix missing Blackmagic RAW support on fresh installs. The patcher was shipping only the SpliceKit framework dylib &mdash; the VideoToolbox decoder and MediaToolbox format-reader bundles that actually register Blackmagic RAW with Final Cut Pro were never getting installed. Drag-and-drop and Import Media now work out of the box on every machine.</li>
 			</ul>
 
 			<hr />
@@ -441,7 +441,7 @@
 			<h2>🐞 Bug Fix</h2>
 
 			<ul>
-				<li>Fix a BRAW decode crash: when VideoToolbox tore down a session while a decode was in flight on our BRAW serial queue, the race could free the host callback mid-Unbind and abort FCP. Release now serializes through the same queue as decode.</li>
+				<li>Fix a Blackmagic RAW decode crash: when VideoToolbox tore down a session while a decode was in flight on our decode serial queue, the race could free the host callback mid-Unbind and abort FCP. Release now serializes through the same queue as decode.</li>
 			</ul>
 
 			<hr />
@@ -457,7 +457,7 @@
 			<h2>🥳 New Features</h2>
 
 			<ul>
-				<li>Native Blackmagic RAW (BRAW) playback in Final Cut Pro &mdash; import, preview, and edit .braw files from URSA Cine / BMPCC / Pocket 4K/6K cameras without transcoding. Works with every codec variant we&rsquo;ve seen in the wild (braw, brxq, brst, brvn) including URSA Cine 17K. Playback runs through the Blackmagic RAW SDK with zero-copy Metal decode and realtime framerates at 6K+.</li>
+				<li>Native Blackmagic RAW playback in Final Cut Pro &mdash; import, preview, and edit Blackmagic RAW files from URSA Cine / BMPCC / Pocket 4K/6K cameras without transcoding. Works with every codec variant we&rsquo;ve seen in the wild (common camera RAW variants) including URSA Cine 17K. Playback runs through the Blackmagic RAW SDK with zero-copy Metal decode and realtime framerates at 6K+.</li>
 			</ul>
 
 			<hr />

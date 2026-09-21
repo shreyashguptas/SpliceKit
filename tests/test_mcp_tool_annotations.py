@@ -48,6 +48,7 @@ class FakeMCPServer:
         self.tools = []
         self.resources = []
         self.prompts = []
+        self._tool_manager = types.SimpleNamespace(list_tools=lambda: [])
 
     def tool(self, name=None, title=None, description=None, annotations=None, **kwargs):
         def decorator(func):
@@ -131,6 +132,31 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertGreater(len(self.tools), 0)
         for name, tool in self.tools.items():
             self.assertTrue(required.issubset(tool["annotations"]), name)
+
+    def test_every_registered_tool_is_in_a_classification_set(self):
+        read_only = self.module.READ_ONLY_TOOLS
+        destructive = self.module.DESTRUCTIVE_TOOLS
+        local_write = self.module.LOCAL_WRITE_TOOLS
+        for name in self.tools:
+            classified = name in read_only or name in destructive or name in local_write
+            self.assertTrue(
+                classified,
+                f"{name} is not in READ_ONLY_TOOLS, DESTRUCTIVE_TOOLS, or LOCAL_WRITE_TOOLS",
+            )
+        self.assertEqual(
+            read_only | destructive | local_write,
+            set(self.tools.keys()),
+            "the three sets together must name exactly the registered tools",
+        )
+        # A partition, not just a cover: a tool in two sets gets whichever hint the
+        # first branch of _tool_annotations happens to test for, which is a silent
+        # way to advertise a destructive tool as read-only.
+        for left, right, names in (
+            (read_only, destructive, "READ_ONLY_TOOLS and DESTRUCTIVE_TOOLS"),
+            (read_only, local_write, "READ_ONLY_TOOLS and LOCAL_WRITE_TOOLS"),
+            (destructive, local_write, "DESTRUCTIVE_TOOLS and LOCAL_WRITE_TOOLS"),
+        ):
+            self.assertEqual(left & right, set(), f"tools in both {names}")
 
     def test_split_tools_are_registered(self):
         expected = {

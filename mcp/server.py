@@ -256,7 +256,7 @@ ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_
   handles. lua_execute runs Lua inside FCP.
 Not routed here on purpose (developer tooling; their docstrings say what they do): debug_*,
   visionpro_*, livecam, events_*, plugin_*, bridge_* internals, runtime introspection beyond
-  explore_class / search_methods, lua extras, braw_probe, deploy_and_restart.
+  explore_class / search_methods, lua extras, deploy_and_restart.
 
 ## The action dispatchers (FCP's own commands on the current selection / playhead)
 timeline_navigation_action  nextEdit, previousEdit, selectClipAtPlayhead, zoomToFit, toggleSnapping...
@@ -401,7 +401,6 @@ READ_ONLY_TOOLS = {
     "debug_threads",
     "debug_eval",
     "browser_list_clips",
-    "braw_probe",
     "get_caption_state",
     "get_caption_styles",
     "verify_native_captions",
@@ -419,6 +418,10 @@ READ_ONLY_TOOLS = {
     "events_unsubscribe",
     "events_status",
     "async_status",
+    "capture_inspector",
+    "capture_timeline",
+    "capture_viewer",
+    "lua_state",
 }
 
 DESTRUCTIVE_TOOLS = {
@@ -499,27 +502,108 @@ DESTRUCTIVE_TOOLS = {
     "mixer_remove_bus_effect",
     "import_url",
     "cancel_import_url",
+    "visionpro_disconnect",
+    "visionpro_remove_camera",
+    "visionpro_stop",
+}
+
+LOCAL_WRITE_TOOLS = {
+    "add_markers_at_times",
+    "assign_role",
+    "background_render_control",
+    "begin_edit",
+    "capture_clip_frame",
+    "close_captions",
+    "close_livecam",
+    "close_transcript",
+    "debug_breakpoint",
+    "debug_crash_handler",
+    "debug_observe_notification",
+    "debug_start_framerate_monitor",
+    "debug_stop_framerate_monitor",
+    "debug_trace_method",
+    "debug_watch",
+    "dual_timeline_close",
+    "dual_timeline_focus",
+    "dual_timeline_open",
+    "dual_timeline_open_selected_in_secondary",
+    "dual_timeline_sync_root",
+    "dual_timeline_toggle_panel",
+    "end_edit",
+    "export_otio",
+    "export_xml",
+    "hide_command_palette",
+    "import_srt_as_markers",
+    "manage_handles",
+    "mark_scene_changes",
+    "mixer_open_bus_effect",
+    "mixer_set_mute",
+    "mixer_set_solo",
+    "mixer_volume_begin",
+    "mixer_volume_end",
+    "open_captions",
+    "open_livecam",
+    "open_project",
+    "open_transcript",
+    "playback_action",
+    "release_all_handles",
+    "release_handle",
+    "seek_to_time",
+    "select_clip_in_lane",
+    "select_clips",
+    "select_tool",
+    "set_bridge_option",
+    "set_bridge_option_value",
+    "set_caption_grouping",
+    "set_caption_style",
+    "set_caption_words",
+    "set_playback_speed",
+    "set_silence_threshold",
+    "set_timeline_range",
+    "set_transcript_engine",
+    "set_transcript_speaker",
+    "set_viewer_zoom",
+    "set_workspace",
+    "show_command_palette",
+    "timeline_edit_action",
+    "timeline_navigation_action",
+    "toggle_panel",
+    "visionpro_close_panel",
+    "visionpro_connect",
+    "visionpro_export_aime",
+    "visionpro_load_aime",
+    "visionpro_open_panel",
+    "visionpro_send_aime",
+    "visionpro_send_mask",
+    "visionpro_set_camera",
+    "visionpro_set_camera_calibration",
+    "visionpro_set_max_clients",
+    "visionpro_start",
 }
 
 IDEMPOTENT_LOCAL_WRITE_TOOLS = {
-    "seek_to_time",
-    "set_timeline_range",
-    "set_silence_threshold",
-    "set_viewer_zoom",
-    "set_bridge_option",
-    "set_bridge_option_value",
-    "set_workspace",
-    "select_tool",
     "assign_role",
-    "set_transcript_engine",
-    "open_project",
-    "select_clip_in_lane",
-    "select_clips",
     "capture_clip_frame",
+    "close_captions",
+    "close_livecam",
+    "close_transcript",
+    "end_edit",
+    "hide_command_palette",
     "mixer_volume_begin",
     "mixer_volume_end",
     "open_livecam",
-    "close_livecam",
+    "open_project",
+    "seek_to_time",
+    "select_clip_in_lane",
+    "select_clips",
+    "select_tool",
+    "set_bridge_option",
+    "set_bridge_option_value",
+    "set_silence_threshold",
+    "set_timeline_range",
+    "set_transcript_engine",
+    "set_viewer_zoom",
+    "set_workspace",
 }
 
 CUSTOM_TOOL_TITLES = {
@@ -778,6 +862,10 @@ def _tool_annotations(name: str) -> ToolAnnotations:
     elif name in DESTRUCTIVE_TOOLS:
         hints = dict(DESTRUCTIVE_LOCAL_WRITE)
     else:
+        # LOCAL_WRITE_TOOLS, and anything newly added that has not been classified
+        # yet. A tool that lands here by accident is caught by
+        # test_every_registered_tool_is_in_a_classification_set, so the three sets
+        # stay a decision rather than a default.
         hints = dict(LOCAL_WRITE)
 
     if name in IDEMPOTENT_LOCAL_WRITE_TOOLS:
@@ -810,8 +898,8 @@ def _guard_tool_errors(fn):
 
 def splicekit_tool(name: str):
     """Register a SpliceKit MCP tool under the SDK: the tool annotations that belong to
-    `name` (see READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / IDEMPOTENT_LOCAL_WRITE_TOOLS) plus
-    the error guard above. `name` must equal the decorated function's name."""
+    `name` (see READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / LOCAL_WRITE_TOOLS /
+    IDEMPOTENT_LOCAL_WRITE_TOOLS) plus the error guard above. `name` must equal the decorated function's name."""
     register = mcp.tool(annotations=_tool_annotations(name))
 
     def decorator(fn):
@@ -6160,13 +6248,237 @@ def _otio_with_fcpx_adapter(operation):
     raise RuntimeError("No working FCPXML adapter found (" + "; ".join(errors) + ")")
 
 
+def _otio_fcpxml_parse_root(fcpxml_str):
+    """Parse FCPXML text into an ElementTree root."""
+    from xml.etree import ElementTree as ET
+
+    return ET.fromstring(fcpxml_str)
+
+
+def _otio_fcpx_time_to_seconds(value, default_rate=30):
+    """Convert an FCPXML time attribute (e.g. ``28s``, ``300/30s``) to seconds."""
+    if not value:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    if text.endswith("s"):
+        text = text[:-1].strip()
+    if "/" in text:
+        num, den = text.split("/", 1)
+        return float(num) / float(den)
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _otio_fcpx_sequence_rate(sequence_elem, resources_elem, default_rate=30):
+    """Resolve the frame rate for a ``<sequence>`` from its format resource."""
+    format_id = sequence_elem.get("format") if sequence_elem is not None else None
+    if not format_id or resources_elem is None:
+        return default_rate
+    for fmt in resources_elem.findall("format"):
+        if fmt.get("id") == format_id:
+            frame_duration = fmt.get("frameDuration", "")
+            seconds = _otio_fcpx_time_to_seconds(frame_duration, default_rate)
+            if seconds > 0:
+                return round(1.0 / seconds)
+    return default_rate
+
+
+def _otio_sanitize_fcpx_project_element(project_elem):
+    """Return a copy of ``project_elem`` safe for otio-fcpx-xml-adapter 1.0.
+
+    The published adapter crashes on nested ``<ref-clip>`` compound timelines; a
+    gap with the same timing preserves project duration for interchange summaries.
+    """
+    from xml.etree import ElementTree as ET
+
+    project = ET.fromstring(ET.tostring(project_elem, encoding="unicode"))
+    for parent in project.iter():
+        for child in list(parent):
+            if child.tag != "ref-clip":
+                continue
+            gap = ET.Element(
+                "gap",
+                offset=child.get("offset", "0s"),
+                name=child.get("name", ""),
+                duration=child.get("duration", "0s"),
+            )
+            idx = list(parent).index(child)
+            parent.remove(child)
+            parent.insert(idx, gap)
+    return project
+
+
+def _otio_build_fcpx_project_document(resources_elem, project_elem, fcpxml_version="1.14"):
+    """Wrap resources + project in a standalone ``<fcpxml>`` document."""
+    from xml.etree import ElementTree as ET
+
+    root = ET.Element("fcpxml", version=fcpxml_version)
+    root.append(ET.fromstring(ET.tostring(resources_elem, encoding="unicode")))
+    root.append(ET.fromstring(ET.tostring(project_elem, encoding="unicode")))
+    return ET.tostring(root, encoding="unicode")
+
+
+def _otio_should_skip_fcpx_library_project(project_elem):
+    """Skip FCP scene-detection projects that are not user timelines."""
+    name = project_elem.get("name", "")
+    return name.endswith(" - Scenes")
+
+
+def _otio_inject_fcpx_spine_transitions(timeline, spine_elem, default_rate):
+    """Insert OTIO ``Transition`` objects for ``<transition>`` spine items."""
+    import copy
+
+    import opentimelineio as otio
+    from opentimelineio import opentime
+
+    if spine_elem is None:
+        return
+
+    spine_children = list(spine_elem)
+    if not any(child.tag == "transition" for child in spine_children):
+        return
+
+    video_track = None
+    for track in timeline.tracks:
+        if track.kind == otio.schema.TrackKind.Video:
+            video_track = track
+            break
+    if video_track is None:
+        return
+
+    clip_items = [item for item in video_track if isinstance(item, otio.schema.Clip)]
+    if not clip_items:
+        return
+
+    rebuilt = otio.schema.Track(name=video_track.name, kind=video_track.kind)
+    clip_index = 0
+    for child in spine_children:
+        if child.tag == "clip":
+            if clip_index >= len(clip_items):
+                break
+            rebuilt.append(copy.deepcopy(clip_items[clip_index]))
+            clip_index += 1
+        elif child.tag == "transition":
+            rate = default_rate
+            if clip_index < len(clip_items):
+                clip = clip_items[clip_index]
+                if clip.source_range and clip.source_range.duration.rate > 0:
+                    rate = clip.source_range.duration.rate
+            duration_seconds = _otio_fcpx_time_to_seconds(child.get("duration", "0s"), rate)
+            half_frames = max(1, round((duration_seconds / 2.0) * rate))
+            rebuilt.append(
+                otio.schema.Transition(
+                    name=child.get("name", "Transition"),
+                    in_offset=opentime.RationalTime(half_frames, rate),
+                    out_offset=opentime.RationalTime(half_frames, rate),
+                )
+            )
+
+    while clip_index < len(clip_items):
+        rebuilt.append(copy.deepcopy(clip_items[clip_index]))
+        clip_index += 1
+
+    for track_index, track in enumerate(timeline.tracks):
+        if track is video_track:
+            timeline.tracks[track_index] = rebuilt
+            break
+
+
+def _otio_apply_fcpx_project_metadata(timeline, project_elem, resources_elem):
+    """Attach FCP sequence duration and spine transitions to an OTIO timeline."""
+    sequence_elem = project_elem.find("sequence")
+    if sequence_elem is None:
+        return
+    rate = _otio_fcpx_sequence_rate(sequence_elem, resources_elem)
+    duration_attr = sequence_elem.get("duration")
+    if duration_attr:
+        timeline.metadata["fcpx_sequence_duration_seconds"] = _otio_fcpx_time_to_seconds(
+            duration_attr,
+            rate,
+        )
+    spine_elem = sequence_elem.find("spine")
+    _otio_inject_fcpx_spine_transitions(timeline, spine_elem, rate)
+
+
+def _otio_enhance_fcpx_read_result(result, root_elem):
+    """Post-process adapter output using the source FCPXML tree."""
+    import opentimelineio as otio
+
+    resources_elem = root_elem.find("resources")
+    project_elem = root_elem.find("project")
+    if project_elem is not None:
+        timeline = _otio_first_timeline(result)
+        if isinstance(timeline, otio.schema.Timeline):
+            _otio_apply_fcpx_project_metadata(timeline, project_elem, resources_elem)
+        return result
+
+    library_elem = root_elem.find("library")
+    if library_elem is None:
+        return result
+
+    projects = []
+    for event in library_elem.findall("event"):
+        for project in event.findall("project"):
+            projects.append(project)
+
+    timelines = _otio_all_timelines(result, collection_fallback=False)
+    for timeline, project in zip(timelines, projects):
+        if isinstance(timeline, otio.schema.Timeline):
+            _otio_apply_fcpx_project_metadata(timeline, project, resources_elem)
+    return result
+
+
+def _otio_read_fcpx_library_collection(root_elem):
+    """Read a ``<library>`` document one project at a time."""
+    import opentimelineio as otio
+
+    resources_elem = root_elem.find("resources")
+    if resources_elem is None:
+        raise RuntimeError("FCPXML library is missing a <resources> block.")
+
+    fcpxml_version = root_elem.get("version", "1.14")
+    library_elem = root_elem.find("library")
+    library_name = library_elem.get("location", "Library") if library_elem is not None else "Library"
+    collection = otio.schema.SerializableCollection(name=library_name)
+
+    for event in library_elem.findall("event"):
+        for project in event.findall("project"):
+            if _otio_should_skip_fcpx_library_project(project):
+                continue
+            sanitized = _otio_sanitize_fcpx_project_element(project)
+            project_xml = _otio_build_fcpx_project_document(
+                resources_elem,
+                sanitized,
+                fcpxml_version=fcpxml_version,
+            )
+            timeline = _otio_with_fcpx_adapter(
+                lambda adapter_name: otio.adapters.read_from_string(project_xml, adapter_name)
+            )
+            if isinstance(timeline, otio.schema.Timeline):
+                _otio_apply_fcpx_project_metadata(timeline, sanitized, resources_elem)
+                collection.append(timeline)
+
+    if not len(collection):
+        raise RuntimeError("No readable timelines found in FCPXML library.")
+    return collection
+
+
 def _otio_read_fcpx_string(fcpxml_str):
     """Read FCPXML using whichever adapter name is installed."""
     import opentimelineio as otio
 
-    return _otio_with_fcpx_adapter(
+    root = _otio_fcpxml_parse_root(fcpxml_str)
+    if root.find("library") is not None:
+        return _otio_read_fcpx_library_collection(root)
+
+    result = _otio_with_fcpx_adapter(
         lambda adapter_name: otio.adapters.read_from_string(fcpxml_str, adapter_name)
     )
+    return _otio_enhance_fcpx_read_result(result, root)
 
 
 def _otio_write_fcpx_string(timeline, fcpxml_version=None):
@@ -6274,9 +6586,14 @@ def _otio_timeline_summary(timeline):
     if isinstance(timeline, otio.schema.Timeline):
         info["tracks"] = len(timeline.tracks)
         info["clips"] = len(list(timeline.find_clips()))
-        total_dur = timeline.duration()
-        if total_dur and total_dur.value > 0 and total_dur.rate > 0:
-            info["duration_seconds"] = round(total_dur.value / total_dur.rate, 3)
+        metadata = getattr(timeline, "metadata", None) or {}
+        sequence_seconds = metadata.get("fcpx_sequence_duration_seconds")
+        if sequence_seconds is not None:
+            info["duration_seconds"] = round(float(sequence_seconds), 3)
+        else:
+            total_dur = timeline.duration()
+            if total_dur and total_dur.value > 0 and total_dur.rate > 0:
+                info["duration_seconds"] = round(total_dur.value / total_dur.rate, 3)
     return info
 
 
@@ -8788,7 +9105,7 @@ def import_media(paths: list[str] | None = None,
 
     Wraps -[FFMediaEventProject newClipFromURL:manageFileType:] + addOwnedClipsObject:
     which is FCP's native drop-import path. Works with any file type FCP can
-    read (QuickTime, MP4, MXF, BRAW once the format reader is loaded, etc.).
+    read (QuickTime, MP4, MXF, etc.).
 
     Args:
         paths: List of absolute paths to import
@@ -8812,53 +9129,6 @@ def import_media(paths: list[str] | None = None,
     if library:
         params["library"] = library
     r = bridge.call("media.importFile", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
-
-
-@splicekit_tool("braw_probe")
-def braw_probe(path: str = "",
-               handle: str = "",
-               decode_frame_index: int = -1,
-               metadata_limit: int = 16,
-               include_metadata: bool = False,
-               include_processing: bool = False,
-               include_audio: bool = False,
-               selected: bool = False) -> str:
-    """Probe `.braw` media through the Blackmagic RAW SDK without importing or transcoding.
-
-    This validates the native Blackmagic SDK from inside the injected SpliceKit dylib.
-    It can inspect an explicit file path, a browser/timeline clip handle, or the current
-    selected timeline items when `selected=True` (or when no explicit input is supplied).
-
-    Args:
-        path: Absolute filesystem path to a `.braw` clip
-        handle: Existing SpliceKit clip handle to resolve to media
-        decode_frame_index: Optional frame index to read + decode for validation. Use -1 to skip decode.
-        metadata_limit: Number of metadata entries to sample from the clip
-        include_metadata: Include clip metadata/timecode/camera info sample
-        include_processing: Include current clip processing attributes
-        include_audio: Include embedded audio format/sample info
-        selected: Probe the current selected timeline items
-    """
-    params = {
-        "decodeFrameIndex": decode_frame_index,
-        "metadataLimit": metadata_limit,
-    }
-    if path:
-        params["path"] = path
-    if handle:
-        params["handle"] = handle
-    if include_metadata:
-        params["includeMetadata"] = True
-    if include_processing:
-        params["includeProcessing"] = True
-    if include_audio:
-        params["includeAudio"] = True
-    if selected:
-        params["selected"] = True
-    r = bridge.call("braw.probe", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
@@ -9462,6 +9732,10 @@ def _register_plugin_tools(timeout: float = None):
             annotations = ToolAnnotations(title=title, **(READ_ONLY if read_only else LOCAL_WRITE))
             mcp.tool(annotations=annotations)(_guard_tool_errors(make_handler(method_name)))
             _registered_plugin_tools.add(tool_name)
+            if read_only:
+                READ_ONLY_TOOLS.add(tool_name)
+            else:
+                LOCAL_WRITE_TOOLS.add(tool_name)
             count += 1
         return count
     except Exception:
@@ -9482,6 +9756,8 @@ def reload_plugin_tools() -> str:
     this server sends no tools/list_changed notification.
     """
     added = _register_plugin_tools()
+    if added:
+        _forbid_unknown_tool_arguments()  # newly registered tools need it too
     return json.dumps({"added": added, "total_plugin_tools": len(_registered_plugin_tools), "status": "ok"})
 
 
@@ -10406,6 +10682,41 @@ def visionpro_set_max_clients(max: int) -> str:
     """Set the maximum number of Vision Pro clients that can connect simultaneously."""
     r = _call("visionpro.setMaxClients", max=max)
     return _fmt(r)
+
+
+def _forbid_unknown_tool_arguments() -> int:
+    """Make every tool reject arguments it does not declare.
+
+    The SDK derives each tool's argument model from its signature, and pydantic
+    ignores extra fields by default. A tool that takes parameters therefore rejects
+    an unknown key (the model has fields, and a typo shows up as a validation
+    error), but a tool that takes none silently accepts anything:
+
+        bridge_alive(bogus_arg=1)   ->  ran, returned normally, ignored bogus_arg
+
+    That turns a caller's typo into a silent no-op, which is exactly the failure
+    that is hardest to read back from a transcript. Forbid extras everywhere, so a
+    wrong argument name is always an error that says which name was wrong.
+
+    Returns the number of tools tightened. Call this again after registering more
+    tools at runtime (see reload_plugin_tools).
+    """
+    tightened = 0
+    for tool in mcp._tool_manager.list_tools():
+        try:
+            model = tool.fn_metadata.arg_model
+            if model.model_config.get("extra") != "forbid":
+                model.model_config["extra"] = "forbid"
+                model.model_rebuild(force=True)
+            if isinstance(tool.parameters, dict):
+                tool.parameters["additionalProperties"] = False
+            tightened += 1
+        except Exception:  # never let schema tightening stop the server starting
+            _LOG.exception("could not forbid extra arguments on tool %s", tool.name)
+    return tightened
+
+
+_forbid_unknown_tool_arguments()
 
 
 # MCP over stdio: the client (Claude Desktop, Claude Code, any MCP client) starts this

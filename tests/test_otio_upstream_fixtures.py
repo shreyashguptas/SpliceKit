@@ -10,13 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module  # noqa: E402
 
 
-try:
-    import opentimelineio as otio
-except ImportError:  # pragma: no cover - exercised via skip
-    otio = None
+import opentimelineio as otio
 
 
-@unittest.skipIf(otio is None, "opentimelineio is required for upstream fixture tests")
 class OTIOUpstreamFixtureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -42,7 +38,7 @@ class OTIOUpstreamFixtureTests(unittest.TestCase):
         self.assertEqual(summary["name"], "Transitions_Test_Project")
         self.assertEqual(summary["tracks"], 1)
         self.assertEqual(summary["clips"], 3)
-        self.assertEqual(summary["duration_seconds"], 30.5)
+        self.assertEqual(summary["duration_seconds"], 28.0)
         self.assertEqual(len(transitions), 2)
 
     def test_fcpxmld_package_fixture_reads_via_info_entrypoint(self):

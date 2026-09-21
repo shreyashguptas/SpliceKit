@@ -445,6 +445,7 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "apply_effect": {"name": "Gaussian Blur"},
         "batch_apply_effect": {"name": "Gaussian Blur", "clip_count": 2},
         "apply_transition": {"name": "Cross Dissolve"},
+        "toggle_dialog_checkbox": {"checkbox": "Use custom settings", "checked": True},
         "mixer_set_volume": {"handle": "obj_1", "volume_db": -6.0},
         "trim_clip": {"handle": "obj_1", "edge": "end", "to_seconds": 2.0},
         "import_media": {"path": str(workdir / "clip.mov")},
@@ -468,8 +469,8 @@ def overrides(workdir: Path) -> dict[str, dict]:
 # Tools allowed to answer without any bridge traffic, and why.
 NO_BRIDGE_OK = {
     "generate_fcpxml": "generates FCPXML locally; the bridge is not involved by design",
-    "import_otio": "needs the optional opentimelineio package; without it the tool says how to install it",
-    "export_otio": "needs the optional opentimelineio package; without it the tool says how to install it",
+    "import_otio": "missing .otio path returns an error before the bridge is contacted",
+    "export_otio": "missing bridge export path returns an error before OTIO write",
     "detect_beats": "runs a local analysis binary on the file first (absent here, or the file is missing), so the bridge is not reached",
     "analyze_song_structure": "runs a local analysis binary on the file first (absent here, or the file is missing), so the bridge is not reached",
     "beat_sync_blade": "runs a local analysis binary on the file first (absent here, or the file is missing), so the bridge is not reached",

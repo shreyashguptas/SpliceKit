@@ -1,5 +1,4 @@
 #import "SpliceKitImmersivePreviewPanel.h"
-#import "SpliceKitBRAWExports.h"
 #import "SpliceKitVisionPro.h"
 #import "SpliceKit.h"
 
@@ -11,27 +10,12 @@ static NSDictionary *SKIPCustomRendererDisabled(void) {
     return SKIPError(@"The custom immersive renderer is disabled; use FCP's native 360 viewer");
 }
 
-static NSString *SKIPValidatedBRAWPath(id value, NSString **errorMessage) {
-    NSString *path = [value isKindOfClass:[NSString class]] ? value : @"";
-    path = path.stringByStandardizingPath ?: @"";
-    if (path.length == 0) {
-        if (errorMessage) *errorMessage = @"immersivePreview.loadPath requires {path}";
-        return nil;
+static NSString *SKIPValidatedImmersivePath(id value, NSString **errorMessage) {
+    (void)value;
+    if (errorMessage) {
+        *errorMessage = @"Immersive camera source loading is not available in this build";
     }
-    if (!path.isAbsolutePath) {
-        if (errorMessage) *errorMessage = @"BRAW path must be absolute";
-        return nil;
-    }
-    if (![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) {
-        if (errorMessage) *errorMessage = @"Immersive preview only supports .braw files";
-        return nil;
-    }
-    BOOL isDirectory = NO;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || isDirectory) {
-        if (errorMessage) *errorMessage = @"BRAW file does not exist";
-        return nil;
-    }
-    return path;
+    return nil;
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewShow(NSDictionary *params) {
@@ -56,9 +40,7 @@ NSDictionary *SpliceKit_handleImmersivePreviewShow(NSDictionary *params) {
         }
 
         NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
-        NSString *resolvedPath = timelinePath.length > 0
-            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
-            : @"";
+        NSString *resolvedPath = timelinePath;
         NSMutableDictionary *snapshot = [[panel statusSnapshot] mutableCopy];
         snapshot[@"status"] = @"ok";
         snapshot[@"surface"] = @"fcp_native_360";
@@ -100,13 +82,11 @@ NSDictionary *SpliceKit_handleImmersivePreviewResolveSelectedPath(NSDictionary *
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
-        NSString *resolvedPath = timelinePath.length > 0
-            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: @"")
-            : @"";
+        NSString *resolvedPath = timelinePath;
         result = @{
             @"timelinePath": timelinePath,
             @"resolvedPath": resolvedPath,
-            @"isBRAW": @([[resolvedPath.pathExtension lowercaseString] isEqualToString:@"braw"]),
+            @"isImmersiveSource": @NO,
         };
     });
     return result ?: SKIPError(@"resolveSelectedPath failed");
@@ -117,14 +97,11 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadSelected(NSDictionary *params)
     __block NSString *path = nil;
     SpliceKit_executeOnMainThread(^{
         path = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
-        if (path.length > 0) {
-            path = SpliceKitBRAWResolveOriginalPathForPublic(path) ?: @"";
-        }
     });
     NSString *pathError = nil;
-    path = SKIPValidatedBRAWPath(path, &pathError);
+    path = SKIPValidatedImmersivePath(path, &pathError);
     if (path.length == 0) {
-        return SKIPError(pathError ?: @"No immersive BRAW clip is currently selected");
+        return SKIPError(pathError ?: @"No immersive clip is currently selected");
     }
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -144,7 +121,7 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadSelected(NSDictionary *params)
 
 NSDictionary *SpliceKit_handleImmersivePreviewLoadPath(NSDictionary *params) {
     NSString *pathError = nil;
-    NSString *path = SKIPValidatedBRAWPath(params[@"path"], &pathError);
+    NSString *path = SKIPValidatedImmersivePath(params[@"path"], &pathError);
     if (path.length == 0) return SKIPError(pathError);
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);

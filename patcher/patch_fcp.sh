@@ -82,12 +82,6 @@ sign_modded_app() {
     # fail with "code object is not signed at all" on rebuild / no-copy flows.
     xattr -cr "$MODDED_APP" 2>/dev/null || true
 
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; then
-        return 1
-    fi
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; then
-        return 1
-    fi
     if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; then
         return 1
     fi
