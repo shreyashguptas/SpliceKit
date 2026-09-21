@@ -34,7 +34,9 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,6 +125,14 @@ def skip(reason: str, **args) -> Case:
 #   $EFFECT_STACK     effect-stack handle of the selected clip
 #   $MEDIA_FILE       absolute path of a source media file used on the timeline
 #   $TMP              a scratch directory that the sweep removes afterwards
+#   $PROBE_MEDIA      a small media file made for the run, safe to import and remove
+#   $PROBE_NAME       the name that file lands under in the browser
+#   $PROBE_URL        that same file over a local HTTP server, for import_url
+#   $EVENT_NAME       the event the QA project lives in
+#   $SCRATCH_FCPXML   this project exported as FCPXML, renamed so re-importing it
+#   $SCRATCH_PROJECT  lands under a name of its own ($PASTE_* is a second copy, so
+#   $PASTE_FCPXML     import_fcpxml and paste_fcpxml never collide on one name)
+#   $PASTE_PROJECT
 
 
 CASES: dict[str, Case] = {
@@ -470,15 +480,37 @@ CASES.update({
                            expect=r"[Nn]o dialog"),
 
     # ---------------------------------------------------------------- imports
-    "import_media": Case(args={"path": "/tmp/splicekit-sweep-no-such-file.mov"},
-                         kind="read",
-                         expect=r"[Nn]ot found|[Nn]o such|does not exist|[Ff]ail"),
-    "import_fcpxml": Case(args={"xml": "<not-fcpxml/>"}, kind="read",
-                          expect=r"[Ff]ail|[Ii]nvalid|[Ee]rror|fcpxml"),
-    "paste_fcpxml": Case(args={"xml": ""}, kind="read",
-                         expect=r"[Nn]o (fcpxml|XML)|pasteboard|required|[Ee]mpty"),
-    "import_url": Case(args={"url": "not-a-url", "wait_until_complete": False},
-                       kind="read", expect=r"[Ii]nvalid|[Uu]nsupported|[Nn]ot a|[Ff]ail|scheme"),
+    # These four are exercised on the path that matters: a real file, real FCPXML,
+    # a real download. Refusing bad input was all the sweep used to prove, which is
+    # not the same as importing. Each one cleans the library up after itself —
+    # remove_browser_clip for a clip, and for a project the same call with
+    # include_projects, since the imported project lands in the user's own event.
+    "import_media": Case(args={"path": "$PROBE_MEDIA", "event": "$EVENT_NAME"},
+                         kind="write", timeout=180,
+                         expect=r'"imported"',
+                         cleanup=[("remove_browser_clip", {"name": "$PROBE_NAME"})]),
+    "import_fcpxml": Case(args={"xml": "$SCRATCH_FCPXML"}, kind="write", timeout=300,
+                          expect=r"importOK|\bok\b",
+                          cleanup=[("remove_browser_clip",
+                                    {"name": "$SCRATCH_PROJECT", "include_projects": True})]),
+    "paste_fcpxml": Case(args={"xml": "$PASTE_FCPXML"}, kind="write", timeout=300,
+                         expect=r"importOK|\bok\b",
+                         cleanup=[("remove_browser_clip",
+                                   {"name": "$PASTE_PROJECT", "include_projects": True})]),
+    # target_event keeps the download in the QA event: left to itself import_url
+    # makes a "URL Imports" event, and an empty event would be left behind every run.
+    "import_url": Case(args={"url": "$PROBE_URL", "mode": "import_only",
+                             "target_event": "$EVENT_NAME",
+                             "title": "SpliceKit Sweep URL Probe"},
+                       kind="write", timeout=300,
+                       expect=r"completed|imported",
+                       cleanup=[("remove_browser_clip",
+                                 {"name": "SpliceKit Sweep URL Probe"})]),
+    # Its happy path is the cleanup step of the three above; on its own it has to say
+    # clearly that nothing matched rather than quietly reporting success.
+    "remove_browser_clip": Case(args={"name": "no-such-clip-in-this-library"},
+                                kind="read",
+                                expect=r"No browser clip matching"),
     "import_url_status": Case(args={"job_id": "no-such-job"}, kind="read",
                               expect=r"[Nn]ot found|[Nn]o such|[Uu]nknown"),
     "cancel_import_url": Case(args={"job_id": "no-such-job"}, kind="read",
@@ -540,6 +572,8 @@ class Sweep:
         self.placeholders: dict[str, str] = {}
         self.tmp = Path(os.environ.get("CLAUDE_JOB_DIR", "/tmp")) / "sweep-scratch"
         self.tmp.mkdir(parents=True, exist_ok=True)
+        self._server = None
+        self._server_url = ""
 
     # -- plumbing ----------------------------------------------------------
 
@@ -566,6 +600,25 @@ class Sweep:
         return m.group(1) if m else ""
 
     # -- placeholders ------------------------------------------------------
+
+    def serve(self) -> str:
+        """Serve the scratch directory over HTTP and return its base URL.
+
+        import_url downloads and imports, so proving it works needs a URL. A local
+        server keeps that off the network: no provider, no yt-dlp, nothing that can
+        be slow or missing on the machine running the sweep.
+        """
+        if self._server_url:
+            return self._server_url
+        from functools import partial
+        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+        handler = partial(SimpleHTTPRequestHandler, directory=str(self.tmp))
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        host, port = self._server.server_address[:2]
+        self._server_url = f"http://{host}:{port}"
+        return self._server_url
+
 
     async def resolve_placeholders(self) -> None:
         clips = await self.call("get_timeline_clips", {})
@@ -629,6 +682,51 @@ class Sweep:
         self.placeholders["$MIXER_STACK"] = es.group(1) if es else ""
 
         self.placeholders["$TMP"] = str(self.tmp)
+
+        # -- what the import tools import ---------------------------------
+        # A file of our own, so importing it cannot be confused with the media already
+        # in the library and removing it afterwards cannot take a real clip with it.
+        probe = self.tmp / "splicekit-sweep-probe.mov"
+        if not probe.exists():
+            made = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=2",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                 str(probe)],
+                capture_output=True).returncode == 0
+            if not made:
+                # No ffmpeg: link the timeline's own media under a name of its own
+                # rather than copying a multi-gigabyte file.
+                source = self.placeholders["$MEDIA_FILE"]
+                probe = self.tmp / ("splicekit-sweep-probe" + Path(source).suffix)
+                try:
+                    os.link(source, probe)
+                except OSError:
+                    probe.unlink(missing_ok=True)
+                    os.symlink(source, probe)
+        self.placeholders["$PROBE_MEDIA"] = str(probe)
+        self.placeholders["$PROBE_NAME"] = probe.stem
+
+        # import_url wants a URL. Serving the scratch directory keeps the sweep off the
+        # network and still exercises the whole download-and-import path.
+        self.placeholders["$PROBE_URL"] = f"{self.serve()}/{probe.name}"
+
+        browser_json = await self.call("browser_list_clips", {})
+        m = re.search(r'"event":\s*"([^"]+)"', browser_json)
+        self.placeholders["$EVENT_NAME"] = m.group(1) if m else ""
+
+        # Real FCPXML for the two FCPXML importers: this project, exported, with the
+        # project name rewritten so each import lands beside the original instead of
+        # colliding with it.
+        export_path = self.tmp / "sweep-import.fcpxml"
+        await self.call("export_xml", {"path": str(export_path)}, 180)
+        exported = export_path.read_text(encoding="utf-8")
+        for key, project in (("$SCRATCH", "SpliceKit Sweep Import"),
+                             ("$PASTE", "SpliceKit Sweep Paste")):
+            self.placeholders[f"{key}_PROJECT"] = project
+            self.placeholders[f"{key}_FCPXML"] = re.sub(
+                r'<project name="[^"]*"', f'<project name="{project}"', exported, count=1)
 
         # montage_plan_edit wants the clip list montage_analyze_clips produces, so
         # take it from there rather than inventing a shape that drifts from the tool.
@@ -787,6 +885,10 @@ class Sweep:
             for r in self.results:
                 if r.status == FAIL:
                     print(f"  {r.tool}: {r.detail}")
+
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
         return 1 if counts[FAIL] else 0
 
 
