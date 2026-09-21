@@ -11065,11 +11065,50 @@ static NSDictionary *SpliceKit_handleCaptionsVerify(NSDictionary *params) {
 // sees exactly the projects browser.listClips reports.
 static NSArray *SpliceKit_browserClipsOfEvent(id event);
 
-static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
+// Does `name` match one of `patterns` from end to end?
+//
+// These were hasPrefix: tests, which is far too loose for something whose answer is
+// "trash this". A user project called "SK Structure notes", or an event called
+// "SpliceKit Captions Q3 review", matched — and the walk had just been widened from
+// "sequences Final Cut Pro happens to have loaded" to every project in the library,
+// so a colliding name anywhere, never opened, became reachable.
+//
+// The names SpliceKit generates are exact shapes: "SpliceKit Caption Import %u",
+// "SK Structure %u" and "_SKPaste_%u", each with a random number. Final Cut Pro only
+// ever appends " N" to de-duplicate. So the whole name is matched, and a name that
+// merely starts the same way is left alone.
+static BOOL SpliceKit_nameMatchesAnyPattern(NSString *name, NSArray<NSRegularExpression *> *patterns) {
     if (name.length == 0) return NO;
-    return [name hasPrefix:@"SpliceKit Caption Import"]
-        || [name hasPrefix:@"SK Structure"]
-        || [name hasPrefix:@"_SKPaste_"];
+    for (NSRegularExpression *re in patterns) {
+        if ([re numberOfMatchesInString:name options:0 range:NSMakeRange(0, name.length)] > 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSArray<NSRegularExpression *> *SpliceKit_compilePatterns(NSArray<NSString *> *sources) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *src in sources) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:src
+                                                                           options:0
+                                                                             error:NULL];
+        if (re) [out addObject:re];
+    }
+    return out;
+}
+
+static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
+    static NSArray<NSRegularExpression *> *patterns = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        patterns = SpliceKit_compilePatterns(@[
+            @"^SpliceKit Caption Import \\d+( \\d+)*$",
+            @"^SK Structure \\d+( \\d+)*$",
+            @"^_SKPaste_\\d+( \\d+)*$",
+        ]);
+    });
+    return SpliceKit_nameMatchesAnyPattern(name, patterns);
 }
 
 // The library item to trash when we want a PROJECT gone.
@@ -11085,8 +11124,16 @@ static BOOL SpliceKit_isScratchImportProjectName(NSString *name) {
 // by appending a number, so each import leaves behind "SpliceKit Captions 3", "… 4", "… 5".
 // Only ours, and only ever removed once emptied — see the sweep in captions.cleanup.
 static BOOL SpliceKit_isScratchImportEventName(NSString *name) {
-    if (name.length == 0) return NO;
-    return [name hasPrefix:@"SpliceKit Captions"] || [name hasPrefix:@"SpliceKit Structure"];
+    static NSArray<NSRegularExpression *> *patterns = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Declared without a number; Final Cut Pro appends " 3", " 4" to de-duplicate.
+        patterns = SpliceKit_compilePatterns(@[
+            @"^SpliceKit Captions( \\d+)*$",
+            @"^SpliceKit Structure( \\d+)*$",
+        ]);
+    });
+    return SpliceKit_nameMatchesAnyPattern(name, patterns);
 }
 
 static id SpliceKit_libraryItemForSequence(id sequence) {
@@ -11306,7 +11353,13 @@ static NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
                 // scratch, goes as a unit. That is both tidier and the only way to clear a
                 // scratch project Final Cut Pro has not loaded: an unloaded sequence has no
                 // reachable FFSequenceRecord to trash, but its event always does.
-                BOOL eventIsOurs = SpliceKit_isScratchImportEventName(eventName) && everythingIsScratch;
+                // scratchHere.count > 0 matters: everythingIsScratch starts YES and is only
+                // ever cleared inside the loop above, so an EMPTY event whose name happened to
+                // match sailed through and was trashed without one byte of SpliceKit scratch
+                // in it. An event only goes if it actually holds our scratch and nothing else.
+                BOOL eventIsOurs = SpliceKit_isScratchImportEventName(eventName)
+                    && everythingIsScratch
+                    && scratchHere.count > 0;
                 NSMutableArray *namesHere = [NSMutableArray array];
                 for (NSArray *pair in scratchHere) {
                     [foundNames addObject:pair[0]];

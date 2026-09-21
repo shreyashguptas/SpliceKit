@@ -10146,18 +10146,22 @@ def cleanup_temp_projects(dry_run: bool = False) -> str:
 
     ``generate_native_captions``, ``song_structure_blocks`` (and related
     structure-caption import) and the FCPXML pasteboard route create temporary
-    import projects named ``SpliceKit Caption Import *``, ``SK Structure *`` or
-    ``_SKPaste_*``, inside events named ``SpliceKit Captions`` or
-    ``SpliceKit Structure``. They should be deleted automatically when each run
+    import projects named ``SpliceKit Caption Import <number>``, ``SK Structure
+    <number>`` or ``_SKPaste_<number>``, inside events named ``SpliceKit Captions``
+    or ``SpliceKit Structure``. They should be deleted automatically when each run
     finishes; this tool finds any that were left behind and moves them to the
     library Trash.
 
-    An event SpliceKit's own FCPXML created, holding nothing but SpliceKit scratch,
-    goes as a unit. That is also the only way to clear a scratch project Final Cut
-    Pro has not loaded, which is every one left over from an earlier session.
+    An event SpliceKit's own FCPXML created, holding SpliceKit scratch and nothing
+    else, goes as a unit. That is also the only way to clear a scratch project Final
+    Cut Pro has not loaded, which is every one left over from an earlier session. An
+    empty event is never removed, however its name reads.
 
-    Your own projects and clips are never touched: it matches only the three names
-    above, all of which SpliceKit generates itself.
+    Your own projects and clips are never touched. The whole name has to match one of
+    the shapes above — the number is required, and Final Cut Pro's own de-duplicating
+    " 2" suffix is allowed after it. A project of yours called "SK Structure notes",
+    or an event called "SpliceKit Captions Q3 review", does not match and is left
+    alone. Run with ``dry_run=True`` first to see exactly what it would remove.
 
     Args:
         dry_run: When true, only list matching project names without deleting.
