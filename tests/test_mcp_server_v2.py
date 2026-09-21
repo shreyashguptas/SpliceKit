@@ -3,8 +3,8 @@
 
 Runs without the mcp package (the shared fake loader in test_mcp_tool_annotations
 stands in for the SDK): the tool error guard, the tool registration helper, the bridge
-lock and reset, per-call timeouts, the bounded batch loops, the bridge address
-overrides and the reported version.
+lock and reset, per-call timeouts, batch clip iteration from timeline state, the bridge
+address overrides and the reported version.
 """
 import inspect
 import json
@@ -184,18 +184,163 @@ class ServerV2Tests(unittest.TestCase):
             m.SPLICEKIT_HOST, m.SPLICEKIT_PORT = old
         self.assertIn("Cannot connect to SpliceKit", r["error"])
 
-    # -- bounded batch loops -----------------------------------------------------------
-    def test_batch_loops_stop_after_1000_clips_when_bridge_never_reports_the_end(self):
+    # -- batch color / effect: one pass per spine clip -------------------------------
+    def _cmtime(self, seconds, timescale=600):
+        return {
+            "value": int(round(seconds * timescale)),
+            "timescale": timescale,
+            "seconds": seconds,
+        }
+
+    def _media_spine_item(self, index, name, handle, start, end):
+        return {
+            "index": index,
+            "class": "FFAnchoredMediaComponent",
+            "name": name,
+            "duration": self._cmtime(end - start),
+            "lane": 0,
+            "mediaType": 1,
+            "handle": handle,
+            "startTime": self._cmtime(start),
+            "endTime": self._cmtime(end),
+            "hasVideo": True,
+            "hasAudio": True,
+        }
+
+    def _three_clip_detailed_state(self, playhead_seconds, items=None):
+        if items is None:
+            items = [
+                self._media_spine_item(0, "A", "obj_a", 0, 10),
+                self._media_spine_item(1, "B", "obj_b", 10, 20),
+                self._media_spine_item(2, "C", "obj_c", 20, 30),
+            ]
+        return {
+            "sequenceName": "Batch Test",
+            "playheadTime": self._cmtime(playhead_seconds),
+            "duration": self._cmtime(30),
+            "frameRate": 24.0,
+            "itemCount": len(items),
+            "items": items,
+        }
+
+    def _install_batch_bridge(self, detailed_state, *, fail_select_handle=None):
         m = self.module
         calls = []
+
+        def fake_call(method, params_dict=None, timeout=None, **params):
+            if params_dict is not None:
+                params = {**params_dict, **params}
+            calls.append((method, params))
+            if method == "timeline.getDetailedState":
+                return detailed_state
+            if method in ("timeline.beginEdit", "timeline.endEdit"):
+                return {"status": "ok"}
+            if method == "timeline.selectItems":
+                handle = (params.get("handles") or [None])[0]
+                if fail_select_handle and handle == fail_select_handle:
+                    return {"error": f"select failed for {handle}"}
+                return {"status": "ok", "matchesRequest": True, "selected": [{"handle": handle}]}
+            if method == "timeline.action":
+                return {"status": "ok", "action": params.get("action")}
+            if method == "effects.apply":
+                return {"status": "ok", "effect": params.get("name") or params.get("effectID")}
+            return {"status": "ok"}
+
         original = m.bridge.call
-        m.bridge.call = lambda method, params_dict=None, timeout=None, **p: (calls.append((method, p)) or {"status": "ok"})
+        m.bridge.call = fake_call
+        return calls, original
+
+    def test_batch_loops_iterate_actual_clips_and_never_repeat_one(self):
+        m = self.module
+
+        # (a) playhead at timeline start -> all three clips, once each
+        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
         try:
             out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
-            self.assertEqual(out["total"], 1000)
-            calls.clear()
-            out = json.loads(m.batch_apply_effect(name="Gaussian Blur", clip_count=3))
             self.assertEqual(out["total"], 3)
+            self.assertEqual(out["applied"], 3)
+            handles = [c["handle"] for c in out["clips"]]
+            self.assertEqual(handles, ["obj_a", "obj_b", "obj_c"])
+            self.assertEqual(len(set(handles)), 3)
+            action_calls = [p for meth, p in calls if meth == "timeline.action"]
+            self.assertEqual(len(action_calls), 3)
+            self.assertTrue(all(p.get("action") == "addColorBoard" for p in action_calls))
+        finally:
+            m.bridge.call = original
+
+        # (b) playhead inside second clip -> second and third only
+        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(15.0))
+        try:
+            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
+            self.assertEqual(out["total"], 2)
+            self.assertEqual([c["handle"] for c in out["clips"]], ["obj_b", "obj_c"])
+        finally:
+            m.bridge.call = original
+
+        # (c) clip_count limits to first target only
+        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
+        try:
+            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=1))
+            self.assertEqual(out["total"], 1)
+            self.assertEqual(out["clips"][0]["handle"], "obj_a")
+        finally:
+            m.bridge.call = original
+
+        # (d) gap and transition on the spine are skipped
+        spine = [
+            self._media_spine_item(0, "A", "obj_a", 0, 8),
+            {
+                "index": 1,
+                "class": "FFAnchoredGap",
+                "name": "Gap",
+                "handle": "obj_gap",
+                "startTime": self._cmtime(8),
+                "endTime": self._cmtime(9),
+            },
+            {
+                "index": 2,
+                "class": "FFAnchoredTransition",
+                "name": "Cross Dissolve",
+                "handle": "obj_xfade",
+                "startTime": self._cmtime(8.5),
+                "endTime": self._cmtime(9.5),
+            },
+            self._media_spine_item(3, "B", "obj_b", 9, 18),
+        ]
+        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0, items=spine))
+        try:
+            out = json.loads(m.batch_apply_effect(name="Gaussian Blur", clip_count=0))
+            result_handles = [c["handle"] for c in out["clips"]]
+            self.assertEqual(result_handles, ["obj_a", "obj_b"])
+            self.assertNotIn("obj_gap", result_handles)
+            self.assertNotIn("obj_xfade", result_handles)
+        finally:
+            m.bridge.call = original
+
+        # (e) exactly one undo group; endEdit even when a clip fails
+        calls, original = self._install_batch_bridge(
+            self._three_clip_detailed_state(0.0),
+            fail_select_handle="obj_b",
+        )
+        try:
+            out = json.loads(m.batch_color_correct(correction="addColorBoard", clip_count=0))
+            self.assertEqual(out["total"], 3)
+            self.assertEqual(out["applied"], 2)
+            self.assertFalse(out["clips"][1]["success"])
+            begin_idxs = [i for i, (meth, _) in enumerate(calls) if meth == "timeline.beginEdit"]
+            end_idxs = [i for i, (meth, _) in enumerate(calls) if meth == "timeline.endEdit"]
+            self.assertEqual(len(begin_idxs), 1)
+            self.assertEqual(len(end_idxs), 1)
+            first_work = next(
+                i for i, (meth, _) in enumerate(calls)
+                if meth in ("timeline.selectItems", "timeline.action", "effects.apply")
+            )
+            last_work = max(
+                i for i, (meth, _) in enumerate(calls)
+                if meth in ("timeline.selectItems", "timeline.action", "effects.apply")
+            )
+            self.assertLess(begin_idxs[0], first_work)
+            self.assertGreater(end_idxs[0], last_work)
         finally:
             m.bridge.call = original
 

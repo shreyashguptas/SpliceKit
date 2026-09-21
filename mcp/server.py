@@ -9856,85 +9856,190 @@ Task: Edit a documentary{f' about "{topic}"' if topic else ''}.
 # Apply effects or corrections to multiple clips in one call,
 # reducing round-trips for common bulk operations.
 
+_BATCH_SPINE_READ_LIMIT = 10000
+
+
+def _spine_item_accepts_batch_effect(item: dict) -> bool:
+    """Primary-storyline items that cannot take a clip effect or color correction."""
+    cls = str(item.get("class") or "")
+    if "Transition" in cls:
+        return False
+    if "Gap" in cls or "Generator" in cls:
+        return False
+    return bool(item.get("handle"))
+
+
+def _primary_storyline_targets_from_playhead(clip_count: int) -> tuple[list[dict], str | None]:
+    """Ordered eligible primary-spine clips from the playhead clip through the end.
+
+    Includes the clip whose range contains the playhead (start <= playhead < end), then every
+    later eligible clip in timeline order. If the playhead is in a gap or past the end, only
+    clips that start after the playhead are included.
+    """
+    r = bridge.call(
+        "timeline.getDetailedState",
+        limit=_BATCH_SPINE_READ_LIMIT,
+        include_connected=False,
+        include_markers=False,
+    )
+    if _err(r):
+        return [], f"Error reading timeline: {r.get('error', r)}"
+
+    spine_total = int(r.get("itemCount") or 0)
+    items = r.get("items") or []
+    if spine_total > len(items):
+        return [], (
+            f"Error: timeline has {spine_total} primary storyline items but getDetailedState "
+            f"returned only {len(items)} (limit {_BATCH_SPINE_READ_LIMIT}); cannot batch safely"
+        )
+
+    playhead = _time_seconds(r, "playheadTime")
+    if playhead is None:
+        playhead = 0.0
+
+    targets: list[dict] = []
+    eps = 1e-9
+    for item in items:
+        if not _spine_item_accepts_batch_effect(item):
+            continue
+        start = _time_seconds(item, "startTime")
+        end = _time_seconds(item, "endTime")
+        if start is None:
+            continue
+        under_playhead = (
+            end is not None
+            and start <= playhead + eps
+            and playhead < end - eps
+        )
+        starts_after = start > playhead + eps
+        if not under_playhead and not starts_after:
+            continue
+        targets.append({
+            "handle": item.get("handle"),
+            "name": item.get("name") or "",
+            "index": item.get("index"),
+            "start_seconds": start,
+        })
+
+    if clip_count > 0:
+        targets = targets[:clip_count]
+
+    return targets, None
+
+
+def _batch_select_clip_by_handle(handle: str) -> dict | None:
+    """Select one spine/connected clip by handle; return bridge error dict or None on success."""
+    r = bridge.call("timeline.selectItems", handles=[handle], mode="replace")
+    if _err(r):
+        return r
+    unresolved = r.get("unresolved") or []
+    if unresolved:
+        return {"error": f"Handle not resolved: {unresolved[0]}"}
+    if r.get("matchesRequest") is False and not (r.get("selected") or []):
+        return {"error": "Selection did not match request (no clip selected)"}
+    return None
+
 
 @splicekit_tool("batch_apply_effect")
 def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) -> str:
-    """Apply the same effect to multiple clips sequentially.
+    """Apply one effect to each targeted primary-storyline clip.
 
-    Selects each clip at the playhead, applies the effect, then moves
-    to the next edit point. Starts from the current playhead position.
+    Reads the spine once via timeline.getDetailedState (same data as get_timeline_clips),
+    skips transitions and gap/generator items, selects each target clip by handle without
+    moving the playhead, and applies the effect once per clip. Targets are the clip whose
+    range contains the playhead (start <= playhead < end), then every eligible clip that
+    starts after the playhead in timeline order. If the playhead is in a gap or past the end,
+    only clips that start after the playhead are processed. The whole batch is a single undo
+    step (Edit > Undo "Batch Apply Effect").
 
     Args:
         name: Display name of the effect (e.g. "Gaussian Blur").
         effectID: The effect ID string (alternative to name).
-        clip_count: Number of clips to process (0 = all clips from playhead to end,
-                    bounded at 1000 so a bridge that never reports the end cannot
-                    keep this running forever).
-
-    Select the starting clip first, or position the playhead at the first clip.
+        clip_count: Process only the first N eligible clips (0 = all targets to end of spine).
     """
     if not name and not effectID:
         return "Error: provide either name or effectID"
 
-    results = []
-    applied = 0
-    errors = 0
-    i = 0
+    targets, err = _primary_storyline_targets_from_playhead(clip_count)
+    if err:
+        return err
+    if not targets:
+        return "Error: no primary storyline clips from the playhead onward accept an effect"
 
-    # Select clip at current position
-    r = bridge.call("timeline.action", action="selectClipAtPlayhead")
+    undo_name = "Batch Apply Effect"
+    r = bridge.call("timeline.beginEdit", name=undo_name)
     if _err(r):
-        return f"Error selecting initial clip: {r.get('error', r)}"
+        return f"Error opening undo step: {r.get('error', r)}"
 
-    limit = clip_count if clip_count > 0 else 1000
-    while i < limit:
-        # Apply effect to current selection
-        params = {}
-        if effectID:
-            params["effectID"] = effectID
-        if name:
-            params["name"] = name
-        r = bridge.call("effects.apply", **params)
-        if _err(r):
-            errors += 1
-            results.append({"clip": i, "success": False, "error": r.get("error", str(r))})
-        else:
-            applied += 1
-            results.append({"clip": i, "success": True, "effect": r.get("effect", "?")})
+    clips_out: list[dict] = []
+    applied = 0
+    try:
+        for target in targets:
+            handle = target["handle"]
+            entry: dict = {
+                "handle": handle,
+                "name": target["name"],
+                "index": target.get("index"),
+                "start_seconds": target.get("start_seconds"),
+            }
+            sel_err = _batch_select_clip_by_handle(handle)
+            if sel_err:
+                entry["success"] = False
+                entry["error"] = sel_err.get("error", str(sel_err))
+                clips_out.append(entry)
+                continue
 
-        i += 1
+            params: dict = {}
+            if effectID:
+                params["effectID"] = effectID
+            if name:
+                params["name"] = name
+            r = bridge.call("effects.apply", **params)
+            if _err(r):
+                entry["success"] = False
+                entry["error"] = r.get("error", str(r))
+            else:
+                entry["success"] = True
+                entry["effect"] = r.get("effect", name or effectID or "?")
+                applied += 1
+            clips_out.append(entry)
+    finally:
+        bridge.call("timeline.endEdit", name=undo_name)
 
-        # Move to next edit and select
-        r = bridge.call("timeline.action", action="nextEdit")
-        if _err(r):
-            break  # No more edit points
-        r = bridge.call("timeline.action", action="selectClipAtPlayhead")
-        if _err(r):
-            break  # No clip at this position
+    errors = len(clips_out) - applied
+    if applied == 0:
+        return (
+            f"Error: batch apply failed on all {len(clips_out)} clip(s): "
+            + json.dumps(clips_out, default=str)
+        )
 
     return json.dumps({
         "applied": applied,
         "errors": errors,
-        "total": i,
-        "results": results,
+        "total": len(clips_out),
+        "undo": undo_name,
+        "clips": clips_out,
     }, indent=2, default=str)
 
 
 @splicekit_tool("batch_color_correct")
 def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) -> str:
-    """Apply the same color correction to multiple clips sequentially.
+    """Apply one color correction to each targeted primary-storyline clip.
 
-    Selects each clip at the playhead, applies the correction, then moves
-    to the next edit point. Starts from the current playhead position.
+    Reads the spine once via timeline.getDetailedState (same data as get_timeline_clips),
+    skips transitions and gap/generator items, selects each target clip by handle without
+    moving the playhead, and runs the correction action once per clip. Targets are the clip
+    whose range contains the playhead (start <= playhead < end), then every eligible clip that
+    starts after the playhead in timeline order. If the playhead is in a gap or past the end,
+    only clips that start after the playhead are processed. The whole batch is a single undo
+    step (Edit > Undo "Batch Color Correct").
 
     Args:
         correction: The color correction action. One of:
             "addColorBoard", "addColorWheels", "addColorCurves",
             "addColorAdjustment", "addHueSaturation",
             "addEnhanceLightAndColor", "balanceColor", "matchColor"
-        clip_count: Number of clips to process (0 = all clips from playhead to end,
-                    bounded at 1000 so a bridge that never reports the end cannot
-                    keep this running forever).
+        clip_count: Process only the first N eligible clips (0 = all targets to end of spine).
     """
     valid_corrections = {
         "addColorBoard", "addColorWheels", "addColorCurves",
@@ -9944,40 +10049,61 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
     if correction not in valid_corrections:
         return f"Error: correction must be one of: {', '.join(sorted(valid_corrections))}"
 
-    results = []
-    applied = 0
-    errors = 0
-    i = 0
+    targets, err = _primary_storyline_targets_from_playhead(clip_count)
+    if err:
+        return err
+    if not targets:
+        return "Error: no primary storyline clips from the playhead onward accept color correction"
 
-    r = bridge.call("timeline.action", action="selectClipAtPlayhead")
+    undo_name = "Batch Color Correct"
+    r = bridge.call("timeline.beginEdit", name=undo_name)
     if _err(r):
-        return f"Error selecting initial clip: {r.get('error', r)}"
+        return f"Error opening undo step: {r.get('error', r)}"
 
-    limit = clip_count if clip_count > 0 else 1000
-    while i < limit:
-        r = bridge.call("timeline.action", action=correction)
-        if _err(r):
-            errors += 1
-            results.append({"clip": i, "success": False, "error": r.get("error", str(r))})
-        else:
-            applied += 1
-            results.append({"clip": i, "success": True, "correction": correction})
+    clips_out: list[dict] = []
+    applied = 0
+    try:
+        for target in targets:
+            handle = target["handle"]
+            entry: dict = {
+                "handle": handle,
+                "name": target["name"],
+                "index": target.get("index"),
+                "start_seconds": target.get("start_seconds"),
+            }
+            sel_err = _batch_select_clip_by_handle(handle)
+            if sel_err:
+                entry["success"] = False
+                entry["error"] = sel_err.get("error", str(sel_err))
+                clips_out.append(entry)
+                continue
 
-        i += 1
+            r = bridge.call("timeline.action", action=correction)
+            if _err(r):
+                entry["success"] = False
+                entry["error"] = r.get("error", str(r))
+            else:
+                entry["success"] = True
+                entry["correction"] = correction
+                applied += 1
+            clips_out.append(entry)
+    finally:
+        bridge.call("timeline.endEdit", name=undo_name)
 
-        r = bridge.call("timeline.action", action="nextEdit")
-        if _err(r):
-            break
-        r = bridge.call("timeline.action", action="selectClipAtPlayhead")
-        if _err(r):
-            break
+    errors = len(clips_out) - applied
+    if applied == 0:
+        return (
+            f"Error: batch color correct failed on all {len(clips_out)} clip(s): "
+            + json.dumps(clips_out, default=str)
+        )
 
     return json.dumps({
         "applied": applied,
         "errors": errors,
-        "total": i,
+        "total": len(clips_out),
         "correction": correction,
-        "results": results,
+        "undo": undo_name,
+        "clips": clips_out,
     }, indent=2, default=str)
 
 
