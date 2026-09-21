@@ -6642,16 +6642,29 @@ def _otio_fcpx_ref_clip_as_gap(ref_clip):
     honestly and keeps the timeline the right length, which is what the note alongside it
     describes.
     """
+    import copy
     import xml.etree.ElementTree as _ET
     gap = _ET.Element("gap")
     gap.set("name", ref_clip.get("name", "gap"))
     gap.set("offset", ref_clip.get("offset", "0s"))
     gap.set("duration", ref_clip.get("duration", "0s"))
     gap.set("start", "0s")
-    # Anything anchored to it travels with it; it is still at that point on the timeline.
+
+    # Anything anchored to it travels with it, at the same point on the timeline.
+    #
+    # An anchored child's `offset` is in its host's local time, and the reader works out
+    # where it lands as host_offset + (child_offset - host_start). Dropping the host's
+    # `start` to 0 without touching the children moved every one of them later by exactly
+    # the discarded `start` — which is any compound clip not played from its first frame,
+    # the ordinary case. The children are rebased instead.
+    ref_start = _otio_fcpx_fraction(ref_clip.get("start"))
     for child in list(ref_clip):
-        if child.tag in _FCPX_TIMED_TAGS and child.get("lane"):
-            gap.append(child)
+        if child.tag not in _FCPX_TIMED_TAGS or not child.get("lane"):
+            continue
+        moved = copy.deepcopy(child)
+        moved.set("offset", _otio_fcpx_format_time(
+            _otio_fcpx_fraction(child.get("offset")) - ref_start))
+        gap.append(moved)
     return gap
 
 
@@ -6719,7 +6732,11 @@ def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine, resources_elem=None,
                              f"flattened into {len(sub)} clip(s)")
                 expanded.extend(sub)
                 continue
-            expanded.append(clip)
+            # Its media resolved but held nothing usable — an empty <spine>, or a body
+            # entirely trimmed away. Still a ref-clip nothing downstream can resolve.
+            notes.append(f"compound clip {name!r} replaced with a gap: "
+                         "there is nothing in it")
+            expanded.append(_otio_fcpx_ref_clip_as_gap(clip))
             continue
 
         expanded.append(clip)
@@ -6780,16 +6797,25 @@ def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
             if child.tag != "ref-clip":
                 rebuilt.append(child)
                 continue
+            # These two checks are the top-level twins of the ones inside
+            # _otio_fcpx_expand_ref_clip, and they kept the raw <ref-clip> long after the
+            # nested ones stopped: a compound clip sitting directly in the project's spine
+            # whose <media> is missing, has no <sequence>, or has an empty <spine> still
+            # came back as an unplayable clip.
             inner_spine = _otio_fcpx_media_spine(resources_elem, child.get("ref", ""))
             if inner_spine is None:
-                rebuilt.append(child)
-                notes.append(f"compound clip {child.get('name', '?')!r} kept as is: "
-                             "its contents are not in this document")
+                rebuilt.append(_otio_fcpx_ref_clip_as_gap(child))
+                changed = True
+                notes.append(f"compound clip {child.get('name', '?')!r} replaced with a "
+                             "gap: its contents are not in this document")
                 continue
             expanded = _otio_fcpx_expand_ref_clip(child, inner_spine, resources_elem,
                                                   notes, frozenset({child.get("ref", "")}))
             if not expanded:
-                rebuilt.append(child)
+                rebuilt.append(_otio_fcpx_ref_clip_as_gap(child))
+                changed = True
+                notes.append(f"compound clip {child.get('name', '?')!r} replaced with a "
+                             "gap: there is nothing in it")
                 continue
             changed = True
             anchored = sum(1 for c in child if c.tag in _FCPX_TIMED_TAGS and c.get("lane"))

@@ -211,5 +211,128 @@ class SelfNestedCompoundClipTests(unittest.TestCase):
         self.assertTrue(any("not in this document" in n for n in notes), notes)
 
 
+def _fcpxml(resources_extra, spine_body):
+    """A one-project FCPXML with two assets, for the awkward-shape cases below."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p2997" frameDuration="1001/30000s"
+            width="1920" height="1080"/>
+    <asset id="a1" name="A" start="0s" duration="600600/30000s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///tmp/a.mov"/>
+    </asset>
+{resources_extra}
+  </resources>
+  <library>
+    <event name="E">
+      <project name="Awkward">
+        <sequence format="r1" duration="600600/30000s">
+          <spine>
+{spine_body}
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
+"""
+
+
+class CompoundClipShapesThatResolveToNothingTests(unittest.TestCase):
+    """A <ref-clip> the reader cannot turn into clips must never reach the output.
+
+    Every one of these came back as a Clip with a MissingReference — unplayable, with
+    nothing in the clip to say why — because the top-level walk in
+    _otio_fcpx_flatten_ref_clips kept its own copies of these checks and they were left
+    behind when the nested ones were fixed.
+    """
+
+    def _timeline(self, xml):
+        module = load_server_module()
+        return module, module._otio_first_timeline(module._otio_read_fcpx_string(xml))
+
+    def _assert_all_playable(self, timeline, label):
+        for clip in timeline.find_clips():
+            self.assertNotIsInstance(
+                clip.media_reference, otio.schema.MissingReference,
+                f"{label}: {clip.name!r} came back unplayable")
+
+    def test_a_top_level_compound_clip_with_no_media_at_all(self):
+        xml = _fcpxml(
+            "",
+            '            <ref-clip ref="m_absent" name="Bad" offset="0s" start="0s"'
+            ' duration="300300/30000s"/>')
+        _, timeline = self._timeline(xml)
+        self._assert_all_playable(timeline, "missing media")
+
+    def test_a_top_level_compound_clip_whose_media_has_no_sequence(self):
+        xml = _fcpxml(
+            '    <media id="m_bare" name="Bare"/>',
+            '            <ref-clip ref="m_bare" name="Bad" offset="0s" start="0s"'
+            ' duration="300300/30000s"/>')
+        _, timeline = self._timeline(xml)
+        self._assert_all_playable(timeline, "media with no sequence")
+
+    def test_a_top_level_compound_clip_with_an_empty_spine(self):
+        xml = _fcpxml(
+            '    <media id="m_empty" name="Empty">\n'
+            '      <sequence format="r1" duration="300300/30000s"><spine></spine></sequence>\n'
+            '    </media>',
+            '            <ref-clip ref="m_empty" name="Empty" offset="0s" start="0s"'
+            ' duration="300300/30000s"/>')
+        _, timeline = self._timeline(xml)
+        self._assert_all_playable(timeline, "empty spine")
+
+    def test_a_nested_compound_clip_with_an_empty_spine(self):
+        xml = _fcpxml(
+            '    <media id="m_empty" name="Empty">\n'
+            '      <sequence format="r1" duration="300300/30000s"><spine></spine></sequence>\n'
+            '    </media>\n'
+            '    <media id="m_outer" name="Outer">\n'
+            '      <sequence format="r1" duration="300300/30000s"><spine>\n'
+            '        <ref-clip ref="m_empty" name="Empty" offset="0s" start="0s"'
+            ' duration="300300/30000s"/>\n'
+            '      </spine></sequence>\n'
+            '    </media>',
+            '            <ref-clip ref="m_outer" name="Outer" offset="0s" start="0s"'
+            ' duration="300300/30000s"/>')
+        _, timeline = self._timeline(xml)
+        self._assert_all_playable(timeline, "nested empty spine")
+
+
+class GapKeepsAnchoredClipsWhereTheyWereTests(unittest.TestCase):
+    def test_an_anchored_clip_on_a_trimmed_compound_clip_does_not_move(self):
+        # An anchored child's offset is in its host's local time, and the reader reads it
+        # as host_offset + (child_offset - host_start). Replacing the host with a gap whose
+        # start is 0, without rebasing the children, pushed every one of them later by
+        # exactly the discarded start — which is any compound clip not played from its
+        # first frame, i.e. the ordinary case.
+        start = "50050/30000s"      # 1.668s into the compound clip
+        child_offset = "55055/30000s"  # 0.167s past that, so 0.167s on the timeline
+        xml = _fcpxml(
+            "",
+            f'            <ref-clip ref="m_absent" name="Bad" offset="0s" start="{start}"'
+            f' duration="200200/30000s">\n'
+            f'              <asset-clip ref="a1" lane="1" name="Anchored"'
+            f' offset="{child_offset}" start="0s" duration="30030/30000s" format="r1"/>\n'
+            f'            </ref-clip>')
+        module = load_server_module()
+        timeline = module._otio_first_timeline(module._otio_read_fcpx_string(xml))
+
+        anchored = [c for c in timeline.find_clips() if c.name == "Anchored"]
+        self.assertEqual(len(anchored), 1, "the anchored clip did not survive the gap")
+        lane = [t for t in timeline.tracks if any(c.name == "Anchored"
+                                                 for c in t.find_clips())][0]
+        at = 0.0
+        for item in lane:
+            if getattr(item, "name", None) == "Anchored":
+                break
+            d = item.source_range.duration
+            at += d.value / d.rate
+        self.assertAlmostEqual(at, 0.167, places=2,
+                               msg=f"the anchored clip moved to {at:.3f}s; the host's "
+                                   "start was dropped without rebasing it")
+
+
 if __name__ == "__main__":
     unittest.main()
