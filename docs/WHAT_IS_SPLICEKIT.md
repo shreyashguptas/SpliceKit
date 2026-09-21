@@ -115,7 +115,7 @@ That's it. Your original FCP stays right where it is, completely unchanged.
 
 ## Still Have Questions?
 
-- Read [CLAUDE.md](../CLAUDE.md), the tool-by-tool guide, for technical details
+- Read [.claude/CLAUDE.md](../.claude/CLAUDE.md), the tool-by-tool guide, for technical details
 - Browse the [docs folder](.) for deep dives on specific features
 - Open an issue on GitHub if something's unclear -- the community is friendly
 

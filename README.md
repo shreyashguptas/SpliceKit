@@ -72,7 +72,9 @@ talk to.
 
 ## More
 
-The tool-by-tool guide is [CLAUDE.md](CLAUDE.md); the rest is under [docs/](docs/).
+The tool-by-tool guide is [.claude/CLAUDE.md](.claude/CLAUDE.md), which Claude Code
+loads on its own when you open this repository. Everything else, including the
+[changelog](docs/CHANGELOG.md), is under [docs/](docs/).
 What touches the network, and when, is listed in
 [docs/THIRD_PARTY_DEPENDENCIES.md](docs/THIRD_PARTY_DEPENDENCIES.md).
 

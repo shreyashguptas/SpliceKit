@@ -27,19 +27,28 @@ rather than simulating the keyboard shortcut.
 
 ```
 1. bridge_status()                    -- verify connection
-2. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
-3. get_clip_info("obj_12")            -- what is IN the clip: source file, transcript words, effects, title text, a frame image
-4. browser_list_clips()               -- source clips in the browser, with handles
-5. add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
+2. open_project("My Project")         -- open a project by name
+3. get_timeline_clips()               -- see timeline contents: spine clips + connected clips + markers
+4. get_clip_info("obj_12")            -- what is IN the clip: source file, transcript words, effects, title text, a frame image
+5. browser_list_clips()               -- source clips in the browser, with handles
+6. add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
                                       -- a range of that source clip pasted at the playhead (the effect of Insert / Connect / Append)
-6. timeline_action("blade")           -- edit
-7. verify_action("after blade")       -- confirm
+7. timeline_action("blade")           -- edit
+8. verify_action("after blade")       -- confirm state changed
+9. capture_timeline()                 -- visually verify the timeline
+10. capture_viewer()                  -- visually verify the viewer/canvas
 ```
 
 ## CRITICAL: Must Know Before Editing
 
 ### Opening a Project
-If `get_timeline_clips()` returns an error about "no sequence", load a project:
+Use `open_project()` to load a project by name:
+```python
+open_project("My Project")                   # find by name
+open_project("Edit v2", event="4-5-26")      # filter by event too
+```
+
+If you need lower-level control, you can still navigate manually:
 ```python
 # Navigate: library -> sequences -> find one with content -> load it
 libs = call_method_with_args("FFLibraryDocument", "copyActiveLibraries", "[]", true, true)
@@ -58,10 +67,16 @@ allSeqs = call_method_with_args(seqs_handle, "allObjects", "[]", false, true)
 ### Select Before Acting
 Color correction, retiming, titles, and effects require a selected clip:
 ```
-playback_action("goToStart")              # position
-playback_action("nextFrame") x N          # navigate
-timeline_action("selectClipAtPlayhead")   # select
+seek_to_time(12.5)                        # position the playhead
+timeline_action("selectClipAtPlayhead")   # select primary storyline clip
 timeline_action("addColorBoard")          # now apply
+```
+
+To select a connected clip (title, B-roll, etc.) use `select_clip_in_lane()`:
+```
+select_clip_in_lane(lane=1)               # select connected clip above primary
+select_clip_in_lane(lane=-1)              # select connected clip below
+select_clip_in_lane(lane=0)               # same as selectClipAtPlayhead
 ```
 
 To act on a specific clip without moving the playhead, select it by handle:
@@ -74,9 +89,11 @@ Markers are not selectable this way; an empty list deselects everything.
 
 ### Playhead Positioning
 - 1 frame = ~0.042s at 24fps, ~0.033s at 30fps
-- Use `nextFrame` with repeat count for precise positioning
+- Use `seek_to_time(seconds)` for precise positioning. This is the rule at the top of this
+  file: never step frame by frame to reach a time `seek_to_time` can jump to.
+- `nextFrame` / `prevFrame` are for moving one or two frames off a position you are
+  already at — nudging to the next edit, checking the frame after a cut.
 - `batch_timeline_actions` is fastest for multi-step sequences
-- Always go to a known position (goToStart) before stepping
 
 ### Undo After Mistakes
 ```
@@ -178,8 +195,8 @@ select_tool("transform") # switch to transform tool
 ```
 assign_role("audio", "Dialogue")     # assign audio role
 assign_role("video", "Titles")       # assign video role
-share_project("Export File")         # export with specific destination
-share_project()                      # export with default destination
+share_project("Export File (default)…")  # a named destination, as File > Share lists it
+share_project()                      # whichever one FCP marks "(default)"; opens the Export sheet
 create_project()                     # create new project
 create_event()                       # create new event
 create_library()                     # create new library
@@ -189,9 +206,13 @@ create_library()                     # create new library
 
 ### Blade at a specific time
 ```
-playback_action("goToStart")
-batch_timeline_actions('[{"type":"playback","action":"nextFrame","repeat":72}]')  # 3s at 24fps
-timeline_action("blade")
+seek_to_time(3.0)         # jump to 3 seconds
+timeline_action("blade")  # cut there
+```
+
+### Multiple cuts (batch — preferred)
+```
+blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0])   # cut at all times in one call
 ```
 
 ### Trim a clip to an exact time
@@ -218,9 +239,6 @@ compound clip (FCP: reference clip, its `isReferenceClip` flag, verified on 12.3
 answers the same flag) has no single one, so `get_clip_info` reports no source file and no frame for it
 (`capture_clip_frame` shows it as the Viewer shows it) and `get_timeline_clips` marks it [reference clip].
 `kind`, handles and `timings` are SpliceKit bookkeeping, not FCP terms.
-
-`capture_viewer`, `capture_timeline` and `capture_inspector` return their PNG inline as MCP image content too
-(`return_image=False` to skip).
 
 ### Hear the audio of the clips
 ```
@@ -264,14 +282,33 @@ single source file; both are listed as skipped. A harsh audio cut: read the outg
 read again. `slice`, `edge window`, `jump` and the sparkline are SpliceKit bookkeeping, not FCP
 terms. Raw RPC: `timeline.getAudioLevels`.
 
+### Put a clip into a library, and take one back out
+```
+import_media(path="/path/to/clip.mov", event="My Event")   # add footage to an event
+remove_browser_clip(name="clip", event="My Event")         # the exact inverse; file on disk untouched
+remove_browser_clip(name="Old Cut", include_projects=True) # a project is a whole timeline: opt in
+remove_browser_clip(name="clip", dry_run=True)             # see what would go first
+cleanup_temp_projects(dry_run=True)                        # SpliceKit's own leftovers, nothing of yours
+cleanup_temp_projects()                                    # move them to the library trash
+```
+`remove_browser_clip` refuses a name that matches more than one item and tells you which
+ones matched — pass `event=` or a handle to say which. `cleanup_temp_projects` only ever
+matches names SpliceKit generates itself ("SK Structure 1271", "_SKPaste_8180",
+"SpliceKit Caption Import 7362"), whole-name, number required; a project of yours called
+"SK Structure notes" is left alone, and an empty event is never removed.
+
 ### Add a source clip, or a range of it, to the timeline
 ```
-browser_list_clips()                                                       # source clips with handles
+browser_list_clips()                                                       # name, event, handle, isProject
 add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45, dry_run=True)
 add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
 add_clip_to_timeline("obj_5", edit="insert", at_seconds=0)                 # whole clip, the effect of Insert (W) at 0s
 add_clip_to_timeline("obj_5", edit="append")                               # whole clip, the effect of Append (E)
 ```
+Check `isProject` before using a row: a project sits in the browser next to the source
+clips but it is a whole timeline, and these tools refuse it. Open it with
+`open_project(name)` instead. An exact project name always beats a longer one that merely
+contains it, so `open_project("QA Timeline")` opens that and not "QA Timeline 1".
 SpliceKit writes the range to FCP's pasteboard and uses FCP's Edit > Paste (`insert`: into the primary
 storyline at the playhead, later clips move right) or Edit > Paste as Connected Clip (`connect`: a
 connected clip at the playhead; FCP picks the lane); `append` moves the playhead to the end of the
@@ -287,7 +324,13 @@ clip as `get_timeline_clips()` does, whether its duration matches the range and 
 (within two frames, at least 50 ms), and anything else the edit created. The pasteboard is replaced.
 The edit is a single paste, so `history_action("undo")` removes it in one step.
 
-### Multiple cuts
+### Cuts at regular intervals across entire timeline
+```
+# Compute times: every 3s across a 30s timeline
+blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0])
+```
+
+### Multiple cuts (batch_timeline_actions alternative)
 ```
 batch_timeline_actions('[
   {"type":"playback","action":"goToStart"},
@@ -354,15 +397,19 @@ analyze_timeline()  # pacing, flash frames, clip stats
 
 ### Batch export clips individually
 ```
-batch_export()                    # export all clips using default share destination
-batch_export(scope="selected")    # export only selected clips
+batch_export(folder="/path/to/output")                 # every clip on the timeline
+batch_export(folder="/path/to/output", scope="selected")  # only the selected clips
 ```
+
+`folder` is required. Without it the bridge would have to open a folder picker and wait
+for someone to answer it, which parks FCP's main thread — a save/open panel cannot be
+confirmed over the bridge at all, only cancelled. The folder is created if missing.
 
 Each clip is exported individually with all effects/color grading baked in.
 For each clip, SpliceKit:
 1. Computes the clip's exact position in the timeline
 2. Sets the in/out range (mark in/out) to the clip boundaries
-3. Triggers FCP's share dialog — click "Share" to confirm
+3. Queues the export; the files appear in the folder as FCP renders them
 
 Set your default share destination in FCP first (File > Share > Add Destination).
 
@@ -378,7 +425,8 @@ timeline_action("clearRange")      # remove range selection
 ```
 open_transcript()                              # transcribe all clips on timeline
 open_transcript(file_url="/path/to/video.mp4") # transcribe a specific file
-get_transcript()                               # get words with timestamps + speakers + silences
+open_transcript(force_retranscribe=True)       # discard cache and re-transcribe
+get_transcript()                               # get words with timestamps + speakers + silences + gap histogram
 delete_transcript_words(start_index=5, count=3) # delete words 5-7 (removes video segment)
 move_transcript_words(start_index=10, count=2, dest_index=3) # reorder clips
 search_transcript("hello")                     # search for text in transcript
@@ -386,7 +434,7 @@ search_transcript("pauses")                    # find all silences/pauses
 delete_transcript_silences()                   # batch-remove all silences from timeline
 delete_transcript_silences(min_duration=1.0)   # remove only silences > 1 second
 set_transcript_speaker(start_index=0, count=50, speaker="Host")  # label speakers
-set_silence_threshold(threshold=0.5)           # set minimum pause detection (seconds)
+set_silence_threshold(threshold=0.5)           # recompute silences immediately (no re-transcription)
 close_transcript()                             # close the panel
 ```
 
@@ -467,13 +515,41 @@ get_playhead_position()              # current time, duration, frame rate, playi
 get_selected_clips()                 # selected clips in timeline (spine + connected, marked "connected": true)
 list_markers()                       # all markers: time, kind, name, completion, handle
 list_markers(kind="chapter")         # filter by kind: standard, todo, chapter, keyword, analysis
+add_markers_at_times("5.0, 12.0")    # batch standard markers at timeline seconds (JSON form too)
 seek_to_time(3.5)                    # jump to 3.5 seconds instantly (faster than stepping)
 ```
+`add_markers_at_times` places every marker in one undo step (Edit > Undo reverts the whole batch).
 `get_timeline_clips()` also lists connected clips (titles, B-roll, music on lanes != 0, with
 the spine index they are anchored to) and markers; raw RPC: `timeline.getDetailedState` returns
 `connectedItems` + `markers`, `timeline.getMarkers` returns markers only.
 
-## Viewer Control
+## Screenshots & Visual Verification
+
+Use `capture_viewer()` and `capture_timeline()` to take screenshots of FCP without
+bringing it to the foreground. These capture the window's content directly — no `screencapture`
+needed. The resulting PNGs can be read by Claude to visually verify edits. Flat detection
+trims uniform Viewer chrome / letterbox bars and tests the inner content; a one-colour
+content region is reported with `flat: true` and a WARNING line (it can also be a genuinely
+black frame or gap). Captures render in-process from FCP's views; a locked screen does not blank them.
+
+**When to use:**
+- After applying effects, color corrections, titles, or captions → `capture_viewer()`
+- After blade cuts, rearranging clips, adding markers, or any timeline edit → `capture_timeline()`
+- When debugging layout issues (clip positions, gaps, transitions) → `capture_timeline()`
+- When verifying text rendering (font, size, position) → `capture_viewer()`
+
+```
+capture_viewer()                     # screenshot viewer to /tmp/splicekit_viewer.png
+capture_viewer(path="/tmp/check.png") # screenshot to custom path
+capture_timeline()                   # screenshot timeline to /tmp/splicekit_timeline.png
+capture_timeline(path="/tmp/tl.png") # screenshot to custom path
+```
+`capture_viewer`, `capture_timeline` and `capture_inspector` also return the image inline as MCP image
+content (`return_image=False` to skip), so any MCP client can look at it without reading the PNG.
+For one clip, `get_clip_info()` returns a frame of its source media file and `capture_clip_frame()` the
+clip as rendered in the Viewer, both inline.
+
+## Viewer Zoom
 ```
 get_viewer_zoom()                    # current zoom level (0.0=Fit, 1.0=100%, 2.0=200%)
 set_viewer_zoom(0.0)                 # fit to window
@@ -481,7 +557,55 @@ set_viewer_zoom(1.0)                 # 100%
 set_viewer_zoom(2.0)                 # 200% — any float value accepted
 ```
 
+## Export FCPXML (No Dialog)
+```
+export_xml()                                       # export to /tmp/splicekit_export.fcpxml
+export_xml(path="/tmp/my_project.fcpxml")           # export to custom path
+```
+Programmatic export — no save dialog. Returns the FCPXML file path.
+
+## OpenTimelineIO Import & Export
+```
+export_otio()                                      # export to /tmp/splicekit_export.otio
+export_otio(path="/tmp/my_project.otio")           # export as .otio (DaVinci Resolve native)
+export_otio(path="/tmp/my_project.fcpxml")         # export as .fcpxml (native FCP exporter)
+export_otio(path="/tmp/my_project.edl")            # export as EDL (Premiere/Resolve/Avid)
+export_otio(path="/tmp/my_project.edl", rate=29.97) # EDL with explicit frame rate
+export_otio(path="/tmp/my_project.aaf")            # export as AAF (Avid Media Composer)
+import_otio(path="/tmp/from_resolve.otio")         # import .otio from DaVinci Resolve
+import_otio(path="/tmp/project.fcpxml")            # import .fcpxml into FCP
+import_otio(path="/tmp/premiere.edl", rate=29.97)  # import EDL from Premiere (set fps)
+import_otio(path="/tmp/avid.aaf")                  # import AAF from Avid
+import_otio(otio_json='{"OTIO_SCHEMA":...}')       # import raw OTIO JSON string
+```
+
+Universal timeline import/export via OpenTimelineIO. Handles all OTIO formats
+AND FCPXML/EDL/AAF, replacing `import_fcpxml` / `export_xml` as the primary tools.
+Enables timeline exchange with DaVinci Resolve, Premiere Pro, Avid Media Composer.
+
+Supported formats:
+- `.otio` — OpenTimelineIO native JSON (DaVinci Resolve, universal)
+- `.fcpxml` — Final Cut Pro XML (uses FCP's native importer/exporter for full fidelity)
+- `.edl` — CMX 3600 EDL (Premiere, Resolve, Avid — set `rate` for drop-frame)
+- `.aaf` — Avid AAF (requires Avid-specific metadata on clips)
+- `.otioz` / `.otiod` — OTIO bundles (media files must exist on disk)
+
+Optional extra (not in `mcp/requirements.txt`; `make install` does not install it):
+`pip install opentimelineio otio-fcpxml-adapter otio-cmx3600-adapter` (the legacy
+`otio-fcpx-xml-adapter` also works). This is what the tools' own error message says.
+SpliceKit reads Final Cut Pro's FCPXML itself and only falls back to an adapter for
+shapes it does not recognise, so the adapter is optional for the FCPXML path.
+If the packages are missing, `export_otio` / `import_otio` tell you to install them.
+
+## Deploy & Restart FCP
+```
+deploy_and_restart()                 # build, deploy, kill FCP, relaunch, wait for bridge
+deploy_and_restart(skip_build=True)  # just restart FCP (skip make deploy)
+```
+
 ## Dialog Automation
+**Note:** The "video properties of this clip are not recognized" dialog is now
+auto-dismissed at the start of every bridge request. No manual handling needed.
 ```
 detect_dialog()                      # scan for open dialogs, see buttons/fields/checkboxes
 click_dialog_button(button="OK")     # click by title (case-insensitive, partial match)
@@ -494,26 +618,126 @@ dismiss_dialog(action="cancel")      # cancel/escape
 ```
 
 ## Scene Detection
+
+Three tools share the same analysis: one timeline clip (or a file on disk), only the portion
+of the media that clip actually uses. Reported cut times are **source media file seconds**, not
+timeline seconds; `mark_scene_changes` and `blade_scene_changes` map them onto the clip.
+
+**Target clip** (same resolution for detect / mark / blade): `handle` if given; else the sole
+selected clip; else the primary-storyline clip under the playhead; else an error listing spine
+candidates. There is no automatic "longest clip" fallback. A compound, multicam, or synchronized
+clip is refused — pass `handle` to a specific inner clip or use `file_url` on the underlying file.
+
+**`file_url`**: analyse a path directly (no timeline clip). Times are file seconds only;
+`mark_scene_changes` and `blade_scene_changes` refuse this mode (nothing to map cuts onto).
+
+Output includes the scanned window, e.g. `Clip used source media range: 0.000-12.012s`.
+
 ```
-detect_scene_changes()                              # list scene change timestamps
-detect_scene_changes(threshold=0.2)                 # more sensitive
-detect_scene_changes(action="markers")              # add markers at cuts
-detect_scene_changes(action="blade")                # blade at every scene change
+detect_scene_changes()                                    # read-only: list cuts + scores
+detect_scene_changes(threshold=0.2)                       # more sensitive
 detect_scene_changes(threshold=0.5, sample_interval=0.25) # less sensitive, faster
+detect_scene_changes(handle="obj_12")                     # analyse this clip
+detect_scene_changes(file_url="/path/to/footage.mov")     # file-only analysis
+
+mark_scene_changes()                                      # markers at cuts (one undo step)
+mark_scene_changes(handle="obj_12", threshold=0.2)
+blade_scene_changes()                                     # blade at cuts (one undo step)
+blade_scene_changes(handle="obj_12", sample_interval=0.25)
 ```
+
+`detect_scene_changes(action=...)` with `markers` or `blade` is rejected; use
+`mark_scene_changes()` or `blade_scene_changes()` instead.
 
 ## Beat Detection
 ```
 detect_beats(file_path="/path/to/song.mp3")         # detect beats, bars, sections, BPM
 detect_beats(file_path="song.mp3", sensitivity=0.8) # more sensitive
 detect_beats(file_path="song.mp3", min_bpm=120, max_bpm=180) # for fast music
+detect_beats(file_path="song.mp3", limit=32)        # show first 32 timestamps per kind; rest summarized
 ```
-Build first: `swiftc -O -o build/beat-detector tools/beat-detector.swift`
+Built and installed with the other Swift helpers (`make tools` / `make install`).
+
+## Song Cut (Beat-Synced Video Assembly)
+
+Build a contiguous primary-storyline cut synced to a song's Apple beat map.
+Uses beat detection from one sequence, video clips from another, and assembles
+the result via FCPXML import — no per-clip latency, handles any segment count.
+
+### Quick Start
+```
+# 1. Have three sequences in your library:
+#    - A song sequence (with beat detection already run on the audio)
+#    - A video clip sequence (source footage to cut from)
+#    - An empty target sequence (or let it create a new project)
+
+# 2. Open the target sequence
+open_project("My Target")
+
+# 3. Build the song cut
+build_song_cut(
+    pace="natural",                          # pacing preset
+    source_project_name="My Song",           # sequence with beat-detected audio
+    clip_source_project_name="My Footage",   # sequence with video clips
+    build_mode="fcpxml",                     # "fcpxml" (recommended) or "native"
+    project_name="My Song Cut",              # name for the generated project
+)
+```
+
+### Pacing Presets
+| Preset | Grid | Behavior |
+|--------|------|----------|
+| `natural` | half_beat | Mostly whole-beat cuts, sometimes two beats, rarely paired half-beats |
+| `medium` | half_beat | 1-2 beat cuts |
+| `fast` | half_beat | Half- to full-beat cuts, half-beats always paired |
+| `aggressive` | quarter_beat | Quarter- to full-beat cuts |
+
+**Half-beat pairing rule**: On a half_beat grid, when a half-beat step is chosen,
+the next segment is forced to also be a half-beat. This ensures half-beat cuts
+always come in pairs, resolving on whole-beat boundaries.
+
+### Custom Pacing (bypass presets)
+```
+assemble_random_clips_to_song_beats(
+    grid="half_beat",                        # beat, half_beat, quarter_beat, bar, section
+    segment_min_step=1,                      # min grid intervals per cut
+    segment_max_step=4,                      # max grid intervals per cut
+    step_weights='{"1": 1, "2": 8, "4": 3}', # bias toward whole beats
+    source_project_name="My Song",
+    clip_source_project_name="My Footage",
+    build_mode="fcpxml",
+    project_name="Custom Cut",
+)
+```
+
+### Build Modes
+- **`fcpxml`** (recommended): Generates complete FCPXML and imports once. Handles
+  any segment count instantly. Creates a new project in the library.
+- **`native`**: Direct in-app append edits via browser selection. Works for smaller
+  builds (~50 segments) but times out on large ones. Supports `target_current_timeline=True`
+  to append into the active empty timeline.
+
+### Source Requirements
+- **Song**: Must have Apple beat detection run on it (`hasTimingMetadata` = true).
+  Run beat detection in FCP first (select clip → Modify → Detect Beats), or use
+  `detect_beats()` on the audio file.
+- **Video pool**: Any sequence with video clips. Clips are reused with random in-points
+  when the pool is smaller than the song. Set `allow_clip_reuse=False` to prevent reuse.
+- **Song audio**: Automatically attached underneath the video on lane -1.
+  Set `include_audio=False` to omit.
+
+### Dry Run
+```
+build_song_cut(pace="natural", source_project_name="Song", 
+               clip_source_project_name="Footage", dry_run=True)
+# Returns: segment count, gap count, tempo, plan details — no changes made
+```
 
 ## SRT Import
 ```
 import_srt_as_markers(srt_content="1\n00:00:05,000 --> 00:00:10,000\nSubtitle text")
 ```
+`import_srt_as_markers` is one undo step (all subtitles from the SRT land in a single Edit > Undo).
 
 ## SpliceKit Options
 ```
@@ -842,24 +1066,24 @@ from within FCP's process, accessible via MCP. No debugger attachment required.
 
 ### Breakpoints (pause + inspect + continue)
 ```
-debug.breakpoint(action="add", className="FFAnchoredTimelineModule", selector="blade:")
+debug_breakpoint(action="add", class_name="FFAnchoredTimelineModule", selector="blade:")
 # ... press B in FCP — execution pauses, breakpoint.hit event fires ...
-debug.breakpoint(action="inspect")                                    # see paused state
-debug.breakpoint(action="inspectSelf", keyPath="sequence.displayName") # inspect properties
-debug.breakpoint(action="continue")                                   # resume execution
-debug.breakpoint(action="step")                                       # resume + break on next call
+debug_breakpoint(action="inspect")                                      # see paused state
+debug_breakpoint(action="inspectSelf", key_path="sequence.displayName") # inspect properties
+debug_breakpoint(action="continue")                                     # resume execution
+debug_breakpoint(action="step")                                         # resume + break on next call
 ```
-Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hitCount=5`),
-and one-shot breakpoints (`oneShot=True`). FCP freezes while paused (same as Xcode).
+Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hit_count=5`),
+and one-shot breakpoints (`one_shot=True`). FCP freezes while paused (same as Xcode).
 The JSON-RPC server stays alive on a separate thread so you can inspect state.
 
 ### Method Tracing (non-blocking alternative)
 ```
-debug.traceMethod(action="add", className="FFAnchoredTimelineModule",
-                  selector="blade:", logStack=True)
+debug_trace_method(action="add", class_name="FFAnchoredTimelineModule",
+                   selector="blade:", log_stack=True)
 # ... perform action in FCP ...
-debug.traceMethod(action="getLog", limit=10)  # see calls + call stacks
-debug.traceMethod(action="removeAll")          # clean up
+debug_trace_method(action="getLog", limit=10)  # see calls + call stacks
+debug_trace_method(action="removeAll")         # clean up
 ```
 Traces are broadcast to MCP clients in real-time as JSON-RPC notifications.
 Use tracing when you want to observe without pausing, breakpoints when you need
@@ -867,89 +1091,89 @@ to inspect state at a specific moment.
 
 ### Property Watching (replaces watchpoints)
 ```
-debug.watch(action="add", className="NSApplication", keyPath="mainWindow")
+debug_watch(action="add", class_name="NSApplication", key_path="mainWindow")
 # Events broadcast when property changes with old/new values
-debug.watch(action="removeAll")
+debug_watch(action="removeAll")
 ```
 
 ### Crash Handler (replaces debugger crash catching)
 ```
-debug.crashHandler(action="install")   # catch exceptions + signals
-debug.crashHandler(action="getLog")    # see crash stack traces
+debug_crash_handler(action="install")   # catch exceptions + signals
+debug_crash_handler(action="getLog")    # see crash stack traces
 ```
 Catches NSExceptions and signals (SIGABRT, SIGSEGV, etc.) with full stack traces.
 
 ### Thread Inspection
 ```
-debug.threads()                    # thread count, operation queues
-debug.threads(detailed=True)       # per-thread CPU usage, run state, stacks
+debug_threads()                    # thread count, operation queues
+debug_threads(detailed=True)       # per-thread CPU usage, run state, stacks
 ```
 Uses Mach kernel APIs. Shows all ~45 threads with CPU usage percentages.
 
 ### Expression Evaluation (replaces lldb `po`)
 ```
-debug.eval(expression="NSApp.delegate._targetLibrary.displayName")
-debug.eval(chain=["delegate", "_targetLibrary"], storeResult=True)
+debug_eval(expression="NSApp.delegate._targetLibrary.displayName")
+debug_eval(chain='["delegate", "_targetLibrary"]', store_result=True)  # chain is a JSON string
 ```
 Walks ObjC property chains. Stores results as handles for further inspection.
 
 ### Hot Plugin Loading (replaces dlopen from lldb)
 ```
-debug.loadPlugin(action="load", path="/tmp/patch.dylib")   # inject code
-debug.loadPlugin(action="unload", path="/tmp/patch.dylib")  # remove it
+debug_load_plugin(action="load", path="/tmp/patch.dylib")    # inject code
+debug_load_plugin(action="unload", path="/tmp/patch.dylib")  # remove it
 ```
 Compile a `.dylib` with fixes/features, load into running FCP without restart.
 
 ### Notification Observation
 ```
-debug.observeNotification(action="add", name="FFEffectsChangedNotification")
-debug.observeNotification(action="add", name="*")  # all notifications (high volume)
-debug.observeNotification(action="removeAll")
+debug_observe_notification(action="add", name="FFEffectsChangedNotification")
+debug_observe_notification(action="add", name="*")  # all notifications (high volume)
+debug_observe_notification(action="removeAll")
 ```
 Subscribe to FCP's internal NSNotification events. Broadcast to MCP clients.
 
-## Direct Timeline Actions (`timeline.directAction`)
+## Direct Timeline Actions (`direct_timeline_action`)
 
 Calls Flexo's parameterized `action*` methods directly on FFAnchoredTimelineModule
 with real arguments. More powerful than the simple responder-chain `timeline.action`.
 
 ### Retiming (direct control)
 ```
-timeline.directAction(action="retimeSetRate", rate=0.5, ripple=True)
-timeline.directAction(action="retimeSpeedRamp", toZero=True)
-timeline.directAction(action="retimeInstantReplay", rate=0.5, addTitle=True)
-timeline.directAction(action="retimeJumpCut", framesToJump=5)
-timeline.directAction(action="retimeRewind", speed=2.0)
-timeline.directAction(action="insertFreezeFrame")
+direct_timeline_action(action="retimeSetRate", rate=0.5, ripple=True)
+direct_timeline_action(action="retimeSpeedRamp", to_zero=True)
+direct_timeline_action(action="retimeInstantReplay", rate=0.5, add_title=True)
+direct_timeline_action(action="retimeJumpCut", frames_to_jump=5)
+direct_timeline_action(action="retimeRewind", speed=2.0)
+direct_timeline_action(action="insertFreezeFrame")
 ```
 
 ### Markers (programmatic manipulation)
 ```
-timeline.directAction(action="changeMarkerType", type="chapter")
-timeline.directAction(action="changeMarkerName", name="Intro", marker="obj_5")
-timeline.directAction(action="markMarkerCompleted", completed=True)
+direct_timeline_action(action="changeMarkerType", type_="chapter")
+direct_timeline_action(action="changeMarkerName", name="Intro", marker="obj_5")
+direct_timeline_action(action="markMarkerCompleted", completed=True)
 ```
 
 ### Audio (precise control)
 ```
-timeline.directAction(action="changeAudioVolume", amount=-6.0, relative=True)
-timeline.directAction(action="applyAudioFadesDirect", fadeIn=True, duration=0.5)
-timeline.directAction(action="setBackgroundMusic", enabled=True)
+direct_timeline_action(action="changeAudioVolume", amount=-6.0, relative=True)  # amount is dB here
+direct_timeline_action(action="applyAudioFadesDirect", fade_in=True, duration=0.5)
+direct_timeline_action(action="setBackgroundMusic", enabled=True)
 ```
 
 ### Other direct actions
 ```
-timeline.directAction(action="addKeywords", keywords=["Interview", "B-Roll"])
-timeline.directAction(action="removeEffectByID", effectID="HEFlowTransition")
-timeline.directAction(action="renameAngle", name="Camera 2")
-timeline.directAction(action="newProject", name="My Project")
-timeline.directAction(action="alignToMusicMarkers")
-timeline.directAction(action="duplicateCaptions", language="es", format="SRT")
+direct_timeline_action(action="addKeywords", keywords='["Interview", "B-Roll"]')  # JSON string
+direct_timeline_action(action="removeEffectByID", effect_id="HEFlowTransition")
+direct_timeline_action(action="renameAngle", name="Camera 2")
+direct_timeline_action(action="newProject", name="My Project")
+direct_timeline_action(action="alignToMusicMarkers")
+direct_timeline_action(action="duplicateCaptions", language="es", format_="SRT")
 ```
 
 ### Raw selector fallback
 ```
-timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
+direct_timeline_action(selector="actionValidateAndRepair:validateMode:error:")
 ```
 
 See `docs/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug
@@ -1005,6 +1229,31 @@ highlight color, others get the base text color.
 and point size from the selected Motion title's CHChannelText channel. `verify_captions()`
 walks connected titles on the timeline and checks text/fontSize against the expected style.
 
+## Lua Scripting
+
+SpliceKit embeds a Lua 5.4 VM directly in FCP's process. Scripts use the `sk`
+module to control FCP with zero latency:
+
+```lua
+sk.blade()                          -- blade at playhead
+sk.seek(5.0)                        -- jump to 5 seconds
+sk.select_clip()                    -- select clip at playhead
+sk.color_board()                    -- add color correction
+local clips = sk.clips()           -- get timeline clips as Lua table
+local pos = sk.position()          -- get playhead position
+sk.rpc("effects.apply", {name = "Gaussian Blur"})  -- any RPC method
+sk.eval("NSApp.delegate.className") -- ObjC runtime bridge
+```
+
+**Entry points:**
+- REPL panel: Ctrl+Option+L (Enhancements > Lua REPL)
+- Live coding: save .lua files to `~/Library/Application Support/SpliceKit/lua/auto/`
+- JSON-RPC: `lua.execute`, `lua.executeFile`, `lua.reset`, `lua.getState`, `lua.watch`
+- MCP tools: `lua_execute`, `lua_execute_file`, `lua_reset`, `lua_watch`, `lua_state`
+
+See `docs/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
+and complete cookbook examples.
+
 ## MCP Server Internals (for contributors)
 
 `mcp/server.py` is one MCP server over stdio on the official MCP Python SDK 2.x
@@ -1025,6 +1274,8 @@ python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_mcp_server_v2.
 ```
 
 ## Additional Documentation
+- `docs/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
+- `docs/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)
 - `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
 - `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
 - `docs/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
