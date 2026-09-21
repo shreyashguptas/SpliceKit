@@ -256,7 +256,7 @@ ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_
   raw_call, debug_eval; explore_class / search_methods find a selector; release_all_handles releases
   handles. lua_execute runs Lua inside FCP.
 Not routed here on purpose (developer tooling; their docstrings say what they do): debug_*,
-  visionpro_*, livecam_*, events_*, plugin_*, bridge_* internals, runtime introspection beyond
+  livecam_*, events_*, plugin_*, bridge_* internals, runtime introspection beyond
   explore_class / search_methods, lua extras, deploy_and_restart.
 
 ## The action dispatchers (FCP's own commands on the current selection / playhead)
@@ -373,8 +373,6 @@ READ_ONLY_TOOLS = {
     "list_transitions",
     "search_commands",
     "livecam_status",
-    "visionpro_status",
-    "visionpro_list_clients",
     "list_menus",
     "get_inspector_properties",
     "get_title_text",
@@ -504,9 +502,6 @@ DESTRUCTIVE_TOOLS = {
     "mixer_remove_bus_effect",
     "import_url",
     "cancel_import_url",
-    "visionpro_disconnect",
-    "visionpro_remove_camera",
-    "visionpro_stop",
 }
 
 LOCAL_WRITE_TOOLS = {
@@ -569,17 +564,6 @@ LOCAL_WRITE_TOOLS = {
     "timeline_edit_action",
     "timeline_navigation_action",
     "toggle_panel",
-    "visionpro_close_panel",
-    "visionpro_connect",
-    "visionpro_export_aime",
-    "visionpro_load_aime",
-    "visionpro_open_panel",
-    "visionpro_send_aime",
-    "visionpro_send_mask",
-    "visionpro_set_camera",
-    "visionpro_set_camera_calibration",
-    "visionpro_set_max_clients",
-    "visionpro_start",
 }
 
 IDEMPOTENT_LOCAL_WRITE_TOOLS = {
@@ -658,22 +642,6 @@ CUSTOM_TOOL_TITLES = {
     "livecam_open": "Open LiveCam",
     "livecam_close": "Close LiveCam",
     "livecam_status": "Get LiveCam Status",
-    "visionpro_status": "Vision Pro Status",
-    "visionpro_open_panel": "Open Vision Pro Panel",
-    "visionpro_close_panel": "Close Vision Pro Panel",
-    "visionpro_start": "Start Vision Pro Discovery",
-    "visionpro_stop": "Stop Vision Pro Discovery",
-    "visionpro_list_clients": "List Vision Pro Clients",
-    "visionpro_connect": "Connect to Vision Pro",
-    "visionpro_disconnect": "Disconnect Vision Pro",
-    "visionpro_load_aime": "Load Vision Pro AIME Metadata",
-    "visionpro_send_aime": "Send AIME to Vision Pro",
-    "visionpro_export_aime": "Export Vision Pro AIME",
-    "visionpro_set_camera": "Set Vision Pro Camera",
-    "visionpro_set_camera_calibration": "Set Vision Pro Camera Calibration",
-    "visionpro_remove_camera": "Remove Vision Pro Camera",
-    "visionpro_send_mask": "Send Vision Pro Camera Mask",
-    "visionpro_set_max_clients": "Set Vision Pro Max Clients",
     "delete_transcript_silences": "Delete Transcript Silences",
     "set_silence_threshold": "Set Silence Threshold",
     "show_command_palette": "Show Command Palette",
@@ -9470,6 +9438,9 @@ def get_caption_state() -> str:
 
     Returns status, word count, segment count, current style, and segment list.
     Use after open_captions() to check transcription progress.
+
+    `Last error` is the panel's own record of the last caption run that went wrong.
+    It is a state reading, not a failure of this call.
     """
     r = bridge.call("captions.getState")
     if _err(r):
@@ -9478,6 +9449,8 @@ def get_caption_state() -> str:
     lines = [f"Status: {r.get('status', 'unknown')}"]
     lines.append(f"Words: {r.get('wordCount', 0)}")
     lines.append(f"Segments: {r.get('segmentCount', 0)}")
+    if r.get("lastError"):
+        lines.append(f"Last error (from an earlier caption run): {r['lastError']}")
 
     if r.get('style'):
         s = r['style']
@@ -10794,210 +10767,6 @@ def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) 
 
     return _format_batch_clip_results(
         "Batch Color Correct", undo_name, clips_out, applied, f"Correction: {correction}")
-
-
-# ============================================================
-# Vision Pro Live Preview (ImmersiveVideoToolbox)
-# ============================================================
-# Requires Apple Immersive Video Utility to be installed at
-# /Applications/Apple Immersive Video Utility.app — SpliceKit dlopens
-# `ImmersiveVideoToolbox.framework` from that bundle on demand.
-#
-# Workflow:
-#   1. visionpro_open_panel()              — floating UI inside FCP
-#   2. visionpro_start()                   — begin Bonjour discovery
-#   3. visionpro_list_clients()            — see discovered Vision Pro peers
-#   4. visionpro_connect(host="foo.local") — open the remote preview session
-#   5. visionpro_load_aime(path="...aime") — set camera/lens metadata
-#   6. visionpro_send_aime()               — push metadata to the headset
-#   7. (frames then stream; monitor with visionpro_status)
-
-@splicekit_tool("visionpro_status")
-@bridge_tool
-def visionpro_status() -> str:
-    """Report Vision Pro session state.
-
-    Includes: IVT framework availability, session running/streaming flags,
-    discovered client names (Bonjour `_ivtpreviewclient._tcp`), active
-    (connected) clients, current camera id, and last error message (if any).
-    """
-    r = _call("visionpro.status")
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_open_panel")
-@bridge_tool
-def visionpro_open_panel() -> str:
-    """Open the floating Vision Pro panel inside FCP."""
-    r = _call("menu.execute", menuPath=["Splices", "Vision Pro Preview"])
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_close_panel")
-@bridge_tool
-def visionpro_close_panel() -> str:
-    """Close the Vision Pro panel (same menu toggles visibility)."""
-    r = _call("menu.execute", menuPath=["Splices", "Vision Pro Preview"])
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_start")
-@bridge_tool
-def visionpro_start(display_name: str = "SpliceKit") -> str:
-    """Start the Vision Pro discovery + preview session.
-
-    Creates an IVTMppRemotePreviewSession (Bonjour advertised as `_ivtpreviewclient._tcp`)
-    plus a fresh IVTSession for metadata. Required before connecting to a headset.
-
-    Args:
-        display_name: Name broadcast to Vision Pros on the network. Default: SpliceKit.
-    """
-    r = _call("visionpro.start", displayName=display_name)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_stop")
-@bridge_tool
-def visionpro_stop() -> str:
-    """Stop the Vision Pro session and tear down Bonjour discovery."""
-    r = _call("visionpro.stop")
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_list_clients")
-@bridge_tool
-def visionpro_list_clients() -> str:
-    """List Bonjour-discovered Vision Pros and actively-connected peers."""
-    r = _call("visionpro.listClients")
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_connect")
-@bridge_tool
-def visionpro_connect(host: str = "", ip: str = "") -> str:
-    """Connect to a Vision Pro by host name (e.g. `Vision-Pro.local`) or IP address.
-
-    Provide exactly one of `host` or `ip`. Host name is preferred when the
-    device was found via Bonjour (use visionpro_list_clients to see names).
-    """
-    params = {}
-    if host:
-        params["host"] = host
-    if ip:
-        params["ip"] = ip
-    if not params:
-        return "Error: provide host= or ip="
-    r = _call("visionpro.addClient", **params)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_disconnect")
-@bridge_tool
-def visionpro_disconnect(host: str = "", ip: str = "") -> str:
-    """Disconnect a connected Vision Pro by host name or IP."""
-    params = {}
-    if host:
-        params["host"] = host
-    if ip:
-        params["ip"] = ip
-    if not params:
-        return "Error: provide host= or ip="
-    r = _call("visionpro.removeClient", **params)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_load_aime")
-@bridge_tool
-def visionpro_load_aime(path: str) -> str:
-    """Load an Apple Immersive Metadata Envelope (.aime) into the IVTSession.
-
-    The .aime defines camera rig geometry, lens calibration, masks, and projection
-    settings. Required before Vision Pro can render immersive video correctly.
-    """
-    r = _call("visionpro.loadAime", path=path)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_send_aime")
-@bridge_tool
-def visionpro_send_aime(path: str = "") -> str:
-    """Send the currently-loaded AIME (or a specified .aime path) to connected Vision Pros.
-
-    Without `path`, round-trips the IVTSession's current static metadata to a temp
-    file and sends that. Headsets use this to align their immersive rendering
-    with the source rig.
-    """
-    params = {"path": path} if path else {}
-    r = _call("visionpro.sendAime", **params)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_export_aime")
-@bridge_tool
-def visionpro_export_aime(path: str) -> str:
-    """Export the current IVTSession static metadata to an .aime file on disk."""
-    r = _call("visionpro.exportAime", path=path)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_set_camera")
-@bridge_tool
-def visionpro_set_camera(camera_id: str) -> str:
-    """Set the session's current camera id. Must match a camera defined in the loaded AIME."""
-    r = _call("visionpro.setCurrentCamera", cameraId=camera_id)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_set_camera_calibration")
-@bridge_tool
-def visionpro_set_camera_calibration(
-    camera_id: str,
-    usdz_path: str = "",
-    ilpd_path: str = "",
-    json: str = "",
-) -> str:
-    """Install camera calibration data for a given camera id.
-
-    Provide exactly one of:
-      - usdz_path: path to a .usdz describing the camera/lens geometry.
-      - ilpd_path: path to an Apple Immersive Lens Profile Data (ILPD) file.
-      - json: inline JSON description (Apple's Camera Description schema).
-    """
-    params = {"cameraId": camera_id}
-    if usdz_path:
-        params["usdzPath"] = usdz_path
-    elif ilpd_path:
-        params["ilpdPath"] = ilpd_path
-    elif json:
-        params["json"] = json
-    else:
-        return "Error: provide one of usdz_path / ilpd_path / json"
-    r = _call("visionpro.setCameraCalibration", **params)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_remove_camera")
-@bridge_tool
-def visionpro_remove_camera(camera_id: str) -> str:
-    """Remove a camera entry from the IVTSession by id."""
-    r = _call("visionpro.removeCamera", cameraId=camera_id)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_send_mask")
-@bridge_tool
-def visionpro_send_mask(path: str) -> str:
-    """Send a camera mask (.usdz / .json) to connected Vision Pros."""
-    r = _call("visionpro.sendMask", path=path)
-    return _fmt(r)
-
-
-@splicekit_tool("visionpro_set_max_clients")
-@bridge_tool
-def visionpro_set_max_clients(max: int) -> str:
-    """Set the maximum number of Vision Pro clients that can connect simultaneously."""
-    r = _call("visionpro.setMaxClients", max=max)
-    return _fmt(r)
 
 
 def _forbid_unknown_tool_arguments() -> int:

@@ -20,8 +20,6 @@
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitURLImport.h"
-#import "SpliceKitImmersivePreviewPanel.h"
-#import "SpliceKitVisionPro.h"
 #import "SpliceKitAudioLevels.h"
 #import <sys/socket.h>
 #import <sys/un.h>
@@ -33975,34 +33973,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     } else if ([method isEqualToString:@"liveCam.status"]) {
         result = SpliceKit_handleLiveCamStatus(params);
     }
-    // immersivePreview.* namespace
-    else if ([method isEqualToString:@"immersivePreview.show"]) {
-        result = SpliceKit_handleImmersivePreviewShow(params);
-    } else if ([method isEqualToString:@"immersivePreview.hide"]) {
-        result = SpliceKit_handleImmersivePreviewHide(params);
-    } else if ([method isEqualToString:@"immersivePreview.status"]) {
-        result = SpliceKit_handleImmersivePreviewStatus(params);
-    } else if ([method isEqualToString:@"immersivePreview.resolveSelectedPath"]) {
-        result = SpliceKit_handleImmersivePreviewResolveSelectedPath(params);
-    } else if ([method isEqualToString:@"immersivePreview.loadSelected"]) {
-        result = SpliceKit_handleImmersivePreviewLoadSelected(params);
-    } else if ([method isEqualToString:@"immersivePreview.loadPath"]) {
-        result = SpliceKit_handleImmersivePreviewLoadPath(params);
-    } else if ([method isEqualToString:@"immersivePreview.setFrame"]) {
-        result = SpliceKit_handleImmersivePreviewSetFrame(params);
-    } else if ([method isEqualToString:@"immersivePreview.setEyeMode"]) {
-        result = SpliceKit_handleImmersivePreviewSetEyeMode(params);
-    } else if ([method isEqualToString:@"immersivePreview.setViewMode"]) {
-        result = SpliceKit_handleImmersivePreviewSetViewMode(params);
-    } else if ([method isEqualToString:@"immersivePreview.setViewport"]) {
-        result = SpliceKit_handleImmersivePreviewSetViewport(params);
-    } else if ([method isEqualToString:@"immersivePreview.refresh"]) {
-        result = SpliceKit_handleImmersivePreviewRefresh(params);
-    } else if ([method isEqualToString:@"immersivePreview.resetPerf"]) {
-        result = SpliceKit_handleImmersivePreviewResetPerf(params);
-    } else if ([method isEqualToString:@"immersivePreview.sendCurrentFrame"]) {
-        result = SpliceKit_handleImmersivePreviewSendCurrentFrame(params);
-    }
     // dualTimeline.* namespace
     else if ([method isEqualToString:@"dualTimeline.status"]) {
         result = SpliceKit_handleDualTimelineStatus(params);
@@ -34110,10 +34080,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // audioBusDiagnostics.* namespace
     else if ([method hasPrefix:@"audioBusDiagnostics."]) {
         result = SpliceKit_handleAudioBusDiagnostics(method, params);
-    }
-    // visionpro.* namespace (IVT preview session + AIME metadata)
-    else if ([method hasPrefix:@"visionpro."]) {
-        result = SpliceKit_handleVisionPro(method, params);
     }
     // share.* namespace
     else if ([method isEqualToString:@"share.export"]) {

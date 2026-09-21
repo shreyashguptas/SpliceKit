@@ -231,7 +231,9 @@ CASES.update({
                                                   {"action": "deselectAll"})]),
     "set_bridge_option": Case(args={"option": "$BRIDGE_OPTION", "enabled": False},
                               kind="write"),
-    "set_bridge_option_value": skip("set_bridge_option covers the option table; the\n                                    value-taking options need per-option values"),
+    "set_bridge_option_value": Case(args={"option": "$BRIDGE_VALUE_OPTION",
+                                          "value": "$BRIDGE_VALUE_CURRENT"},
+                                    kind="write"),
     "set_silence_threshold": write(threshold=0.3),
     "set_transcript_engine": write(engine="parakeetV3"),
 
@@ -270,7 +272,10 @@ CASES.update({
                                 "Connect Title", "Add Basic Title")),
     "set_inspector_property": write(property="positionX", value=25,
                                     undo="Set positionX"),
-    "set_object_property": skip("arbitrary KVC write on a live model object"),
+    # A no-op write of the value already there: proves the KVC path works without
+    # changing anything.
+    "set_object_property": Case(args={"handle": "$CONNECTED_CLIP", "key": "displayName",
+                                      "value": "$CLIP_NAME"}, kind="write"),
     # Final Cut Pro only populates its Assign Roles submenus while it is frontmost,
     # so from a background sweep this can only report that limitation.
     "assign_role": Case(args={"type": "video", "role": "Video"},
@@ -282,8 +287,9 @@ CASES.update({
         undo=("Add Marker", "Add Markers", "Marker")),
     "add_clip_to_timeline": Case(args={"handle": "$BROWSER_CLIP", "edit": "append",
                                        "dry_run": True}, kind="read"),
-    "browser_append_clip": Case(args={"handle": "$BROWSER_CLIP"}, kind="skip",
-                                reason="appends to the browser, not undoable as one step"),
+    "browser_append_clip": Case(args={"handle": "$BROWSER_CLIP"}, kind="write",
+                                undo=("Append", "Paste", "Append to Storyline",
+                                      "Connect to Primary Storyline")),
 
     # ---------------------------------------------------------------- panels / UI
     "toggle_panel": write(panel="inspector",
@@ -304,7 +310,9 @@ CASES.update({
                                         cleanup=[("dual_timeline_toggle_panel",
                                                   {"panel": "timelineIndex",
                                                    "pane": "secondary"})]),
-    "toggle_structure_blocks": write(cleanup=[("toggle_structure_blocks", {})]),
+    # Toggles the visibility of structure blocks that are already on the timeline;
+    # with none placed, saying so is the correct answer.
+    "toggle_structure_blocks": dependency("No structure blocks", "sections array"),
     "sections_hide": write(),
     "livecam_open": write(cleanup=[("livecam_close", {})]),
     "livecam_close": write(),
@@ -321,8 +329,11 @@ CASES.update({
     "export_xml": Case(args={"path": "$TMP/sweep.fcpxml"}, kind="write",
                        expect=r"fcpxml|Exported", timeout=120),
     "export_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=120),
-    "import_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="skip",
-                        reason="creates a project; covered by cleanup_temp_projects"),
+    # import_otio replaces the OPEN project's content — it does not create a new one.
+    # Undo is the only way back, so the sweep relies on it rather than reopening.
+    "import_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=180,
+                        undo=("Import XML", "Import OTIO", "Paste"),
+                        invalidates_handles=True),
     "generate_fcpxml": read(items="[]"),
     "export_captions_srt": Case(args={"path": "$TMP/sweep.srt"}, kind="write"),
     "export_captions_txt": Case(args={"path": "$TMP/sweep.txt"}, kind="write"),
@@ -335,17 +346,20 @@ CASES.update({
     "close_transcript": write(),
     "get_transcript": read(),
     "search_transcript": read(query="the"),
-    "delete_transcript_words": skip("needs a transcript with known word indices"),
-    "move_transcript_words": skip("needs a transcript with known word indices"),
-    "set_transcript_speaker": skip("needs a transcript with known word indices"),
-    "delete_transcript_silences": skip("removes timeline content based on transcription"),
+    "delete_transcript_words": write(start_index=0, count=1,
+                                     undo=("Delete", "Delete Words", "Ripple Delete")),
+    "move_transcript_words": write(start_index=0, count=1, dest_index=3,
+                                   undo=("Move", "Move Words", "Ripple Delete", "Paste")),
+    "set_transcript_speaker": write(start_index=0, count=1, speaker="Sweep"),
+    "delete_transcript_silences": write(min_duration=30.0,
+                                        undo=("Delete", "Ripple Delete", "Delete Silences")),
 
     # ---------------------------------------------------------------- captions
     "open_captions": write(cleanup=[("close_captions", {})]),
     "close_captions": write(),
     "set_caption_style": write(preset_id="bold_pop"),
     "set_caption_grouping": write(mode="social", max_words=3),
-    "set_caption_words": skip("needs generated captions with known word indices"),
+    "set_caption_words": write(words='[{"index": 0, "text": "sweep"}]'),
     "generate_captions": Case(args={}, kind="write", timeout=300,
                               undo=("Paste", "Insert Captions", "Connect to Primary Storyline"),
                               cleanup=[("cleanup_temp_projects", {})]),
@@ -391,8 +405,10 @@ CASES.update({
     "montage_analyze_clips": Case(args={}, kind="read", timeout=300),
     "montage_plan_edit": read(beats="[0.0, 1.0, 2.0, 3.0]", style="beat",
                               clips="$MONTAGE_CLIPS"),
-    "montage_assemble": skip("builds a whole project; covered by montage_auto"),
-    "montage_auto": skip("builds a whole project from a song library that is absent"),
+    "montage_assemble": Case(args={"edit_plan": "[]"}, kind="read",
+                             expect=r"[Ee]mpty|required|[Nn]o (segments|clips)|[Ff]ail"),
+    "montage_auto": dependency("Song not found", "no song", "FlexMusic", "music library",
+                               timeout=300, song_uid="none"),
 
     # ---------------------------------------------------------------- mixer
     "mixer_set_volume": Case(args={"handle": "$MIXER_VOLUME", "volume_db": 0.0},
@@ -410,12 +426,16 @@ CASES.update({
                                         "No collection-backed bus",
                                         name="Channel EQ", index=0, dry_run=True),
     "mixer_open_bus_effect": skip("opens a plugin window a person has to close"),
-    "mixer_set_bus_effect_enabled": skip("needs a bus effect applied first"),
-    "mixer_remove_bus_effect": skip("needs a bus effect applied first"),
+    "mixer_set_bus_effect_enabled": dependency("bus effect", "No collection-backed",
+                                               "not found", "no effect",
+                                               effect_index=0, index=1, enabled=True),
+    "mixer_remove_bus_effect": dependency("bus effect", "No collection-backed",
+                                          "not found", "no effect",
+                                          effect_index=0, index=1),
 
     # ---------------------------------------------------------------- lua / plugins
     "lua_execute": read(code="return 1 + 1"),
-    "lua_execute_file": skip("needs a script on disk; lua_execute covers the engine"),
+    "lua_execute_file": Case(args={"path": "$LUA_SCRIPT"}, kind="read", expect=r"7|ok"),
     "lua_reset": write(),
     "reload_plugin_tools": read(),
 
@@ -450,18 +470,26 @@ CASES.update({
                            expect=r"[Nn]o dialog"),
 
     # ---------------------------------------------------------------- imports
-    "import_media": skip("adds media to the library; needs a file outside the bundle"),
-    "import_fcpxml": skip("creates a project from XML"),
-    "paste_fcpxml": skip("pastes into the open timeline from the pasteboard"),
-    "import_url": skip("downloads from the network"),
+    "import_media": Case(args={"path": "/tmp/splicekit-sweep-no-such-file.mov"},
+                         kind="read",
+                         expect=r"[Nn]ot found|[Nn]o such|does not exist|[Ff]ail"),
+    "import_fcpxml": Case(args={"xml": "<not-fcpxml/>"}, kind="read",
+                          expect=r"[Ff]ail|[Ii]nvalid|[Ee]rror|fcpxml"),
+    "paste_fcpxml": Case(args={"xml": ""}, kind="read",
+                         expect=r"[Nn]o (fcpxml|XML)|pasteboard|required|[Ee]mpty"),
+    "import_url": Case(args={"url": "not-a-url", "wait_until_complete": False},
+                       kind="read", expect=r"[Ii]nvalid|[Uu]nsupported|[Nn]ot a|[Ff]ail|scheme"),
     "import_url_status": Case(args={"job_id": "no-such-job"}, kind="read",
                               expect=r"[Nn]ot found|[Nn]o such|[Uu]nknown"),
     "cancel_import_url": Case(args={"job_id": "no-such-job"}, kind="read",
                               expect=r"[Nn]ot found|[Nn]o such|[Uu]nknown"),
 
     # ---------------------------------------------------------------- handles
-    "release_handle": skip("would invalidate handles the sweep is still using"),
-    "release_all_handles": skip("would invalidate handles the sweep is still using"),
+    # Releasing handles invalidates the ones the sweep holds, so both re-resolve
+    # their placeholders straight afterwards rather than being skipped outright.
+    "release_handle": Case(args={"handle": "$CONNECTED_CLIP"}, kind="write",
+                           invalidates_handles=True),
+    "release_all_handles": Case(args={}, kind="write", invalidates_handles=True),
 
     # ---------------------------------------------------------------- modal panels
     "create_project": modal(cleanup=[("dismiss_dialog", {"action": "cancel"})]),
@@ -488,34 +516,6 @@ CASES.update({
                                            output_path="/tmp/sweep-flexmusic.m4a"),
     "flexmusic_add_to_timeline": dependency("not found", "no song", "FlexMusic",
                                             song_uid="none"),
-    "visionpro_status": read(),
-    "visionpro_list_clients": read(),
-    "visionpro_open_panel": write(cleanup=[("visionpro_close_panel", {})]),
-    "visionpro_close_panel": write(),
-    "visionpro_start": dependency("ImmersiveVideoToolbox", "not available",
-                                  "unavailable", "failed"),
-    "visionpro_stop": dependency("ImmersiveVideoToolbox", "not available",
-                                 "unavailable", "not running"),
-    "visionpro_connect": dependency("no client", "not found", "unavailable",
-                                    "ImmersiveVideoToolbox", host="127.0.0.1"),
-    "visionpro_disconnect": dependency("no client", "not found", "unavailable",
-                                       "ImmersiveVideoToolbox", host="127.0.0.1"),
-    "visionpro_load_aime": dependency("not found", "no such file", "unavailable",
-                                      path="/tmp/none.aime"),
-    "visionpro_send_aime": dependency("no client", "not found", "unavailable",
-                                      path="/tmp/none.aime"),
-    "visionpro_export_aime": dependency("unavailable", "no session", "failed",
-                                        path="/tmp/sweep.aime"),
-    "visionpro_set_camera": dependency("not found", "unavailable", "no session",
-                                       camera_id="none"),
-    "visionpro_set_camera_calibration": dependency("not found", "unavailable",
-                                                   "provide one of", "no session",
-                                                   camera_id="none"),
-    "visionpro_remove_camera": dependency("not found", "unavailable", "no session",
-                                          camera_id="none"),
-    "visionpro_send_mask": dependency("no client", "not found", "unavailable",
-                                      path="/tmp/none.usdz"),
-    "visionpro_set_max_clients": write(max=2),
 
     # ---------------------------------------------------------------- not sweepable
     "deploy_and_restart": skip("quits and relaunches Final Cut Pro"),
@@ -593,9 +593,23 @@ class Sweep:
         # The mixer hands out its own handles: a volume channel and an effect stack
         # per fader. A clip's effect-stack handle from get_inspector_properties is not
         # the same object and mixer_set_volume rejects it.
+        # A tiny Lua script for lua_execute_file, and the clip's own name so
+        # set_object_property can write back what is already there.
+        script = self.tmp / "sweep.lua"
+        script.write_text("return 3 + 4\n")
+        self.placeholders["$LUA_SCRIPT"] = str(script)
+
+        name = re.search(r'"name":\s*"([^"]*)"', info) or re.search(r"^(\S.*?) — ", info, re.M)
+        self.placeholders["$CLIP_NAME"] = name.group(1) if name else "clip"
+
         options = await self.call("get_bridge_options", {})
-        m = re.search(r'"([a-zA-Z][a-zA-Z0-9_]*)"\s*:', options)
+        m = re.search(r'"([a-zA-Z][a-zA-Z0-9_]*)"\s*:\s*(?:true|false)', options)
         self.placeholders["$BRIDGE_OPTION"] = m.group(1) if m else ""
+        # set_bridge_option_value needs an option that carries a string, and writing
+        # back its current value keeps the sweep from changing a setting.
+        v = re.search(r'"([a-zA-Z][a-zA-Z0-9_]*)"\s*:\s*"([^"]*)"', options)
+        self.placeholders["$BRIDGE_VALUE_OPTION"] = v.group(1) if v else ""
+        self.placeholders["$BRIDGE_VALUE_CURRENT"] = v.group(2) if v else ""
 
         mixer = await self.call("mixer_get_state", {})
         vol = re.search(r"vol=(obj_\d+)", mixer)
@@ -618,7 +632,8 @@ class Sweep:
             for c in clips[:4]
         ])
 
-        missing = [k for k, v in self.placeholders.items() if not v]
+        optional = {"$BRIDGE_VALUE_OPTION", "$BRIDGE_VALUE_CURRENT", "$MONTAGE_CLIPS"}
+        missing = [k for k, v in self.placeholders.items() if not v and k not in optional]
         if missing:
             raise SystemExit(f"could not resolve {missing} from the live timeline; "
                              "is the QA project open with a connected clip?")

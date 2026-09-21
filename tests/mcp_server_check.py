@@ -450,9 +450,6 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "trim_clip": {"handle": "obj_1", "edge": "end", "to_seconds": 2.0},
         "import_media": {"path": str(workdir / "clip.mov")},
         "set_caption_words": {"words": '[{"text": "Check", "start": 0.0, "end": 1.0}]'},
-        "visionpro_connect": {"host": "127.0.0.1"},
-        "visionpro_disconnect": {"host": "127.0.0.1"},
-        "visionpro_set_camera_calibration": {"camera_id": "cam1", "json": "{}"},
         "add_clip_to_timeline": {"handle": "obj_5", "edit": "insert", "start_seconds": 12.0,
                                  "end_seconds": 18.0, "at_seconds": 45.0},
         # These run a local analysis binary (~/Applications/SpliceKit/tools/...) on the

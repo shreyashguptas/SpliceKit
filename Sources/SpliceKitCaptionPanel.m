@@ -5785,7 +5785,11 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     state[@"segmentCount"] = @(self.mutableSegments.count);
     state[@"style"] = [self.style toDictionary];
 
-    if (self.errorMessage) state[@"error"] = self.errorMessage;
+    // `lastError`, not `error`: this is a state reading, and SpliceKit_handleRequest
+    // turns a top-level `error` key into a JSON-RPC failure. Reporting the panel's
+    // last error under that name made get_caption_state — a read-only tool — look
+    // like the read itself had failed, with the text of an unrelated earlier paste.
+    if (self.errorMessage) state[@"lastError"] = self.errorMessage;
     if (self.lastGenerateResult) state[@"lastGenerateResult"] = self.lastGenerateResult;
 
     // Segments

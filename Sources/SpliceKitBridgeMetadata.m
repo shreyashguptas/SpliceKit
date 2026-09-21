@@ -180,21 +180,6 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"liveCam.hide": meta(@"state_dependent", @"Closes the Live Cam panel."),
             @"liveCam.status": meta(@"safe", @"Reports Live Cam panel and capture state."),
 
-            // immersivePreview.*
-            @"immersivePreview.show": meta(@"state_dependent", @"Opens the immersive spatial preview panel."),
-            @"immersivePreview.hide": meta(@"state_dependent", @"Closes the immersive preview panel."),
-            @"immersivePreview.status": meta(@"safe", @"Reads immersive preview session state."),
-            @"immersivePreview.resolveSelectedPath": meta(@"safe", @"Resolves the file path of the selected browser or timeline item."),
-            @"immersivePreview.loadSelected": meta(@"state_dependent", @"Loads the current selection into the preview."),
-            @"immersivePreview.loadPath": meta(@"state_dependent", @"Loads a file path into the preview."),
-            @"immersivePreview.setFrame": meta(@"state_dependent", @"Seeks the preview to a frame index."),
-            @"immersivePreview.setEyeMode": meta(@"state_dependent", @"Sets left/right/both eye preview mode."),
-            @"immersivePreview.setViewMode": meta(@"state_dependent", @"Sets preview view mode (e.g. mono/stereo)."),
-            @"immersivePreview.setViewport": meta(@"state_dependent", @"Adjusts preview viewport parameters."),
-            @"immersivePreview.refresh": meta(@"state_dependent", @"Forces a preview redraw."),
-            @"immersivePreview.resetPerf": meta(@"system", @"Resets immersive preview performance counters."),
-            @"immersivePreview.sendCurrentFrame": meta(@"state_dependent", @"Pushes the current preview frame to connected clients."),
-
             // dualTimeline.*
             @"dualTimeline.status": meta(@"safe", @"Reports dual-timeline panel state."),
             @"dualTimeline.open": meta(@"state_dependent", @"Opens the secondary timeline editor."),

@@ -167,7 +167,6 @@ is left.
 | Command palette, Apple Intelligence engines (the default) | Apple's FoundationModels framework (Apple's on-device model); SpliceKit adds no network call of its own beyond the loopback bridge | Apple frameworks |
 | Command palette, "Gemma 4" engine | talks to an `mlx_lm.server` on this Mac at http://localhost:8080; if `mlx-lm` is missing it runs `pip install mlx-lm`, and the server downloads the model (`unsloth/gemma-4-E4B-it-UD-MLX-4bit` unless `SpliceKitGemmaModel` says otherwise) on first start; selecting the engine and sending a query is the consent, there is no second prompt | PyPI, huggingface.co, then loopback |
 | URL import | downloads the URL you pasted: direct media links with `NSURLSession`, YouTube/Vimeo through `yt-dlp` and `ffmpeg` found on PATH (or `SPLICEKIT_YTDLP_PATH` / `SPLICEKIT_FFMPEG_PATH`); `make url-import-tools` only symlinks binaries already on PATH and prints a `brew install` hint otherwise; it downloads nothing | the site you gave it |
-| Vision Pro preview panel | Apple's ImmersiveVideoToolbox discovers headsets by Bonjour (`_ivtpreviewclient._tcp`) or the host/IP you type, and streams frames to the one you pick | your local network |
 
 ### Only during installation (`make install`)
 

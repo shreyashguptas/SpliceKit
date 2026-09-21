@@ -15,7 +15,6 @@
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
-#import "SpliceKitImmersivePreviewPanel.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -416,7 +415,6 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCaptionPanel:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
-- (void)toggleImmersiveViewer:(id)sender;
 - (void)toggleSections:(id)sender;
 - (void)toggleOverviewBar:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
@@ -450,7 +448,6 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)importOTIO:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
 - (void)updateLiveCamToolbarButtonState:(BOOL)active;
-- (void)toggleVisionProPanel:(id)sender;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, weak) NSButton *paletteToolbarButton;
 @property (nonatomic, weak) NSButton *liveCamToolbarButton;
@@ -528,26 +525,6 @@ static void SpliceKit_checkCompatibility(void) {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
     [self updateLiveCamToolbarButtonState:!visible];
-}
-
-- (void)toggleImmersiveViewer:(id)sender {
-    SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-
-    NSError *error = nil;
-    if (![panel showInViewerForCurrentSelection:&error]) {
-        SpliceKit_log(@"[ImmersiveViewer] native FCP viewer show failed: %@", error.localizedDescription ?: @"unknown error");
-        NSBeep();
-    }
-}
-
-- (void)toggleVisionProPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitVisionProPanel");
-    if (!panelClass) {
-        SpliceKit_log(@"SpliceKitVisionProPanel class not found");
-        return;
-    }
-    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    ((void (*)(id, SEL))objc_msgSend)(panel, @selector(togglePanel));
 }
 
 - (void)toggleCommandPalette:(id)sender {
@@ -2450,20 +2427,6 @@ static void SpliceKit_installMenu(void) {
     liveCamItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:liveCamItem];
 
-    NSMenuItem *immersiveViewerItem = [[NSMenuItem alloc]
-        initWithTitle:@"FCP 360 Viewer"
-               action:@selector(toggleImmersiveViewer:)
-        keyEquivalent:@""];
-    immersiveViewerItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:immersiveViewerItem];
-
-    NSMenuItem *visionProItem = [[NSMenuItem alloc]
-        initWithTitle:@"Vision Pro Preview"
-               action:@selector(toggleVisionProPanel:)
-        keyEquivalent:@""];
-    visionProItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:visionProItem];
-
     NSMenuItem *paletteItem = [[NSMenuItem alloc]
         initWithTitle:@"Command Palette"
                action:@selector(toggleCommandPalette:)
@@ -3291,8 +3254,6 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
-
-    SpliceKit_log(@"[ImmersiveViewer] Built-in show360 bridge install skipped at launch; use SpliceKit immersive preview commands instead");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitLiveCamVisibilityDidChangeNotification
                                                       object:nil

@@ -34,10 +34,6 @@ SpliceKitTimelinePlayheadOverlay.m
 SpliceKitTimelinePerfMode.m
 SpliceKitURLImport.m
 SpliceKitLiveCam.m
-SpliceKitVisionPro.m
-SpliceKitVisionProPanel.m
-SpliceKitImmersivePreviewPanel.mm
-SpliceKitImmersivePreviewRPC.m
 SpliceKitHapticBridge.m
 SpliceKitHapticSnapEmitters.m
 SpliceKitAudioLevels.m
