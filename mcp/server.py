@@ -886,6 +886,29 @@ def splicekit_tool(name: str):
     return decorator
 
 
+def _lists_actions(actions, note: str = ""):
+    """Append the accepted `action` strings to a tool's docstring, generated from the set the
+    tool actually validates against.
+
+    These four tools each checked `action` against a set and returned a helpful error, but
+    their docstrings named none of the values — and the server's own instructions tell an
+    agent to prefer them over the legacy `timeline_action`, which does list its actions. So
+    the only way to discover them was to guess, or to fall back to the legacy tool. There are
+    220 of them across the four sets, far too many to keep in sync by hand, so the list is
+    built from the set at import time and cannot drift.
+
+    Applied UNDER @splicekit_tool so the docstring is already rewritten when the tool registers.
+    """
+    def decorator(fn):
+        names = ", ".join(f"``{a}``" for a in sorted(actions))
+        extra = f"\n    Accepted ``action`` values ({len(actions)}):\n    {names}\n"
+        if note:
+            extra += f"\n    {note}\n"
+        fn.__doc__ = (fn.__doc__ or "").rstrip() + "\n" + extra
+        return fn
+    return decorator
+
+
 def _handle_management_response(action: str, handle: str = "") -> str:
     if action == "list":
         r = bridge.call("object.list")
@@ -1411,8 +1434,15 @@ def timeline_action(action: str, dry_run: bool = False) -> str:
 
 
 @splicekit_tool("timeline_navigation_action")
+@_lists_actions(TIMELINE_NAVIGATION_ACTIONS,
+                "Nothing here changes the project. For edits use timeline_edit_action(), for "
+                "deletes and trims timeline_destructive_action(), for undo/redo history_action().")
 def timeline_navigation_action(action: str) -> str:
-    """Use this tool for non-destructive timeline navigation, selection, and view-state actions."""
+    """Move the playhead, change the selection, or change what the timeline shows.
+
+    Args:
+        action: One of the values below.
+    """
     if action not in TIMELINE_NAVIGATION_ACTIONS:
         return (
             f"Error: '{action}' is not a supported navigation action. "
@@ -1422,8 +1452,16 @@ def timeline_navigation_action(action: str) -> str:
 
 
 @splicekit_tool("timeline_edit_action")
+@_lists_actions(TIMELINE_EDIT_ACTIONS,
+                "These change the project but do not remove media: markers, effects, titles, "
+                "roles, ranges. Undo with history_action(\"undo\"). For deletes, cuts, blades, "
+                "trims and retimes use timeline_destructive_action().")
 def timeline_edit_action(action: str) -> str:
-    """Use this tool for non-destructive timeline edits like markers, effects, titles, and range changes."""
+    """Change the timeline without removing anything: markers, effects, titles, ranges.
+
+    Args:
+        action: One of the values below.
+    """
     if action not in TIMELINE_EDIT_ACTIONS:
         return (
             f"Error: '{action}' is not a supported non-destructive edit action. "
@@ -1433,8 +1471,16 @@ def timeline_edit_action(action: str) -> str:
 
 
 @splicekit_tool("timeline_destructive_action")
+@_lists_actions(TIMELINE_DESTRUCTIVE_ACTIONS,
+                "Every one of these removes or rewrites timeline content. Most are undoable with "
+                "history_action(\"undo\") — check the result and verify with get_timeline_clips() "
+                "rather than assuming.")
 def timeline_destructive_action(action: str) -> str:
-    """Use this tool for destructive timeline edits such as delete, cut, blade, replace, trim, and retime."""
+    """Delete, cut, blade, replace, trim or retime timeline content.
+
+    Args:
+        action: One of the values below.
+    """
     if action not in TIMELINE_DESTRUCTIVE_ACTIONS:
         return (
             f"Error: '{action}' is not a supported destructive action. "
@@ -1444,8 +1490,13 @@ def timeline_destructive_action(action: str) -> str:
 
 
 @splicekit_tool("history_action")
+@_lists_actions(TIMELINE_HISTORY_ACTIONS)
 def history_action(action: str) -> str:
-    """Use this tool for timeline history operations that can undo or reapply prior edits."""
+    """Undo or redo the last timeline edit.
+
+    Args:
+        action: One of the values below.
+    """
     if action not in TIMELINE_HISTORY_ACTIONS:
         return (
             f"Error: '{action}' is not a supported history action. "
@@ -4838,6 +4889,13 @@ def create_project() -> str:
     Opens a modal save/open panel. While it is open the bridge cannot serve
     main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
     from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+
+    This tool cannot finish the job by itself. It opens Final Cut Pro's own panel and
+    stops there: a person has to type the name and click Save. Until they do, the panel
+    blocks every main-thread RPC on the bridge, so no other tool that reads or edits the
+    document will answer (bridge_alive still responds). If nobody is at the machine, call
+    dismiss_dialog(action="cancel") to close it again — that is the only way out from here.
+    Nothing is created when it is cancelled.
     """
     return _call_or_error("project.create")
 
@@ -4849,6 +4907,13 @@ def create_event() -> str:
     Opens a modal save/open panel. While it is open the bridge cannot serve
     main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
     from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+
+    This tool cannot finish the job by itself. It opens Final Cut Pro's own panel and
+    stops there: a person has to type the name and click Save. Until they do, the panel
+    blocks every main-thread RPC on the bridge, so no other tool that reads or edits the
+    document will answer (bridge_alive still responds). If nobody is at the machine, call
+    dismiss_dialog(action="cancel") to close it again — that is the only way out from here.
+    Nothing is created when it is cancelled.
     """
     return _call_or_error("project.createEvent")
 
@@ -4860,6 +4925,13 @@ def create_library() -> str:
     Opens a modal save/open panel. While it is open the bridge cannot serve
     main-thread RPC; bridge_alive still responds. The panel cannot be confirmed
     from the bridge — only dismiss_dialog(action=\"cancel\") closes it.
+
+    This tool cannot finish the job by itself. It opens Final Cut Pro's own panel and
+    stops there: a person has to type the name and click Save. Until they do, the panel
+    blocks every main-thread RPC on the bridge, so no other tool that reads or edits the
+    document will answer (bridge_alive still responds). If nobody is at the machine, call
+    dismiss_dialog(action="cancel") to close it again — that is the only way out from here.
+    Nothing is created when it is cancelled.
     """
     return _call_or_error("project.createLibrary")
 
@@ -9138,10 +9210,16 @@ def debug_eval(expression: str = "", chain: str = "", target: str = "",
 
 @splicekit_tool("debug_load_plugin")
 def debug_load_plugin(action: str = "list", path: str = "") -> str:
-    """Dynamically load or unload code in FCP's running process.
+    """Load or unload arbitrary native code inside Final Cut Pro's running process.
+
+    This runs whatever is in the file, with Final Cut Pro's own privileges, in Final Cut
+    Pro's own address space. The dylib's __attribute__((constructor)) runs the moment it
+    loads, before this tool returns. A bad build crashes Final Cut Pro and takes any
+    unsaved work with it, and a plugin that corrupts memory can damage the open library.
+    There is no sandbox and no undo. Unloading does not reverse anything the constructor
+    already did. Only load a file you compiled yourself and know the contents of.
 
     Load compiled .dylib or .bundle files without restarting FCP.
-    The dylib's __attribute__((constructor)) runs immediately on load.
     Use for hot-patching fixes or adding features at runtime.
 
     Args:
@@ -10687,9 +10765,9 @@ For connected clips (B-roll, titles): use select_clip_in_lane(lane=1) for above,
 
 ## Playhead Positioning
 - 1 frame = ~0.042s at 24fps, ~0.033s at 30fps
-- Use seekToTime(seconds) for precise positioning
+- Use seek_to_time(seconds) for precise positioning
 - Use batch_timeline_actions() for multi-step navigation + edit sequences
-- Avoid frame-stepping loops when seekToTime exists
+- Avoid frame-stepping loops when seek_to_time exists
 
 ## Batch Operations
 Use batch_timeline_actions() for multi-step sequences rather than individual tool calls.

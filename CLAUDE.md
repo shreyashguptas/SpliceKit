@@ -1039,24 +1039,24 @@ from within FCP's process, accessible via MCP. No debugger attachment required.
 
 ### Breakpoints (pause + inspect + continue)
 ```
-debug.breakpoint(action="add", className="FFAnchoredTimelineModule", selector="blade:")
+debug_breakpoint(action="add", class_name="FFAnchoredTimelineModule", selector="blade:")
 # ... press B in FCP — execution pauses, breakpoint.hit event fires ...
-debug.breakpoint(action="inspect")                                    # see paused state
-debug.breakpoint(action="inspectSelf", keyPath="sequence.displayName") # inspect properties
-debug.breakpoint(action="continue")                                   # resume execution
-debug.breakpoint(action="step")                                       # resume + break on next call
+debug_breakpoint(action="inspect")                                      # see paused state
+debug_breakpoint(action="inspectSelf", key_path="sequence.displayName") # inspect properties
+debug_breakpoint(action="continue")                                     # resume execution
+debug_breakpoint(action="step")                                         # resume + break on next call
 ```
-Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hitCount=5`),
-and one-shot breakpoints (`oneShot=True`). FCP freezes while paused (same as Xcode).
+Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hit_count=5`),
+and one-shot breakpoints (`one_shot=True`). FCP freezes while paused (same as Xcode).
 The JSON-RPC server stays alive on a separate thread so you can inspect state.
 
 ### Method Tracing (non-blocking alternative)
 ```
-debug.traceMethod(action="add", className="FFAnchoredTimelineModule",
-                  selector="blade:", logStack=True)
+debug_trace_method(action="add", class_name="FFAnchoredTimelineModule",
+                   selector="blade:", log_stack=True)
 # ... perform action in FCP ...
-debug.traceMethod(action="getLog", limit=10)  # see calls + call stacks
-debug.traceMethod(action="removeAll")          # clean up
+debug_trace_method(action="getLog", limit=10)  # see calls + call stacks
+debug_trace_method(action="removeAll")         # clean up
 ```
 Traces are broadcast to MCP clients in real-time as JSON-RPC notifications.
 Use tracing when you want to observe without pausing, breakpoints when you need
@@ -1064,89 +1064,89 @@ to inspect state at a specific moment.
 
 ### Property Watching (replaces watchpoints)
 ```
-debug.watch(action="add", className="NSApplication", keyPath="mainWindow")
+debug_watch(action="add", class_name="NSApplication", key_path="mainWindow")
 # Events broadcast when property changes with old/new values
-debug.watch(action="removeAll")
+debug_watch(action="removeAll")
 ```
 
 ### Crash Handler (replaces debugger crash catching)
 ```
-debug.crashHandler(action="install")   # catch exceptions + signals
-debug.crashHandler(action="getLog")    # see crash stack traces
+debug_crash_handler(action="install")   # catch exceptions + signals
+debug_crash_handler(action="getLog")    # see crash stack traces
 ```
 Catches NSExceptions and signals (SIGABRT, SIGSEGV, etc.) with full stack traces.
 
 ### Thread Inspection
 ```
-debug.threads()                    # thread count, operation queues
-debug.threads(detailed=True)       # per-thread CPU usage, run state, stacks
+debug_threads()                    # thread count, operation queues
+debug_threads(detailed=True)       # per-thread CPU usage, run state, stacks
 ```
 Uses Mach kernel APIs. Shows all ~45 threads with CPU usage percentages.
 
 ### Expression Evaluation (replaces lldb `po`)
 ```
-debug.eval(expression="NSApp.delegate._targetLibrary.displayName")
-debug.eval(chain=["delegate", "_targetLibrary"], storeResult=True)
+debug_eval(expression="NSApp.delegate._targetLibrary.displayName")
+debug_eval(chain='["delegate", "_targetLibrary"]', store_result=True)  # chain is a JSON string
 ```
 Walks ObjC property chains. Stores results as handles for further inspection.
 
 ### Hot Plugin Loading (replaces dlopen from lldb)
 ```
-debug.loadPlugin(action="load", path="/tmp/patch.dylib")   # inject code
-debug.loadPlugin(action="unload", path="/tmp/patch.dylib")  # remove it
+debug_load_plugin(action="load", path="/tmp/patch.dylib")    # inject code
+debug_load_plugin(action="unload", path="/tmp/patch.dylib")  # remove it
 ```
 Compile a `.dylib` with fixes/features, load into running FCP without restart.
 
 ### Notification Observation
 ```
-debug.observeNotification(action="add", name="FFEffectsChangedNotification")
-debug.observeNotification(action="add", name="*")  # all notifications (high volume)
-debug.observeNotification(action="removeAll")
+debug_observe_notification(action="add", name="FFEffectsChangedNotification")
+debug_observe_notification(action="add", name="*")  # all notifications (high volume)
+debug_observe_notification(action="removeAll")
 ```
 Subscribe to FCP's internal NSNotification events. Broadcast to MCP clients.
 
-## Direct Timeline Actions (`timeline.directAction`)
+## Direct Timeline Actions (`direct_timeline_action`)
 
 Calls Flexo's parameterized `action*` methods directly on FFAnchoredTimelineModule
 with real arguments. More powerful than the simple responder-chain `timeline.action`.
 
 ### Retiming (direct control)
 ```
-timeline.directAction(action="retimeSetRate", rate=0.5, ripple=True)
-timeline.directAction(action="retimeSpeedRamp", toZero=True)
-timeline.directAction(action="retimeInstantReplay", rate=0.5, addTitle=True)
-timeline.directAction(action="retimeJumpCut", framesToJump=5)
-timeline.directAction(action="retimeRewind", speed=2.0)
-timeline.directAction(action="insertFreezeFrame")
+direct_timeline_action(action="retimeSetRate", rate=0.5, ripple=True)
+direct_timeline_action(action="retimeSpeedRamp", to_zero=True)
+direct_timeline_action(action="retimeInstantReplay", rate=0.5, add_title=True)
+direct_timeline_action(action="retimeJumpCut", frames_to_jump=5)
+direct_timeline_action(action="retimeRewind", speed=2.0)
+direct_timeline_action(action="insertFreezeFrame")
 ```
 
 ### Markers (programmatic manipulation)
 ```
-timeline.directAction(action="changeMarkerType", type="chapter")
-timeline.directAction(action="changeMarkerName", name="Intro", marker="obj_5")
-timeline.directAction(action="markMarkerCompleted", completed=True)
+direct_timeline_action(action="changeMarkerType", type_="chapter")
+direct_timeline_action(action="changeMarkerName", name="Intro", marker="obj_5")
+direct_timeline_action(action="markMarkerCompleted", completed=True)
 ```
 
 ### Audio (precise control)
 ```
-timeline.directAction(action="changeAudioVolume", amount=-6.0, relative=True)
-timeline.directAction(action="applyAudioFadesDirect", fadeIn=True, duration=0.5)
-timeline.directAction(action="setBackgroundMusic", enabled=True)
+direct_timeline_action(action="changeAudioVolume", amount=-6.0, relative=True)  # amount is dB here
+direct_timeline_action(action="applyAudioFadesDirect", fade_in=True, duration=0.5)
+direct_timeline_action(action="setBackgroundMusic", enabled=True)
 ```
 
 ### Other direct actions
 ```
-timeline.directAction(action="addKeywords", keywords=["Interview", "B-Roll"])
-timeline.directAction(action="removeEffectByID", effectID="HEFlowTransition")
-timeline.directAction(action="renameAngle", name="Camera 2")
-timeline.directAction(action="newProject", name="My Project")
-timeline.directAction(action="alignToMusicMarkers")
-timeline.directAction(action="duplicateCaptions", language="es", format="SRT")
+direct_timeline_action(action="addKeywords", keywords='["Interview", "B-Roll"]')  # JSON string
+direct_timeline_action(action="removeEffectByID", effect_id="HEFlowTransition")
+direct_timeline_action(action="renameAngle", name="Camera 2")
+direct_timeline_action(action="newProject", name="My Project")
+direct_timeline_action(action="alignToMusicMarkers")
+direct_timeline_action(action="duplicateCaptions", language="es", format_="SRT")
 ```
 
 ### Raw selector fallback
 ```
-timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
+direct_timeline_action(selector="actionValidateAndRepair:validateMode:error:")
 ```
 
 See `docs/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug

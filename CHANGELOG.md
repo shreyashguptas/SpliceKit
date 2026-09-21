@@ -91,8 +91,8 @@ that this fork has removed.
   timestamps of each kind are printed; the rest are summarized while full counts stay in the
   summary.
 - **`deploy_and_restart` no longer runs `make deploy` before quitting Final Cut Pro.** Deploy
-  replaced the dylib inside the running app bundle and could leave the bridge broken on relaunch;
-  the tool now builds with `make install` (or skips build when asked), quits FCP, then relaunches.
+  replaced the dylib inside the running app bundle and could leave the bridge broken on relaunch.
+  The order is now quit, then `make deploy` (skipped when `skip_build` is passed), then relaunch.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
