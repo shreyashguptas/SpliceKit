@@ -576,6 +576,38 @@ static void SpliceKit_checkCompatibility(void) {
 
 // ---- OTIO → FCPXML helpers ----
 
+/// A copy of parsed JSON with every null removed.
+///
+/// JSON null becomes NSNull, which is a real object: `ref[@"available_range"]` is
+/// truthy and the very next `[... objectForKeyedSubscript:]` kills the converter with
+/// "unrecognized selector sent to instance". OpenTimelineIO writes
+/// "available_range": null on any media reference whose full extent is unknown, and
+/// "color": null on every track, so a perfectly ordinary .otio file brought the whole
+/// conversion down. Strip them once, at the door, rather than guarding thirty chained
+/// subscripts.
+static id otio_withoutNulls(id value) {
+    if (!value || value == (id)kCFNull) return nil;
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *source = value;
+        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:source.count];
+        for (id key in source) {
+            id cleaned = otio_withoutNulls(source[key]);
+            if (cleaned) out[key] = cleaned;
+        }
+        return out;
+    }
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSArray *source = value;
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:source.count];
+        for (id item in source) {
+            id cleaned = otio_withoutNulls(item);
+            if (cleaned) [out addObject:cleaned];
+        }
+        return out;
+    }
+    return value;
+}
+
 static NSString *otio_esc(id value) {
     if (!value || value == (id)kCFNull) return @"";
     NSString *str = [value isKindOfClass:[NSString class]] ? value : [value description];
@@ -681,14 +713,17 @@ static NSString *otio_mediaSrcURL(NSString *targetURL) {
 
 /// Compute clip source start relative to asset start=0.
 /// Returns the in-point in seconds for the start= attribute.
+static NSDictionary *otio_dict(id value);
+
 static double otio_sourceStart(NSDictionary *clip) {
-    NSDictionary *sr = clip[@"source_range"];
+    NSDictionary *sr = otio_dict(clip[@"source_range"]);
     NSDictionary *ref = otio_mediaRef(clip);
     double srStart = otio_sec(sr[@"start_time"]);
-    if (ref && ref[@"available_range"]) {
-        double arStart = otio_sec(ref[@"available_range"][@"start_time"]);
-        return srStart - arStart;
-    }
+    // When the media reference says where the file itself starts, the in-point is
+    // written as it is: the <asset> carries that same start, and Final Cut Pro wants
+    // the two to agree. Subtracting it to get a relative in-point, against an asset
+    // pinned to start="0s", is what made FCP drop every clip on import.
+    if (otio_dict(ref[@"available_range"])) return srStart;
     // No available_range → use 0 (safer than absolute Premiere timecodes)
     if (!otio_isExternal(ref)) return 0;
     return srStart;
@@ -987,6 +1022,11 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
     NSError *jsonErr = nil;
     NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
     if (!root || jsonErr) { SpliceKit_log(@"[OTIO] JSON error: %@", jsonErr); return nil; }
+    root = otio_withoutNulls(root);
+    if (![root isKindOfClass:[NSDictionary class]]) {
+        SpliceKit_log(@"[OTIO] Top level is not an object");
+        return nil;
+    }
     if (![root[@"OTIO_SCHEMA"] hasPrefix:@"Timeline."]) { SpliceKit_log(@"[OTIO] Not a Timeline"); return nil; }
 
     NSString *projectName = root[@"name"] ?: @"";
@@ -1062,9 +1102,25 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
             NSString *aid = [NSString stringWithFormat:@"r%d", resCounter++];
             assets[url] = aid;
 
-            // Duration from available_range or source_range
-            NSDictionary *durRT = ref[@"available_range"] ? ref[@"available_range"][@"duration"] : c[@"source_range"][@"duration"];
+            // Duration and start from available_range (the whole media) when the file
+            // says how long it is, otherwise from this clip's own range.
+            NSDictionary *availableRange = otio_dict(ref[@"available_range"]);
+            NSDictionary *durRT = availableRange ? availableRange[@"duration"]
+                                                 : otio_dict(c[@"source_range"])[@"duration"];
             NSString *durStr = otio_time(durRT);
+
+            // The media's own start timecode, NOT 0s.
+            //
+            // Final Cut Pro validates a clip's in-point against the asset's start, and
+            // silently drops any clip that falls outside it — no error, the import
+            // reports success and the spine comes back empty. Camera media here starts
+            // at 1705373670/30000s (about 15 hours of timecode), so every clip written
+            // with start="0s" against an asset pinned to start="0s" was thrown away:
+            // a four-clip timeline imported as nothing but its one connected clip.
+            NSString *assetStartStr = @"0s";
+            if (availableRange && availableRange[@"start_time"]) {
+                assetStartStr = otio_time(otio_dict(availableRange[@"start_time"]));
+            }
 
             // hasVideo/hasAudio: check track kind
             NSString *kind = t[@"kind"] ?: @"Video";
@@ -1073,8 +1129,8 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
             // Preserve asset metadata from FCPXML round-trip (uid, audioChannels, etc.)
             NSDictionary *refMeta = otio_fcpxMeta(ref);
             NSMutableString *assetAttrs = [NSMutableString stringWithFormat:
-                @"        <asset name=\"%@\" format=\"r1\" id=\"%@\" duration=\"%@\" start=\"0s\" hasVideo=\"%d\" hasAudio=\"1\"",
-                otio_esc(c[@"name"] ?: @"Clip"), aid, durStr, isVideo ? 1 : 0];
+                @"        <asset name=\"%@\" format=\"r1\" id=\"%@\" duration=\"%@\" start=\"%@\" hasVideo=\"%d\" hasAudio=\"1\"",
+                otio_esc(c[@"name"] ?: @"Clip"), aid, durStr, assetStartStr, isVideo ? 1 : 0];
             // Optional metadata attributes
             for (NSString *metaKey in @[@"uid", @"audioSources", @"audioChannels",
                                         @"audioRate", @"videoSources"]) {
@@ -1292,12 +1348,19 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
                 NSDictionary *adjDurRT = @{@"value": @(adjDurFrames), @"rate": @(rate)};
                 NSDictionary *adjSrcStartRT = @{@"value": @(adjSrcStartFrames), @"rate": @(rate)};
 
-                // Use <clip> with nested <video> (not <asset-clip>) for spine items.
-                // <asset-clip> has a restricted DTD that doesn't allow markers,
-                // filter-video, filter-audio, or connected clips as children.
+                // <asset-clip>, which is what Final Cut Pro's own export writes, not
+                // <clip> with a nested <video>.
+                //
+                // A comment here used to claim <asset-clip> has a restricted DTD that
+                // allows no markers, filters or connected clips. On FCP 12.3 that is not
+                // so: its own export nests <adjust-transform> and anchored
+                // <asset-clip lane="1"> inside one. What IS true is that FCP silently
+                // drops a spine <clip><video>: a four-clip round trip imported as nothing
+                // but its one connected clip, and the import still reported success.
+                // Verified both ways against FCP 12.3 build 450152 before changing this.
                 NSMutableString *tag = [NSMutableString stringWithFormat:
-                    @"<clip name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"%@\" format=\"r1\"",
-                    otio_esc(child[@"name"] ?: @"Clip"),
+                    @"<asset-clip name=\"%@\" ref=\"%@\" offset=\"%@\" duration=\"%@\" start=\"%@\" format=\"r1\"",
+                    otio_esc(child[@"name"] ?: @"Clip"), aid,
                     otio_time(offRT), otio_time(adjDurRT), otio_time(adjSrcStartRT)];
                 if (!enabled) [tag appendString:@" enabled=\"0\""];
                 [tag appendString:@">"];
@@ -1309,11 +1372,11 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
 
                 NSMutableString *cx = item[@"childXml"];
 
-                // DTD requires strict ordering inside <clip>:
+                // Ordering inside <asset-clip>:
                 //   1. adjust-* elements (conform, transform, blend, etc.)
                 //   2. adjust-volume, adjust-panner
                 //   3. timeMap / frame-sampling
-                //   4. <video> (with filter-video/filter-audio as children)
+                //   4. filter-video / filter-audio
                 //   5. markers, then connected clips/titles (added later by secondary track loop)
 
                 // Phase 1: adjust-* elements (before timeMap/video)
@@ -1415,16 +1478,11 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
                     [cx appendString:timeMapXml];
                 }
 
-                // Phase 3: <video> child with filters nested inside
+                // Phase 3: filters, which sit directly inside <asset-clip> — the media
+                // reference is the asset-clip's own ref, so there is no <video> to nest
+                // them in any more.
                 if (filterXml.length > 0) {
-                    [cx appendFormat:
-                        @"\n                        <video offset=\"%@\" ref=\"%@\" duration=\"%@\">%@"
-                        @"\n                        </video>",
-                        otio_time(adjSrcStartRT), aid, otio_time(adjDurRT), filterXml];
-                } else {
-                    [cx appendFormat:
-                        @"\n                        <video offset=\"%@\" ref=\"%@\" duration=\"%@\"/>",
-                        otio_time(adjSrcStartRT), aid, otio_time(adjDurRT)];
+                    [cx appendString:filterXml];
                 }
 
                 // Phase 4: Markers (after video, before connected clips)

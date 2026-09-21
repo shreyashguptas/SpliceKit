@@ -6339,6 +6339,323 @@ def _otio_fcpx_sequence_rate(sequence_elem, resources_elem, default_rate=30):
     return default_rate
 
 
+# --- FCPXML -> OTIO, without the adapter ------------------------------------
+#
+# otio-fcpx-xml-adapter 1.0 was the only reader here, and it lost the timeline:
+# exporting a project of three storyline clips plus one connected clip reported
+# "1 track, 2 clips", every clip came back as a MissingReference, and re-importing
+# produced gaps. Three separate causes — a compound clip it crashes on, anchored
+# clips it does not place on a lane, and media references it does not carry — so
+# the FCPXML Final Cut Pro writes is now read directly. The adapter stays as a
+# fallback for FCPXML shapes this does not recognise.
+
+_FCPX_TIMED_TAGS = {
+    "asset-clip", "clip", "ref-clip", "video", "audio", "title", "gap",
+    "sync-clip", "mc-clip", "transition", "audition",
+}
+
+
+def _otio_fcpx_fraction(value, default="0s"):
+    """An FCPXML time ("1001/30000s", "20s", "0s") as an exact Fraction of seconds."""
+    from fractions import Fraction
+
+    text = (value if value is not None else default)
+    text = str(text).strip()
+    if text.endswith("s"):
+        text = text[:-1]
+    if not text:
+        return Fraction(0)
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        return Fraction(int(numerator), int(denominator))
+    return Fraction(text)
+
+
+def _otio_fcpx_format_time(value):
+    """A Fraction of seconds back as an FCPXML time string."""
+    from fractions import Fraction
+
+    value = Fraction(value)
+    if value.denominator == 1:
+        return f"{value.numerator}s"
+    return f"{value.numerator}/{value.denominator}s"
+
+
+def _otio_fcpx_media_spine(resources_elem, ref):
+    """The spine inside the ``<media>`` resource a ``<ref-clip>`` points at."""
+    if resources_elem is None or not ref:
+        return None
+    for media in resources_elem.findall("media"):
+        if media.get("id") != ref:
+            continue
+        sequence = media.find("sequence")
+        if sequence is not None:
+            return sequence.find("spine")
+    return None
+
+
+def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine):
+    """One ``<ref-clip>`` as the clips it actually contains, trimmed as it is trimmed."""
+    import copy
+
+    ref_offset = _otio_fcpx_fraction(ref_clip.get("offset"))
+    ref_start = _otio_fcpx_fraction(ref_clip.get("start"))
+    ref_end = ref_start + _otio_fcpx_fraction(ref_clip.get("duration"))
+
+    expanded = []
+    for inner in inner_spine:
+        if inner.tag not in _FCPX_TIMED_TAGS:
+            continue
+        inner_offset = _otio_fcpx_fraction(inner.get("offset"))
+        inner_end = inner_offset + _otio_fcpx_fraction(inner.get("duration"))
+        visible_from = max(inner_offset, ref_start)
+        visible_to = min(inner_end, ref_end)
+        if visible_to <= visible_from:
+            continue  # trimmed out of the compound clip entirely
+        clip = copy.deepcopy(inner)
+        clip.set("offset", _otio_fcpx_format_time(ref_offset + (visible_from - ref_start)))
+        clip.set("duration", _otio_fcpx_format_time(visible_to - visible_from))
+        if inner.tag != "gap":
+            clip.set("start", _otio_fcpx_format_time(
+                _otio_fcpx_fraction(inner.get("start")) + (visible_from - inner_offset)))
+        clip.attrib.pop("lane", None)
+        expanded.append(clip)
+
+    # The compound clip's own connected clips move onto whichever of the expanded
+    # clips now covers the moment they were anchored at. An anchored offset is in its
+    # parent's local time, so it is converted to timeline time and back again.
+    for child in list(ref_clip):
+        if child.tag not in _FCPX_TIMED_TAGS or not child.get("lane"):
+            continue
+        anchored_at = ref_offset + (_otio_fcpx_fraction(child.get("offset")) - ref_start)
+        host = expanded[0] if expanded else None
+        for candidate in expanded:
+            candidate_offset = _otio_fcpx_fraction(candidate.get("offset"))
+            if candidate_offset <= anchored_at < candidate_offset + _otio_fcpx_fraction(
+                    candidate.get("duration")):
+                host = candidate
+                break
+        if host is None:
+            continue
+        moved = copy.deepcopy(child)
+        moved.set("offset", _otio_fcpx_format_time(
+            _otio_fcpx_fraction(host.get("start"))
+            + (anchored_at - _otio_fcpx_fraction(host.get("offset")))))
+        host.append(moved)
+    return expanded
+
+
+def _otio_fcpx_flatten_ref_clips(project_elem, resources_elem):
+    """Replace every ``<ref-clip>`` with the clips it contains, in place.
+
+    OTIO has no compound clip, and the previous answer was to swap each one for a
+    gap of the same length: the QA timeline's compound clip, and the connected clip
+    anchored inside it, simply vanished. Flattening is what any editor without
+    compound clips would receive, and it keeps the media. Returns a list of notes
+    for the caller to report.
+    """
+    notes = []
+    for spine in project_elem.iter("spine"):
+        rebuilt = []
+        changed = False
+        for child in list(spine):
+            if child.tag != "ref-clip":
+                rebuilt.append(child)
+                continue
+            inner_spine = _otio_fcpx_media_spine(resources_elem, child.get("ref", ""))
+            if inner_spine is None:
+                rebuilt.append(child)
+                notes.append(f"compound clip {child.get('name', '?')!r} kept as is: "
+                             "its contents are not in this document")
+                continue
+            expanded = _otio_fcpx_expand_ref_clip(child, inner_spine)
+            if not expanded:
+                rebuilt.append(child)
+                continue
+            changed = True
+            anchored = sum(1 for c in child if c.tag in _FCPX_TIMED_TAGS and c.get("lane"))
+            notes.append(
+                f"compound clip {child.get('name', '?')!r} flattened into "
+                f"{len(expanded)} clip(s)"
+                + (f", {anchored} connected clip(s) re-anchored" if anchored else "")
+                + " — OTIO has no compound clip")
+            rebuilt.extend(expanded)
+        if changed:
+            for child in list(spine):
+                spine.remove(child)
+            for child in rebuilt:
+                spine.append(child)
+    return notes
+
+
+def _otio_fcpx_asset_index(resources_elem):
+    """``id`` -> resource element, for every asset, effect, format and media."""
+    index = {}
+    if resources_elem is None:
+        return index
+    for child in resources_elem:
+        resource_id = child.get("id")
+        if resource_id:
+            index[resource_id] = child
+    return index
+
+
+def _otio_fcpx_asset_for(element, resources):
+    """The ``<asset>`` resource an item plays, following ``ref`` through a wrapper."""
+    ref = element.get("ref")
+    if not ref:
+        for child in element:
+            if child.tag in ("video", "audio") and child.get("ref"):
+                ref = child.get("ref")
+                break
+    return resources.get(ref) if ref else None
+
+
+def _otio_fcpx_media_url(element, resources):
+    """The file URL an item plays, following ``ref`` into ``<resources>``."""
+    ref = element.get("ref")
+    if not ref:
+        for child in element:
+            if child.tag in ("video", "audio") and child.get("ref"):
+                ref = child.get("ref")
+                break
+    asset = resources.get(ref) if ref else None
+    if asset is None:
+        return None
+    src = asset.get("src")
+    if src:
+        return src
+    media_rep = asset.find("media-rep") if hasattr(asset, "find") else None
+    if media_rep is not None and media_rep.get("src"):
+        return media_rep.get("src")
+    return None
+
+
+def _otio_fcpx_sequence_format_rate(sequence_elem, resources, default=30):
+    """Frames per second for a ``<sequence>``, from its format's frameDuration."""
+    from fractions import Fraction
+
+    format_elem = resources.get(sequence_elem.get("format")) if sequence_elem is not None else None
+    if format_elem is None:
+        for element in resources.values():
+            if element.tag == "format" and element.get("frameDuration"):
+                format_elem = element
+                break
+    if format_elem is None or not format_elem.get("frameDuration"):
+        return Fraction(default)
+    frame = _otio_fcpx_fraction(format_elem.get("frameDuration"))
+    if frame <= 0:
+        return Fraction(default)
+    return 1 / frame
+
+
+def _otio_fcpx_build_timeline(project_elem, resources_elem):
+    """One FCPXML ``<project>`` as an OTIO timeline. Returns (timeline, notes)."""
+    import opentimelineio as otio
+    from opentimelineio import opentime
+
+    resources = _otio_fcpx_asset_index(resources_elem)
+    notes = _otio_fcpx_flatten_ref_clips(project_elem, resources_elem)
+
+    sequence = project_elem.find("sequence")
+    if sequence is None:
+        raise ValueError("project has no <sequence>")
+    spine = sequence.find("spine")
+    if spine is None:
+        raise ValueError("sequence has no <spine>")
+
+    rate = _otio_fcpx_sequence_format_rate(sequence, resources)
+    float_rate = float(rate)
+
+    def frames(seconds):
+        return opentime.RationalTime(round(float(seconds) * float_rate), float_rate)
+
+    timeline = otio.schema.Timeline(name=project_elem.get("name", "Timeline"))
+    timeline.metadata["fcpx_sequence_duration_seconds"] = float(
+        _otio_fcpx_fraction(sequence.get("duration")))
+
+    def make_item(element, host_offset, host_start):
+        """An OTIO item for one FCPXML element, or None when it carries no time."""
+        if element.tag == "gap":
+            return otio.schema.Gap(source_range=opentime.TimeRange(
+                frames(0), frames(_otio_fcpx_fraction(element.get("duration")))))
+        source_start = _otio_fcpx_fraction(element.get("start"))
+        duration = _otio_fcpx_fraction(element.get("duration"))
+        url = _otio_fcpx_media_url(element, resources)
+        if url:
+            reference = otio.schema.ExternalReference(target_url=url)
+            # The whole extent of the media, from the <asset> it came from. Leaving it
+            # out writes "available_range": null, and a reader has no way to tell how
+            # much of the file is there beyond the part this clip uses.
+            asset = _otio_fcpx_asset_for(element, resources)
+            if asset is not None and asset.get("duration"):
+                reference.available_range = opentime.TimeRange(
+                    frames(_otio_fcpx_fraction(asset.get("start"))),
+                    frames(_otio_fcpx_fraction(asset.get("duration"))))
+        elif element.tag in ("title", "video"):
+            reference = otio.schema.GeneratorReference(
+                name=element.get("name", "") or element.tag)
+        else:
+            reference = otio.schema.MissingReference()
+        clip = otio.schema.Clip(
+            name=element.get("name", "") or element.tag,
+            media_reference=reference,
+            source_range=opentime.TimeRange(frames(source_start), frames(duration)))
+        clip.metadata["fcpx"] = {
+            "tag": element.tag,
+            "timeline_offset_seconds": float(
+                host_offset + (_otio_fcpx_fraction(element.get("offset")) - host_start)),
+        }
+        return clip
+
+    # Lane 0 is the primary storyline; each anchored lane becomes its own track, so
+    # a connected clip survives instead of being dropped on the floor.
+    lanes = {}
+    for child in spine:
+        if child.tag not in _FCPX_TIMED_TAGS:
+            continue
+        offset = _otio_fcpx_fraction(child.get("offset"))
+        if child.tag == "transition":
+            lanes.setdefault(0, []).append(("transition", offset, child))
+            continue
+        lanes.setdefault(0, []).append(("item", offset, child))
+        host_start = _otio_fcpx_fraction(child.get("start"))
+        for anchored in child:
+            if anchored.tag not in _FCPX_TIMED_TAGS or not anchored.get("lane"):
+                continue
+            lane = int(anchored.get("lane"))
+            anchored_at = offset + (_otio_fcpx_fraction(anchored.get("offset")) - host_start)
+            lanes.setdefault(lane, []).append(("item", anchored_at, anchored))
+
+    for lane in sorted(lanes):
+        entries = sorted(lanes[lane], key=lambda e: e[1])
+        track = otio.schema.Track(name=str(lane), kind=otio.schema.TrackKind.Video)
+        # Starts at zero, not at the first item: a connected clip anchored twelve
+        # seconds in needs twelve seconds of gap before it or it lands at the head of
+        # the timeline.
+        playhead = _otio_fcpx_fraction("0s")
+        for kind, offset, element in entries:
+            if kind == "transition":
+                # Half on each side of the cut, which is where Final Cut Pro centres it.
+                half = _otio_fcpx_fraction(element.get("duration")) / 2
+                track.append(otio.schema.Transition(
+                    name=element.get("name", "Transition"),
+                    transition_type=otio.schema.TransitionTypes.SMPTE_Dissolve,
+                    in_offset=frames(half), out_offset=frames(half)))
+                continue
+            if playhead is not None and offset > playhead:
+                track.append(otio.schema.Gap(source_range=opentime.TimeRange(
+                    frames(0), frames(offset - playhead))))
+            item = make_item(element, offset, _otio_fcpx_fraction(element.get("offset")))
+            if item is None:
+                continue
+            track.append(item)
+            playhead = offset + _otio_fcpx_fraction(element.get("duration"))
+        timeline.tracks.append(track)
+
+    return timeline, notes
+
+
 def _otio_sanitize_fcpx_project_element(project_elem):
     """Return a copy of ``project_elem`` safe for otio-fcpx-xml-adapter 1.0.
 
@@ -6501,17 +6818,8 @@ def _otio_read_fcpx_library_collection(root_elem):
         for project in event.findall("project"):
             if _otio_should_skip_fcpx_library_project(project):
                 continue
-            sanitized = _otio_sanitize_fcpx_project_element(project)
-            project_xml = _otio_build_fcpx_project_document(
-                resources_elem,
-                sanitized,
-                fcpxml_version=fcpxml_version,
-            )
-            timeline = _otio_with_fcpx_adapter(
-                lambda adapter_name: otio.adapters.read_from_string(project_xml, adapter_name)
-            )
+            timeline = _otio_fcpx_read_project(project, resources_elem, fcpxml_version)
             if isinstance(timeline, otio.schema.Timeline):
-                _otio_apply_fcpx_project_metadata(timeline, sanitized, resources_elem)
                 collection.append(timeline)
 
     if not len(collection):
@@ -6519,13 +6827,58 @@ def _otio_read_fcpx_library_collection(root_elem):
     return collection
 
 
+def _otio_fcpx_read_project(project_elem, resources_elem, fcpxml_version="1.14"):
+    """One ``<project>`` as an OTIO timeline, read directly, adapter as the fallback.
+
+    Notes about what could not be carried across (a compound clip flattened, say) end
+    up in the timeline's metadata under ``splicekit_notes`` so export_otio can report
+    them instead of quietly dropping things.
+    """
+    import copy
+
+    import opentimelineio as otio
+
+    project_copy = copy.deepcopy(project_elem)
+    try:
+        timeline, notes = _otio_fcpx_build_timeline(project_copy, resources_elem)
+        if notes:
+            timeline.metadata["splicekit_notes"] = list(notes)
+        return timeline
+    except Exception as direct_error:  # noqa: BLE001 - fall back, then report both
+        project_xml = _otio_build_fcpx_project_document(
+            resources_elem,
+            _otio_sanitize_fcpx_project_element(project_elem),
+            fcpxml_version=fcpxml_version,
+        )
+        timeline = _otio_with_fcpx_adapter(
+            lambda adapter_name: otio.adapters.read_from_string(project_xml, adapter_name)
+        )
+        if isinstance(timeline, otio.schema.Timeline):
+            _otio_apply_fcpx_project_metadata(timeline, project_elem, resources_elem)
+            timeline.metadata["splicekit_notes"] = [
+                f"read with otio-fcpx-xml-adapter, not directly ({direct_error}); "
+                "a compound clip becomes a gap and connected clips are dropped"
+            ]
+        return timeline
+
+
 def _otio_read_fcpx_string(fcpxml_str):
-    """Read FCPXML using whichever adapter name is installed."""
+    """Read FCPXML into OTIO: directly when the shape is understood, adapter otherwise."""
     import opentimelineio as otio
 
     root = _otio_fcpxml_parse_root(fcpxml_str)
     if root.find("library") is not None:
         return _otio_read_fcpx_library_collection(root)
+
+    resources_elem = root.find("resources")
+    project_elem = root.find("project")
+    if project_elem is None:
+        event_elem = root.find("event")
+        if event_elem is not None:
+            project_elem = event_elem.find("project")
+    if project_elem is not None and resources_elem is not None:
+        return _otio_fcpx_read_project(project_elem, resources_elem,
+                                       root.get("version", "1.14"))
 
     result = _otio_with_fcpx_adapter(
         lambda adapter_name: otio.adapters.read_from_string(fcpxml_str, adapter_name)
@@ -6646,6 +6999,12 @@ def _otio_timeline_summary(timeline):
             total_dur = timeline.duration()
             if total_dur and total_dur.value > 0 and total_dur.rate > 0:
                 info["duration_seconds"] = round(total_dur.value / total_dur.rate, 3)
+        # What could not be carried across, said out loud rather than dropped: OTIO
+        # has no compound clip, so one gets flattened, and that is worth knowing
+        # before the file goes to another editor.
+        notes = metadata.get("splicekit_notes")
+        if notes:
+            info["not_carried_across"] = list(notes)
     return info
 
 
@@ -6724,7 +7083,9 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
               from timeline.
 
     Returns:
-        JSON with status, output path, timeline name, track/clip counts, and duration.
+        JSON with status, output path, timeline name, track/clip counts, and duration,
+        plus `not_carried_across` listing anything OTIO has no way to represent — a
+        compound clip, for instance, is flattened into the clips it contains.
 
     Some export paths use FCP's native save dialog instead of writing directly.
     While a modal save/open panel is open the bridge cannot serve main-thread RPC.
@@ -6832,6 +7193,16 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
                    If both path and otio_json are provided, path takes priority.
         rate:      Frame rate for EDL import (e.g. 23.98, 24, 29.97, 30).
                    Required for .edl files with drop-frame timecodes. If 0, defaults to 24.
+
+    Where it lands:
+        A NEW project, in a new event named after the timeline in the file. The project
+        you have open is not touched. Verified on FCP 12.3 against a four-clip timeline
+        with a connected clip: offsets, durations, source in-points and the connected
+        clip's lane all came back matching.
+
+    What OTIO cannot carry:
+        A compound clip. export_otio flattens one into the clips it contains and says so
+        in `not_carried_across`; what comes back is those clips, not a compound clip.
 
     Returns:
         JSON with import status, timeline name, track/clip counts.

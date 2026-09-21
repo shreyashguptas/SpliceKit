@@ -339,10 +339,13 @@ CASES.update({
     "export_xml": Case(args={"path": "$TMP/sweep.fcpxml"}, kind="write",
                        expect=r"fcpxml|Exported", timeout=120),
     "export_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=120),
-    # import_otio replaces the OPEN project's content — it does not create a new one.
-    # Undo is the only way back, so the sweep relies on it rather than reopening.
+    # import_otio builds a new project in a new event named after the timeline; the
+    # open project is left alone. The new project is removed afterwards so the library
+    # does not grow a copy on every run.
     "import_otio": Case(args={"path": "$TMP/sweep.otio"}, kind="write", timeout=180,
-                        undo=("Import XML", "Import OTIO", "Paste"),
+                        cleanup=[("remove_browser_clip",
+                                  {"name": EXPECTED_PROJECT, "event": EXPECTED_PROJECT,
+                                   "include_projects": True})],
                         invalidates_handles=True),
     "generate_fcpxml": read(items="[]"),
     "export_captions_srt": Case(args={"path": "$TMP/sweep.srt"}, kind="write"),
