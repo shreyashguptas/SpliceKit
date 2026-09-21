@@ -449,6 +449,7 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "mixer_set_volume": {"handle": "obj_1", "volume_db": -6.0},
         "trim_clip": {"handle": "obj_1", "edge": "end", "to_seconds": 2.0},
         "import_media": {"path": str(workdir / "clip.mov")},
+        "remove_browser_clip": {"name": "clip"},
         "set_caption_words": {"words": '[{"text": "Check", "start": 0.0, "end": 1.0}]'},
         "add_clip_to_timeline": {"handle": "obj_5", "edit": "insert", "start_seconds": 12.0,
                                  "end_seconds": 18.0, "at_seconds": 45.0},

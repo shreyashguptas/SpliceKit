@@ -433,6 +433,7 @@ DESTRUCTIVE_TOOLS = {
     "set_object_property",
     "import_fcpxml",
     "import_otio",
+    "remove_browser_clip",
     "batch_timeline_actions",
     "delete_transcript_words",
     "move_transcript_words",
@@ -707,6 +708,7 @@ CUSTOM_TOOL_TITLES = {
     "browser_append_clip": "Append Browser Clip",
     "add_clip_to_timeline": "Add Clip To Timeline",
     "import_media": "Import Media Files",
+    "remove_browser_clip": "Remove Browser Clip",
     "paste_fcpxml": "Paste FCPXML",
     "stabilize_subject": "Stabilize Subject",
     "insert_title": "Insert Title",
@@ -9309,6 +9311,49 @@ def import_media(paths: list[str] | None = None,
     if library:
         params["library"] = library
     r = bridge.call("media.importFile", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@splicekit_tool("remove_browser_clip")
+def remove_browser_clip(handle: str = "", name: str = "", event: str = "",
+                        library: str = "", include_projects: bool = False,
+                        dry_run: bool = False) -> str:
+    """Take a source clip back out of an event's browser — the counterpart to import_media.
+
+    Removes the clip from the event the way Final Cut Pro's own delete does
+    (-removeOwnedClipsObject:, the exact inverse of the add import_media makes).
+    The media file on disk is left alone.
+
+    Refuses a project unless include_projects is set: removing a project removes a whole
+    timeline. cleanup_temp_projects removes SpliceKit's own scratch projects without it.
+
+    Args:
+        handle: A handle from browser_list_clips() or import_media().
+        name: The clip's name exactly as the browser shows it, when no handle is given.
+        event: Substring match for the event name (case-insensitive), to narrow the search.
+        library: Substring match for the library display name.
+        include_projects: Allow removing a project (a whole timeline), not just a source clip.
+        dry_run: Report what would be removed and change nothing.
+    """
+    params: dict = {}
+    if handle:
+        params["handle"] = handle
+    if name:
+        params["name"] = name
+    if event:
+        params["event"] = event
+    if library:
+        params["library"] = library
+    if include_projects:
+        params["includeProjects"] = True
+    if dry_run:
+        params["dryRun"] = True
+    if not handle and not name:
+        return ("Error: provide `handle` (from browser_list_clips or import_media) or "
+                "`name` (the clip's name exactly as the browser shows it)")
+    r = bridge.call("media.removeClip", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)

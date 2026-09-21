@@ -17173,6 +17173,32 @@ static NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params)
 // -targetLibraryItem answers the FFSequenceRecord for a project but only the enclosing
 // FFEventRecord for a source clip, so a source clip can only be judged by its event. An
 // item we cannot positively identify as trashed is kept.
+// Whether a browser item is a project (a timeline) rather than a source clip.
+//
+// -isProject only answers YES once Final Cut Pro has loaded the sequence, so right after
+// launch every project except the open one reported NO: browser.listClips labelled three
+// leaked scratch projects "isProject": false, and the live sweep duly handed one to
+// add_clip_to_timeline. -sequenceType answers "sequence" for a project Final Cut Pro has
+// not loaded and "clip" for a source clip, so between them both states are covered — a
+// loaded project answers isProject YES and sequenceType "clip", an unloaded one answers
+// isProject NO and sequenceType "sequence", and a source clip answers NO and "clip"
+// either way.
+static BOOL SpliceKit_browserItemIsProject(id item) {
+    if (!item) return NO;
+    BOOL isProject = NO;
+    if (SpliceKit_tryReadBoolSelector(item, @"isProject", &isProject) && isProject) return YES;
+    SEL typeSel = NSSelectorFromString(@"sequenceType");
+    if ([item respondsToSelector:typeSel]) {
+        id type = nil;
+        @try { type = ((id (*)(id, SEL))objc_msgSend)(item, typeSel); } @catch (NSException *e) { type = nil; }
+        if ([type isKindOfClass:[NSString class]] &&
+            [(NSString *)type caseInsensitiveCompare:@"sequence"] == NSOrderedSame) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static NSArray *SpliceKit_browserRemoveTrashedItems(id event, NSArray *items) {
     if (items.count == 0) return items;
     SEL inTrashSel = NSSelectorFromString(@"_itemInTrash:");
@@ -17278,8 +17304,7 @@ static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                     info[@"class"] = NSStringFromClass([clip class]);
                     // A project sits in the browser next to the clips (FCP's isProject flag);
                     // it is not a source clip for add_clip_to_timeline.
-                    BOOL isProject = NO;
-                    if (SpliceKit_tryReadBoolSelector(clip, @"isProject", &isProject)) info[@"isProject"] = @(isProject);
+                    info[@"isProject"] = @(SpliceKit_browserItemIsProject(clip));
 
                     if ([clip respondsToSelector:@selector(displayName)]) {
                         id name = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName));
@@ -18012,11 +18037,10 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             // a timeline (the edit runs and places nothing), and the open timeline's own
             // project least of all.
             {
-                BOOL clipIsProject = NO;
-                BOOL flagged = SpliceKit_tryReadBoolSelector(clip, @"isProject", &clipIsProject);
+                BOOL clipIsProject = SpliceKit_browserItemIsProject(clip);
                 id currentSequence = [timelineModule respondsToSelector:@selector(sequence)]
                     ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, @selector(sequence)) : nil;
-                if ((flagged && clipIsProject) || (currentSequence && clip == currentSequence)) {
+                if (clipIsProject || (currentSequence && clip == currentSequence)) {
                     NSString *projectName = SpliceKit_browserClipName(clip);
                     result = @{@"error": [NSString stringWithFormat:
                         @"\"%@\" is %@, not a source clip: SpliceKit does not place a project (pasting one placed "
@@ -18542,6 +18566,154 @@ static NSDictionary *SpliceKit_handleMediaImportFile(NSDictionary *params) {
         }
     });
     return result ?: @{@"error": @"Import failed on main thread"};
+}
+
+// media.removeClip — take a source clip back out of an event's browser.
+//
+// The counterpart to media.importFile. Without it SpliceKit could put clips into a
+// library and never take them out: every import_media / import_url call in a test run
+// left a clip behind, and nothing short of Final Cut Pro's own UI could remove it.
+// -removeOwnedClipsObject: is the exact inverse of the -addOwnedClipsObject: the import
+// uses, so the clip goes the same way it came.
+//
+// Params:
+//   handle?  : str — a handle from browser.listClips or media.importFile
+//   name?    : str — exact display name, used when no handle is given
+//   event?   : str — case-insensitive substring match, narrows the search
+//   library? : str — case-insensitive substring match
+//   dryRun?  : bool — report what would be removed, change nothing
+//   includeProjects? : bool — allow removing a project (a whole timeline), off by default
+//
+// Returns { status, removed:[{name, event}], message } or an error naming what it
+// searched. Refuses a project: a project is a library item, not an owned clip, and
+// cleanup_temp_projects / Final Cut Pro's own delete is the way to remove one.
+static NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params) {
+    NSString *handle = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
+    NSString *name = [params[@"name"] isKindOfClass:[NSString class]] ? params[@"name"] : nil;
+    NSString *libHint = [params[@"library"] isKindOfClass:[NSString class]] ? params[@"library"] : nil;
+    NSString *eventHint = [params[@"event"] isKindOfClass:[NSString class]] ? params[@"event"] : nil;
+    BOOL dryRun = [params[@"dryRun"] boolValue];
+    BOOL includeProjects = [params[@"includeProjects"] boolValue];
+
+    if (handle.length == 0 && name.length == 0) {
+        return @{@"error": @"Pass `handle` (from browser_list_clips or import_media) or `name` "
+                           @"(the clip's name exactly as the browser shows it)."};
+    }
+
+    id wanted = nil;
+    if (handle.length > 0) {
+        wanted = SpliceKit_resolveHandle(handle);
+        if (!wanted) {
+            return @{@"error": [NSString stringWithFormat:
+                @"Handle '%@' no longer resolves. Handles are dropped when a project is "
+                @"reopened; call browser_list_clips() again for a fresh one.", handle]};
+        }
+    }
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id libs = ((id (*)(id, SEL))objc_msgSend)(
+                objc_getClass("FFLibraryDocument"), @selector(copyActiveLibraries));
+            if (![libs isKindOfClass:[NSArray class]] || [(NSArray *)libs count] == 0) {
+                result = @{@"error": @"No active library"};
+                return;
+            }
+
+            SEL dnSel = @selector(displayName);
+            SEL removeSel = NSSelectorFromString(@"removeOwnedClipsObject:");
+            NSMutableArray *removed = [NSMutableArray array];
+            NSMutableArray *searched = [NSMutableArray array];
+            NSUInteger projectCount = 0;
+
+            for (id library in (NSArray *)libs) {
+                if (libHint.length > 0) {
+                    NSString *libName = [library respondsToSelector:dnSel]
+                        ? ((id (*)(id, SEL))objc_msgSend)(library, dnSel) : @"";
+                    if (![[libName lowercaseString] containsString:[libHint lowercaseString]]) continue;
+                }
+                SEL eventsSel = NSSelectorFromString(@"events");
+                if (![library respondsToSelector:eventsSel]) continue;
+                id events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
+                if (![events isKindOfClass:[NSArray class]]) continue;
+
+                for (id event in (NSArray *)events) {
+                    NSString *eventName = [event respondsToSelector:dnSel]
+                        ? ((id (*)(id, SEL))objc_msgSend)(event, dnSel) : @"";
+                    if (eventHint.length > 0 &&
+                        ![[eventName lowercaseString] containsString:[eventHint lowercaseString]]) {
+                        continue;
+                    }
+                    [searched addObject:eventName ?: @"?"];
+
+                    // The clips belong to the event's FFMediaEventProject, which is what
+                    // answers -removeOwnedClipsObject: (and what media.importFile adds to).
+                    // The FFEventRecord from -events does not, so asking it directly found
+                    // nothing and skipped every event.
+                    id project = [event respondsToSelector:@selector(project)]
+                        ? ((id (*)(id, SEL))objc_msgSend)(event, @selector(project)) : nil;
+                    if (!project || ![project respondsToSelector:removeSel]) continue;
+
+                    for (id clip in SpliceKit_browserClipsOfEvent(event)) {
+                        NSString *clipName = [clip respondsToSelector:dnSel]
+                            ? ((id (*)(id, SEL))objc_msgSend)(clip, dnSel) : nil;
+                        BOOL match = wanted ? (clip == wanted)
+                                            : (clipName && [clipName isEqualToString:name]);
+                        if (!match) continue;
+
+                        BOOL clipIsProject = SpliceKit_browserItemIsProject(clip);
+                        if (clipIsProject && !includeProjects) {
+                            result = @{@"error": [NSString stringWithFormat:
+                                @"'%@' is a project, not a source clip. Removing a project removes a "
+                                @"whole timeline, so pass include_projects=True if that is what you mean; "
+                                @"cleanup_temp_projects removes SpliceKit's own scratch projects without "
+                                @"the flag.", clipName ?: @"?"]};
+                            return;
+                        }
+
+                        if (!dryRun) {
+                            ((void (*)(id, SEL, id))objc_msgSend)(project, removeSel, clip);
+                        }
+                        [removed addObject:@{@"name": clipName ?: @"",
+                                            @"event": eventName ?: @"",
+                                            @"kind": clipIsProject ? @"project" : @"clip"}];
+                        if (clipIsProject) projectCount++;
+                    }
+                }
+            }
+
+            if (removed.count == 0) {
+                result = @{@"error": [NSString stringWithFormat:
+                    @"No browser clip matching %@ in %@. browser_list_clips() lists every clip "
+                    @"with its event and handle.",
+                    wanted ? [NSString stringWithFormat:@"handle '%@'", handle]
+                           : [NSString stringWithFormat:@"name '%@'", name],
+                    searched.count > 0 ? [searched componentsJoinedByString:@", "]
+                                       : @"any event"]};
+                return;
+            }
+
+            result = @{
+                @"status": @"ok",
+                @"dryRun": @(dryRun),
+                @"removed": removed,
+                // Say which it was: "1 clip" when a project went is the sort of answer that
+                // makes someone think their timeline is still there.
+                @"message": [NSString stringWithFormat:@"%@ %lu %@ from the browser.%@",
+                    dryRun ? @"Would remove" : @"Removed",
+                    (unsigned long)removed.count,
+                    projectCount == removed.count
+                        ? (removed.count == 1 ? @"project" : @"projects")
+                        : (projectCount > 0
+                            ? @"item(s), projects among them,"
+                            : (removed.count == 1 ? @"clip" : @"clips")),
+                    dryRun ? @"" : @" The media files on disk are untouched."]
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result ?: @{@"error": @"Remove failed on main thread"};
 }
 
 static NSDictionary *SpliceKit_handleBrowserConnectClip(NSDictionary *params) {
@@ -34189,6 +34361,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleBrowserPlaceClipEdit(params);
     } else if ([method isEqualToString:@"media.importFile"]) {
         result = SpliceKit_handleMediaImportFile(params);
+    } else if ([method isEqualToString:@"media.removeClip"]) {
+        result = SpliceKit_handleMediaRemoveClip(params);
     }
     // menu.* namespace
     else if ([method isEqualToString:@"menu.execute"]) {

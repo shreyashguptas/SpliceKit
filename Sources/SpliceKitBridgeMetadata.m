@@ -191,6 +191,7 @@ static void SpliceKit_initBuiltinMetadata(void) {
 
             // media.*
             @"media.importFile": meta(@"modal", @"Imports a media file into the active event (may show import UI)."),
+            @"media.removeClip": meta(@"destructive", @"Removes a source clip from an event's browser. The media file on disk is untouched."),
 
             // roles.*
             @"roles.assign": meta(@"destructive", @"Assigns a video or audio role on the selected clip."),
