@@ -105,6 +105,7 @@ static NSArray *SpliceKit_allMotionTitleCandidatesOnSequence(id sequence);
 static NSInteger SpliceKit_laneForItem(id item);
 static NSString *SpliceKit_displayNameForItem(id item);
 static NSDictionary *SpliceKit_describeWindow(NSWindow *window);   // dialog tools, later in the file
+static NSDictionary *SpliceKit_describeWindowWithViewTree(NSWindow *window, BOOL includeViewTree);
 static NSString *SpliceKit_readClipRole(id clip);
 static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey);
 static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey);
@@ -12190,6 +12191,8 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     __block NSURL *mediaURL = nil;
     __block double frameRate = 24.0;
     __block id hexFormEffect = nil;
+    __block id effectStack = nil;
+    __block BOOL undoRegistered = NO;
 
     // Step 1: Get selected clip info on main thread
     SpliceKit_executeOnMainThread(^{
@@ -12341,9 +12344,16 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                     }
                 } @catch (NSException *e) {}
             }
-            SpliceKit_log(@"[Stabilize] heXFormEffect: %@ (class: %@)",
+            // The effect stack owns the undo scope for parameter changes (see step 4).
+            @try {
+                id stackClip = nil;
+                effectStack = SpliceKit_getSelectedClipEffectStack(timelineModule, &stackClip);
+            } @catch (NSException *e) {}
+
+            SpliceKit_log(@"[Stabilize] heXFormEffect: %@ (class: %@) effectStack: %@",
                 hexFormEffect ? @"found" : @"nil",
-                hexFormEffect ? NSStringFromClass([hexFormEffect class]) : @"n/a");
+                hexFormEffect ? NSStringFromClass([hexFormEffect class]) : @"n/a",
+                effectStack ? @"found" : @"nil");
 
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception getting clip info: %@", e.reason]};
@@ -12541,31 +12551,22 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     // Step 4: Apply position keyframes through FCP's undo system
     SpliceKit_executeOnMainThread(^{
         @try {
-            // Use FFUndoHandler for proper undo registration
-            id toolObj = selectedClip;
-            if ([selectedClip respondsToSelector:NSSelectorFromString(@"representedToolObject")]) {
-                id rto = ((id (*)(id, SEL))objc_msgSend)(selectedClip, NSSelectorFromString(@"representedToolObject"));
-                if (rto) toolObj = rto;
-            }
-
-            // Get project document and undo handler
-            id projDoc = nil;
+            // Undo scope. The previous route asked the clip for -projectDocument and then
+            // that document for -undoHandler; FFAnchoredClip has no -projectDocument on
+            // FCP 12.3, so undoHandler was always nil and stabilize left nothing on the
+            // undo stack. Effect-parameter changes are made undoable by the effect
+            // stack's own action scope, which is what set_inspector_property uses.
+            NSString *undoName = @"Stabilize Subject";
             @try {
-                projDoc = ((id (*)(id, SEL))objc_msgSend)(toolObj, NSSelectorFromString(@"projectDocument"));
-            } @catch(NSException *e) {}
+                SEL beginSel = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:");
+                if (effectStack && [effectStack respondsToSelector:beginSel]) {
+                    ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
+                        effectStack, beginSel, undoName, nil, YES);
+                    undoRegistered = YES;
+                }
+            } @catch (NSException *e) {}
 
-            id undoHandler = nil;
-            if (projDoc) {
-                @try {
-                    undoHandler = ((id (*)(id, SEL))objc_msgSend)(projDoc, NSSelectorFromString(@"undoHandler"));
-                } @catch(NSException *e) {}
-            }
-
-            // Begin undoable operation
-            if (undoHandler) {
-                ((void (*)(id, SEL, id))objc_msgSend)(undoHandler,
-                    NSSelectorFromString(@"undoableBegin:"), @"Subject Stabilize");
-            }
+            @try {
 
             // Set position keyframes using direct objc_msgSend with CMTime by value
             // CMTime is a 32-byte struct — on ARM64 it's passed in registers
@@ -12639,10 +12640,16 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                 objc_setAssociatedObject(hexFormEffect, "verifyY", @(ry), OBJC_ASSOCIATION_RETAIN);
             }
 
-            // End undoable operation
-            if (undoHandler) {
-                ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(undoHandler,
-                    NSSelectorFromString(@"undoableEnd:save:error:"), nil, YES, nil);
+            } @finally {
+                // Always close the scope, including when a keyframe write throws:
+                // an action left open wedges every later edit on this sequence.
+                @try {
+                    SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
+                    if (undoRegistered && [effectStack respondsToSelector:endSel]) {
+                        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(
+                            effectStack, endSel, undoName, YES, nil);
+                    }
+                } @catch (NSException *e) {}
             }
 
         } @catch (NSException *e) {
@@ -12674,6 +12681,8 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
         @"framesTracked": @(frameCount),
         @"keyframesApplied": @(keyframesSet),
         @"clipDuration": @(clipDuration),
+        @"undoName": undoRegistered ? @"Stabilize Subject" : [NSNull null],
+        @"undoRegistered": @(undoRegistered),
         @"referencePosition": @{
             @"x": @(refCenterX),
             @"y": @(refCenterY),
@@ -19357,6 +19366,21 @@ static double SpliceKit_channelValueAtTime(id channel, SpliceKit_CMTime time) {
     return 0;
 }
 
+// How many keyframes a channel carries; -1 when the channel cannot report it.
+// This is what makes an animated parameter visible: the value readers below return
+// a single number, so without a count there is no way to tell a static 0 from a
+// channel carrying hundreds of keyframes (stabilize_subject writes one per frame).
+static NSInteger SpliceKit_channelKeyframeCount(id channel) {
+    if (!channel) return -1;
+    @try {
+        SEL countSel = NSSelectorFromString(@"keyframeCount");
+        if ([channel respondsToSelector:countSel]) {
+            return ((NSInteger (*)(id, SEL))objc_msgSend)(channel, countSel);
+        }
+    } @catch (NSException *e) {}
+    return -1;
+}
+
 // Remove all existing keyframes so a constant write takes effect.
 BOOL SpliceKit_removeChannelKeyframes(id channel) {
     if (!channel) return NO;
@@ -19505,34 +19529,60 @@ static NSDictionary *SpliceKit_handleInspectorGet(NSDictionary *params) {
                     id xfEffect = [effectStack respondsToSelector:xfSel]
                         ? ((id (*)(id, SEL))objc_msgSend)(effectStack, xfSel) : nil;
                     if (xfEffect) {
+                        // Every value below is a single number. When a parameter is
+                        // animated that number says nothing, so record the keyframe count
+                        // alongside it: that is the only way the tool surface can show
+                        // what stabilize_subject (one keyframe per frame) actually did.
+                        NSMutableDictionary *kf = [NSMutableDictionary dictionary];
+                        void (^recordKeyframes)(NSString *, id) = ^(NSString *label, id axisChannel) {
+                            NSInteger n = SpliceKit_channelKeyframeCount(axisChannel);
+                            if (n > 0) kf[label] = @(n);
+                        };
                         // Position
                         id posCh = nil;
                         @try { posCh = ((id (*)(id, SEL))objc_msgSend)(xfEffect, NSSelectorFromString(@"positionChannel3D")); } @catch(NSException *e) {}
                         if (posCh) {
-                            xform[@"positionX"] = @(SpliceKit_channelValue(SpliceKit_subChannel(posCh, @"x")));
-                            xform[@"positionY"] = @(SpliceKit_channelValue(SpliceKit_subChannel(posCh, @"y")));
-                            xform[@"positionZ"] = @(SpliceKit_channelValue(SpliceKit_subChannel(posCh, @"z")));
+                            id px = SpliceKit_subChannel(posCh, @"x");
+                            id py = SpliceKit_subChannel(posCh, @"y");
+                            id pz = SpliceKit_subChannel(posCh, @"z");
+                            xform[@"positionX"] = @(SpliceKit_channelValue(px));
+                            xform[@"positionY"] = @(SpliceKit_channelValue(py));
+                            xform[@"positionZ"] = @(SpliceKit_channelValue(pz));
+                            recordKeyframes(@"positionX", px);
+                            recordKeyframes(@"positionY", py);
+                            recordKeyframes(@"positionZ", pz);
                         }
                         // Scale
                         id scaCh = nil;
                         @try { scaCh = ((id (*)(id, SEL))objc_msgSend)(xfEffect, NSSelectorFromString(@"scaleChannel3D")); } @catch(NSException *e) {}
                         if (scaCh) {
-                            xform[@"scaleX"] = @(SpliceKit_channelValue(SpliceKit_subChannel(scaCh, @"x")));
-                            xform[@"scaleY"] = @(SpliceKit_channelValue(SpliceKit_subChannel(scaCh, @"y")));
+                            id sx = SpliceKit_subChannel(scaCh, @"x");
+                            id sy = SpliceKit_subChannel(scaCh, @"y");
+                            xform[@"scaleX"] = @(SpliceKit_channelValue(sx));
+                            xform[@"scaleY"] = @(SpliceKit_channelValue(sy));
+                            recordKeyframes(@"scaleX", sx);
+                            recordKeyframes(@"scaleY", sy);
                         }
                         // Rotation
                         id rotCh = nil;
                         @try { rotCh = ((id (*)(id, SEL))objc_msgSend)(xfEffect, NSSelectorFromString(@"rotationChannel3D")); } @catch(NSException *e) {}
                         if (rotCh) {
-                            xform[@"rotation"] = @(SpliceKit_channelValue(SpliceKit_subChannel(rotCh, @"z")));
+                            id rz = SpliceKit_subChannel(rotCh, @"z");
+                            xform[@"rotation"] = @(SpliceKit_channelValue(rz));
+                            recordKeyframes(@"rotation", rz);
                         }
                         // Anchor
                         id ancCh = nil;
                         @try { ancCh = ((id (*)(id, SEL))objc_msgSend)(xfEffect, NSSelectorFromString(@"anchorChannel3D")); } @catch(NSException *e) {}
                         if (ancCh) {
-                            xform[@"anchorX"] = @(SpliceKit_channelValue(SpliceKit_subChannel(ancCh, @"x")));
-                            xform[@"anchorY"] = @(SpliceKit_channelValue(SpliceKit_subChannel(ancCh, @"y")));
+                            id ax = SpliceKit_subChannel(ancCh, @"x");
+                            id ay = SpliceKit_subChannel(ancCh, @"y");
+                            xform[@"anchorX"] = @(SpliceKit_channelValue(ax));
+                            xform[@"anchorY"] = @(SpliceKit_channelValue(ay));
+                            recordKeyframes(@"anchorX", ax);
+                            recordKeyframes(@"anchorY", ay);
                         }
+                        if (kf.count > 0) xform[@"keyframes"] = kf;
                     } else {
                         xform[@"positionX"] = @(0); xform[@"positionY"] = @(0);
                         xform[@"scaleX"] = @(100); xform[@"scaleY"] = @(100);
@@ -19552,6 +19602,8 @@ static NSDictionary *SpliceKit_handleInspectorGet(NSDictionary *params) {
                     if (volChan) {
                         audio[@"volume"] = @(SpliceKit_channelValue(volChan));
                         audio[@"volumeHandle"] = SpliceKit_storeHandle(volChan);
+                        NSInteger volKf = SpliceKit_channelKeyframeCount(volChan);
+                        if (volKf > 0) audio[@"keyframes"] = @{@"volume": @(volKf)};
                     }
                 } @catch (NSException *e) { audio[@"error"] = e.reason; }
                 props[@"audio"] = audio;
@@ -24960,6 +25012,107 @@ static BOOL SpliceKit_filePanelButtonTitleIsCancel(NSString *title) {
     return [t isEqualToString:@"cancel"];
 }
 
+// AppKit builds a checkbox as a plain NSButton whose cell both shows and highlights
+// its state by its contents; a radio button has the same cell shape and is told apart
+// by the image the cell draws. FCP additionally ships button subclasses with
+// "Checkbox" in the class name.
+//
+// The previous test was `className contains "Checkbox" || allowsMixedState`, which
+// matched neither: -allowsMixedState is NO on an ordinary two-state checkbox, and
+// FCP's Remove Attributes sheet is built from stock NSButtons. That sheet therefore
+// reported zero checkboxes and could not be driven.
+static BOOL SpliceKit_buttonIsCheckboxLike(NSButton *btn, BOOL *outIsRadio) {
+    if (outIsRadio) *outIsRadio = NO;
+    if (!btn) return NO;
+    @try {
+        NSString *cls = [btn className] ?: @"";
+        if ([cls rangeOfString:@"heckbox" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [cls rangeOfString:@"heckBox" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+
+        id cell = [btn cell];
+        if (![cell isKindOfClass:[NSButtonCell class]]) return NO;
+        NSButtonCell *bc = (NSButtonCell *)cell;
+
+        // Push, toggle and momentary buttons all differ here: only switch and radio
+        // cells use NSContentsCellMask for both.
+        if ([bc showsStateBy] != NSContentsCellMask) return NO;
+        if ([bc highlightsBy] != NSContentsCellMask) return NO;
+
+        NSString *imageName = [[bc image] name] ?: @"";
+        if ([imageName isEqualToString:@"NSRadioButton"]) {
+            if (outIsRadio) *outIsRadio = YES;
+        }
+        return YES;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+// Flat dump of a dialog's view hierarchy: class, title, frame and depth per node.
+// detect_dialog(view_tree=True) returns this so an unfamiliar sheet can be read
+// without guessing which AppKit class FCP used to build it. Iterative on purpose —
+// a recursive walker over a deep view tree is what crashed toggle_dialog_checkbox.
+static NSArray *SpliceKit_describeViewTree(NSView *root, NSUInteger maxNodes) {
+    NSMutableArray *nodes = [NSMutableArray array];
+    if (!root) return nodes;
+    if (maxNodes == 0) maxNodes = 2048;
+
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:@[root, @0]];
+    while (stack.count > 0 && nodes.count < maxNodes) {
+        NSArray *entry = [stack lastObject];
+        [stack removeLastObject];
+        NSView *view = entry[0];
+        NSInteger depth = [entry[1] integerValue];
+        if (!view) continue;
+
+        NSMutableDictionary *node = [NSMutableDictionary dictionary];
+        node[@"depth"] = @(depth);
+        node[@"class"] = NSStringFromClass([view class]);
+        @try {
+            node[@"frame"] = NSStringFromRect([view frame]);
+            node[@"hidden"] = @([view isHidden]);
+            if ([view respondsToSelector:@selector(identifier)]) {
+                NSString *ident = [view identifier];
+                if (ident.length > 0) node[@"identifier"] = ident;
+            }
+            if ([view isKindOfClass:[NSControl class]]) {
+                NSControl *ctl = (NSControl *)view;
+                node[@"enabled"] = @([ctl isEnabled]);
+                NSString *sv = [ctl stringValue];
+                if (sv.length > 0) node[@"stringValue"] = sv;
+            }
+            if ([view isKindOfClass:[NSButton class]]) {
+                NSButton *btn = (NSButton *)view;
+                node[@"title"] = [btn title] ?: @"";
+                node[@"state"] = @([btn state]);
+                id cell = [btn cell];
+                if ([cell isKindOfClass:[NSButtonCell class]]) {
+                    NSButtonCell *bc = (NSButtonCell *)cell;
+                    node[@"cellClass"] = NSStringFromClass([bc class]);
+                    node[@"showsStateBy"] = @([bc showsStateBy]);
+                    node[@"highlightsBy"] = @([bc highlightsBy]);
+                    NSString *imageName = [[bc image] name];
+                    if (imageName.length > 0) node[@"cellImage"] = imageName;
+                }
+            }
+        } @catch (NSException *e) {
+            node[@"error"] = e.reason ?: @"threw while being read";
+        }
+        [nodes addObject:node];
+
+        NSArray *subviews = SpliceKit_safeSubviews(view);
+        for (NSView *sub in [subviews reverseObjectEnumerator]) {
+            if (sub) [stack addObject:@[sub, @(depth + 1)]];
+        }
+    }
+    if (nodes.count >= maxNodes) {
+        [nodes addObject:@{@"note": [NSString stringWithFormat:
+            @"stopped at the %lu-node cap", (unsigned long)maxNodes]}];
+    }
+    return nodes;
+}
+
 static void SpliceKit_collectUIElements(NSView *view, NSMutableArray *buttons,
                                          NSMutableArray *textFields, NSMutableArray *labels,
                                          NSMutableArray *checkboxes, NSMutableArray *popups,
@@ -24976,11 +25129,17 @@ static void SpliceKit_collectUIElements(NSView *view, NSMutableArray *buttons,
             NSButton *btn = (NSButton *)subview;
             NSString *title = [btn title] ?: @"";
             NSInteger bezelStyle = [btn bezelStyle];
-            BOOL isCheckbox = ([[btn className] containsString:@"Checkbox"] || [btn allowsMixedState]);
+            BOOL isRadio = NO;
+            BOOL isCheckbox = SpliceKit_buttonIsCheckboxLike(btn, &isRadio);
             if (isCheckbox) {
+                NSInteger state = [btn state];
                 [checkboxes addObject:@{
+                    @"index": @(checkboxes.count),
                     @"title": title,
-                    @"checked": @([btn state] == NSControlStateValueOn),
+                    @"checked": @(state == NSControlStateValueOn),
+                    @"state": state == NSControlStateValueMixed ? @"mixed"
+                             : (state == NSControlStateValueOn ? @"on" : @"off"),
+                    @"kind": isRadio ? @"radio" : @"checkbox",
                     @"enabled": @([btn isEnabled]),
                     @"tag": @([btn tag])
                 }];
@@ -25058,7 +25217,7 @@ static void SpliceKit_collectUIElements(NSView *view, NSMutableArray *buttons,
     }
 }
 
-static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
+static NSDictionary *SpliceKit_describeWindowWithViewTree(NSWindow *window, BOOL includeViewTree) {
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
     info[@"title"] = [window title] ?: @"";
     info[@"class"] = NSStringFromClass([window class]);
@@ -25120,12 +25279,24 @@ static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
     }
     info[@"summary"] = summary ?: @"";
 
+    if (includeViewTree) {
+        info[@"viewTree"] = SpliceKit_describeViewTree([window contentView], 2048);
+    }
+
     SpliceKit_enrichFilePanelDescription(window, info);
 
     return info;
 }
 
+static NSDictionary *SpliceKit_describeWindow(NSWindow *window) {
+    return SpliceKit_describeWindowWithViewTree(window, NO);
+}
+
 static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
+    // view_tree dumps each dialog's raw view hierarchy. Without it an unfamiliar
+    // sheet can only be described through the element classes this file already
+    // knows about, so anything FCP builds from something else reads as empty.
+    BOOL includeViewTree = [params[@"viewTree"] boolValue] || [params[@"view_tree"] boolValue];
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -25137,7 +25308,7 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
             // Check for modal window
             NSWindow *modalWindow = [NSApp modalWindow];
             if (modalWindow) {
-                NSMutableDictionary *d = [SpliceKit_describeWindow(modalWindow) mutableCopy];
+                NSMutableDictionary *d = [SpliceKit_describeWindowWithViewTree(modalWindow, includeViewTree) mutableCopy];
                 d[@"type"] = @"modal";
                 [dialogs addObject:d];
             }
@@ -25146,7 +25317,7 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
             for (NSWindow *window in [NSApp windows]) {
                 NSWindow *sheet = [window attachedSheet];
                 if (sheet) {
-                    NSMutableDictionary *d = [SpliceKit_describeWindow(sheet) mutableCopy];
+                    NSMutableDictionary *d = [SpliceKit_describeWindowWithViewTree(sheet, includeViewTree) mutableCopy];
                     d[@"type"] = @"sheet";
                     d[@"parentWindow"] = [window title] ?: @"";
                     [dialogs addObject:d];
@@ -25177,7 +25348,7 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
                 );
 
                 if (isAlert || isProgressPanel || isSharePanel || isFCPDialog) {
-                    NSMutableDictionary *d = [SpliceKit_describeWindow(window) mutableCopy];
+                    NSMutableDictionary *d = [SpliceKit_describeWindowWithViewTree(window, includeViewTree) mutableCopy];
                     d[@"type"] = isAlert ? @"alert" : (isProgressPanel ? @"progress" :
                                   (isSharePanel ? @"share" : @"panel"));
                     // Avoid duplicates
@@ -25203,7 +25374,7 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
                         }
                     }
                     if (hasAlertButton) {
-                        NSMutableDictionary *d = [SpliceKit_describeWindow(window) mutableCopy];
+                        NSMutableDictionary *d = [SpliceKit_describeWindowWithViewTree(window, includeViewTree) mutableCopy];
                         d[@"type"] = @"alert";
                         BOOL isDupe = NO;
                         for (NSDictionary *existing in dialogs) {
@@ -25451,8 +25622,11 @@ static NSDictionary *SpliceKit_handleDialogFill(NSDictionary *params) {
 
 static NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params) {
     NSString *checkboxTitle = params[@"checkbox"];
+    NSNumber *indexParam = params[@"index"];
     NSNumber *checked = params[@"checked"]; // YES/NO
-    if (!checkboxTitle) return @{@"error": @"checkbox (title) parameter required"};
+    if (!checkboxTitle && !indexParam) {
+        return @{@"error": @"checkbox (title) or index parameter required"};
+    }
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -25466,7 +25640,11 @@ static NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params) {
             }
             if (!dialogWindow) { result = @{@"error": @"No dialog found"}; return; }
 
-            NSButton *targetCB = nil;
+            // Collect every checkbox first, in the same order detect_dialog reports
+            // them, so an index from that listing selects the same control and a miss
+            // can say what was actually there. Iterative walk: a recursive one over a
+            // deep view tree is what used to segfault this handler.
+            NSMutableArray<NSButton *> *found = [NSMutableArray array];
             const NSUInteger kMaxDialogViewNodes = 8192;
             NSMutableArray *stack = [NSMutableArray array];
             NSView *rootView = [dialogWindow contentView];
@@ -25478,17 +25656,16 @@ static NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params) {
                 }
             }
             NSUInteger visited = 0;
-            while (stack.count > 0 && !targetCB && visited < kMaxDialogViewNodes) {
+            while (stack.count > 0 && visited < kMaxDialogViewNodes) {
                 NSView *subview = stack.lastObject;
                 [stack removeLastObject];
                 visited++;
                 @try {
                     if ([subview isKindOfClass:[NSButton class]]) {
                         NSButton *btn = (NSButton *)subview;
-                        if (([[btn className] containsString:@"Checkbox"] || [btn allowsMixedState]) &&
-                            [[btn title] localizedCaseInsensitiveContainsString:checkboxTitle]) {
-                            targetCB = btn;
-                            break;
+                        BOOL isRadio = NO;
+                        if (SpliceKit_buttonIsCheckboxLike(btn, &isRadio)) {
+                            [found addObject:btn];
                         }
                     }
                     NSArray *subs = SpliceKit_safeSubviews(subview);
@@ -25503,19 +25680,51 @@ static NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params) {
                 }
             }
 
+            NSButton *targetCB = nil;
+            if (checkboxTitle.length > 0) {
+                for (NSButton *btn in found) {
+                    if ([[btn title] localizedCaseInsensitiveContainsString:checkboxTitle]) {
+                        targetCB = btn;
+                        break;
+                    }
+                }
+            } else {
+                NSInteger idx = [indexParam integerValue];
+                if (idx >= 0 && idx < (NSInteger)found.count) targetCB = found[(NSUInteger)idx];
+            }
+
             if (!targetCB) {
-                result = @{@"error": [NSString stringWithFormat:@"Checkbox '%@' not found", checkboxTitle]};
+                NSMutableArray *available = [NSMutableArray array];
+                for (NSButton *btn in found) {
+                    [available addObject:[btn title] ?: @""];
+                }
+                result = @{
+                    @"error": checkboxTitle.length > 0
+                        ? [NSString stringWithFormat:@"Checkbox '%@' not found", checkboxTitle]
+                        : [NSString stringWithFormat:@"No checkbox at index %@", indexParam],
+                    @"available": available,
+                    @"dialog": [dialogWindow title] ?: NSStringFromClass([dialogWindow class]),
+                };
                 return;
             }
 
             if (checked) {
                 [targetCB setState:[checked boolValue] ? NSControlStateValueOn : NSControlStateValueOff];
+                // setState: alone updates the control but does not run its action, so
+                // a sheet that enables its OK button from the action never sees it.
+                @try {
+                    SEL action = [targetCB action];
+                    id target = [targetCB target];
+                    if (action && target) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(target, action, targetCB);
+                    }
+                } @catch (NSException *e) {}
             } else {
-                // Toggle
                 [targetCB performClick:nil];
             }
-            result = @{@"status": @"ok", @"checkbox": [targetCB title],
-                      @"checked": @([targetCB state] == NSControlStateValueOn)};
+            result = @{@"status": @"ok", @"checkbox": [targetCB title] ?: @"",
+                      @"checked": @([targetCB state] == NSControlStateValueOn),
+                      @"checkboxCount": @(found.count)};
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }

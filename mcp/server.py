@@ -6754,7 +6754,7 @@ def get_playhead_position() -> str:
 # them so the AI can handle dialogs without human intervention.
 
 @splicekit_tool("detect_dialog")
-def detect_dialog() -> str:
+def detect_dialog(view_tree: bool = False) -> str:
     """Detect if any dialog, sheet, alert, or popup is currently showing in FCP.
 
     Returns details about all visible dialogs including:
@@ -6762,13 +6762,20 @@ def detect_dialog() -> str:
     - Title and all text labels
     - Available buttons with enabled/disabled status
     - Text fields (editable) with current values
-    - Checkboxes with checked/unchecked state
+    - Checkboxes and radio buttons, each with an index, title and on/off/mixed state
     - Popup menus with available options and current selection
 
     Call this before/after any action that might trigger a dialog,
     or to check if a dialog needs to be handled before proceeding.
+
+    Args:
+        view_tree: Also dump each dialog's raw view hierarchy (class, title, frame,
+                   depth, and for buttons the cell shape). Use this when a sheet
+                   reports no controls of the kind you expected — it shows what FCP
+                   actually built the sheet from. Capped at 2048 nodes per dialog.
     """
-    r = bridge.call("dialog.detect")
+    params = {"viewTree": True} if view_tree else {}
+    r = bridge.call("dialog.detect", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
@@ -6817,16 +6824,25 @@ def fill_dialog_field(value: str, index: int = 0) -> str:
 
 
 @splicekit_tool("toggle_dialog_checkbox")
-def toggle_dialog_checkbox(checkbox: str, checked: bool = None) -> str:
+def toggle_dialog_checkbox(checkbox: str = "", index: int = -1, checked: bool = None) -> str:
     """Toggle or set a checkbox in the currently showing dialog.
 
     Args:
         checkbox: Checkbox title (partial match, case-insensitive)
+        index: Checkbox index instead of a title, numbered as detect_dialog lists
+               them. Use this for a checkbox whose title is empty. -1 means unused.
         checked: True to check, False to uncheck, None to toggle
 
-    Use detect_dialog() first to see available checkboxes.
+    Use detect_dialog() first to see available checkboxes. On a miss the error
+    lists every checkbox the dialog actually has.
     """
-    params = {"checkbox": checkbox}
+    if not checkbox and index < 0:
+        return "Error: pass checkbox (a title) or index"
+    params = {}
+    if checkbox:
+        params["checkbox"] = checkbox
+    if index >= 0:
+        params["index"] = index
     if checked is not None:
         params["checked"] = checked
     r = bridge.call("dialog.checkbox", **params)
