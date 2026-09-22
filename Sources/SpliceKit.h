@@ -15,7 +15,7 @@
 #import <objc/message.h>
 
 #ifndef SPLICEKIT_VERSION
-#define SPLICEKIT_VERSION "3.1.148"
+#define SPLICEKIT_VERSION "unversioned"   // the build passes -DSPLICEKIT_VERSION from patcher/SpliceKit/Configuration/Version.xcconfig
 #endif
 
 // We keep strong refs to ObjC objects the caller might need later.
@@ -49,10 +49,29 @@ NSArray *SpliceKit_classesInImage(const char *imageName);
 NSDictionary *SpliceKit_methodsForClass(Class cls);
 NSArray *SpliceKit_allLoadedClasses(void);
 
+#pragma mark - Bridge allowed values (RPC validation)
+
+NSString *SpliceKit_joinAllowedValues(NSArray<NSString *> *values);
+NSString *SpliceKit_errorUnknownValue(NSString *label,
+                                      NSString *value,
+                                      NSArray<NSString *> *allowed,
+                                      NSString *hintTool);
+NSArray<NSString *> *SpliceKit_debugPresetNames(void);
+NSArray<NSString *> *SpliceKit_debugResetConfigScopes(void);
+NSDictionary<NSString *, NSString *> *SpliceKit_playbackActionMap(void);
+NSArray<NSString *> *SpliceKit_playbackActionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeBooleanOptionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeValueOptionNames(void);
+NSArray<NSString *> *SpliceKit_bridgeOptionNames(void);
+NSArray<NSString *> *SpliceKit_directTimelineActionNames(void);
+NSArray<NSString *> *SpliceKit_captionStylePresetIDs(void);
+
 // Run a block on the main thread and wait for it to finish.
 // Uses CFRunLoopPerformBlock so it works even during modal dialogs
 // (dispatch_sync deadlocks in that situation because the main queue stalls).
 void SpliceKit_executeOnMainThread(dispatch_block_t block);
+// Running total of main-thread dispatches abandoned at the 20s timeout.
+unsigned SpliceKit_mainThreadDispatchTimeoutCount(void);
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block);
 BOOL SpliceKit_isMainThreadInRPCDispatch(void);
 
@@ -358,9 +377,6 @@ void SpliceKit_setTimelineOverviewBarEnabled(BOOL enabled);
 // Custom NSView injected into FCP's timeline showing color-coded song structure.
 NSDictionary *SpliceKit_handleSectionsShow(NSDictionary *params);
 NSDictionary *SpliceKit_handleSectionsHide(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsAdd(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsRemove(NSDictionary *params);
-NSDictionary *SpliceKit_handleSectionsSetColor(NSDictionary *params);
 NSDictionary *SpliceKit_handleSectionsGet(NSDictionary *params);
 
 #pragma mark - Structure Blocks
@@ -368,9 +384,11 @@ NSDictionary *SpliceKit_handleSectionsGet(NSDictionary *params);
 // Color-coded section blocks above the timeline (verse/chorus/bridge/etc.).
 // Creates a connected storyline of labeled title clips from song structure data.
 void SpliceKit_installStructureBlockContextMenu(void);
-NSDictionary *SpliceKit_handleStructureGenerateBlocks(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureRemove(NSDictionary *params);
 NSDictionary *SpliceKit_handleStructureToggle(NSDictionary *params);
+
+// Remove a sequence's library item (temp FCPXML import projects from captions / structure).
+BOOL SpliceKit_deleteSequenceLibraryItem(id sequence);
 
 #endif /* SpliceKit_h */

@@ -38,8 +38,7 @@ enum WizardPanel: Int {
 enum PatchError: LocalizedError {
     case msg(String)
     /// User-prerequisite failure (e.g. Xcode CLT not installed, license not accepted).
-    /// Surfaces to the user normally but does NOT report to Sentry — these are
-    /// expected setup steps, not SpliceKit bugs.
+    /// Surfaces to the user normally; it is an expected setup step, not a SpliceKit bug.
     case userPrereq(String)
     var errorDescription: String? {
         switch self {
@@ -79,7 +78,6 @@ private func patcherLogWrite(_ text: String) {
         handle.write(line.data(using: .utf8) ?? Data())
         handle.closeFile()
     }
-    PatcherSentry.addBreadcrumb(text)
 }
 
 // MARK: - Model
@@ -98,8 +96,6 @@ class PatcherModel: ObservableObject {
     @Published var bridgeConnected = false
     @Published var isUpdateMode = false
     @Published var currentPanel: WizardPanel = .welcome
-    @Published var isSharingCrashLog = false
-    @Published var crashShareMessage: String?
     @Published private(set) var isLaunchInProgress = false
     @Published private(set) var isModdedFCPRunning = false
 
@@ -274,6 +270,11 @@ class PatcherModel: ObservableObject {
         shell("mkdir -p \(shellQuote(toolsDir))")
         if FileManager.default.fileExists(atPath: silenceBin) {
             shell("cp \(shellQuote(silenceBin)) \(shellQuote(toolsDir + "/silence-detector"))")
+        }
+        // The audio-levels helper (get_audio_levels) is built next to the silence detector.
+        let audioLevelsBin = (silenceBin as NSString).deletingLastPathComponent + "/audio-levels"
+        if FileManager.default.fileExists(atPath: audioLevelsBin) {
+            shell("cp \(shellQuote(audioLevelsBin)) \(shellQuote(toolsDir + "/audio-levels"))")
         }
         if FileManager.default.fileExists(atPath: parakeetBin) {
             shell("cp \(shellQuote(parakeetBin)) \(shellQuote(toolsDir + "/parakeet-transcriber"))")
@@ -454,124 +455,6 @@ class PatcherModel: ObservableObject {
         syncModdedFCPRunningState()
     }
 
-    /// Bundle the newest Final Cut Pro crash report together with SpliceKit's
-    /// own patcher and runtime logs into a single filebin.net bin, then copy
-    /// the shareable bin URL to the clipboard. Used by the "Share Logs" button
-    /// on the status panel so users can hand one link to support.
-    func shareLatestCrashLog() {
-        guard !isSharingCrashLog else { return }
-        isSharingCrashLog = true
-        crashShareMessage = "Uploading logs..."
-        errorMessage = nil
-
-        Task {
-            let result = await uploadSupportLogs()
-            await MainActor.run {
-                self.isSharingCrashLog = false
-                switch result {
-                case .success(let shareURL):
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(shareURL, forType: .string)
-                    self.crashShareMessage = "Copied to clipboard: \(shareURL)"
-                case .failure(let error):
-                    self.crashShareMessage = nil
-                    self.errorMessage = "Log share failed: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    private nonisolated func uploadSupportLogs() async -> Result<String, Error> {
-        var files: [(url: URL, name: String)] = []
-
-        if let crashURL = latestFCPCrashReportURL() {
-            files.append((crashURL, crashURL.lastPathComponent))
-        }
-
-        let logsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/SpliceKit")
-        let logNames = ["splicekit.log", "splicekit.previous.log",
-                        "patcher.log", "patcher.previous.log"]
-        for name in logNames {
-            let url = logsDir.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: url.path) {
-                files.append((url, name))
-            }
-        }
-
-        guard !files.isEmpty else {
-            return .failure(PatchError.msg("No crash report or SpliceKit logs found to share."))
-        }
-
-        let bin = randomBinID()
-        var uploadedCount = 0
-        var lastError: Error?
-
-        for file in files {
-            let data: Data
-            do {
-                data = try Data(contentsOf: file.url)
-            } catch {
-                lastError = error
-                continue
-            }
-            let encoded = file.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.name
-            guard let uploadURL = URL(string: "https://filebin.net/\(bin)/\(encoded)") else {
-                continue
-            }
-            var request = URLRequest(url: uploadURL)
-            request.httpMethod = "POST"
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-            request.setValue(file.name, forHTTPHeaderField: "Filename")
-            request.timeoutInterval = 120
-            do {
-                let (_, response) = try await URLSession.shared.upload(for: request, from: data)
-                guard let http = response as? HTTPURLResponse else {
-                    lastError = PatchError.msg("Invalid response from filebin.net.")
-                    continue
-                }
-                guard (200...299).contains(http.statusCode) else {
-                    lastError = PatchError.msg("filebin.net returned HTTP \(http.statusCode) for \(file.name).")
-                    continue
-                }
-                uploadedCount += 1
-            } catch {
-                lastError = error
-            }
-        }
-
-        if uploadedCount == 0 {
-            return .failure(lastError ?? PatchError.msg("Upload failed."))
-        }
-        return .success("https://filebin.net/\(bin)")
-    }
-
-    private nonisolated func latestFCPCrashReportURL() -> URL? {
-        let fm = FileManager.default
-        var newest: (url: URL, modified: Date)?
-        for directory in diagnosticReportDirectories() {
-            guard let urls = try? fm.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-
-            for url in urls {
-                let filename = url.lastPathComponent
-                guard filename.hasPrefix("Final Cut Pro"),
-                      ["ips", "crash", "txt"].contains(url.pathExtension.lowercased()),
-                      let modified = fileModificationDate(at: url) else {
-                    continue
-                }
-                if newest == nil || modified > newest!.modified {
-                    newest = (url, modified)
-                }
-            }
-        }
-        return newest?.url
-    }
-
     private nonisolated func diagnosticReportDirectories() -> [URL] {
         let fm = FileManager.default
         let roots = [
@@ -585,13 +468,6 @@ class PatcherModel: ObservableObject {
             directories.append(root.appendingPathComponent("Retired", isDirectory: true))
         }
         return directories.filter { fm.fileExists(atPath: $0.path) }
-    }
-
-    private nonisolated func randomBinID() -> String {
-        let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
-        var id = "splicekit-"
-        for _ in 0..<16 { id.append(alphabet.randomElement()!) }
-        return id
     }
 
     func patch() {
@@ -616,13 +492,7 @@ class PatcherModel: ObservableObject {
                     self.errorMessage = error.localizedDescription
                     self.appendLog("ERROR: \(error.localizedDescription)")
                     if (error as? PatchError)?.isUserPrereq == true {
-                        // User prerequisite (e.g. Xcode CLT) — surfaced to the user
-                        // but not a SpliceKit bug, so don't pollute Sentry.
-                        self.appendLog("Skipping Sentry report: user-prerequisite failure.")
-                    } else {
-                        PatcherSentry.capture(error: error,
-                                              context: "patch.run",
-                                              extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
+                        self.appendLog("This is a setup prerequisite on this Mac, not a SpliceKit failure.")
                     }
                 }
             }
@@ -641,8 +511,8 @@ class PatcherModel: ObservableObject {
         // (not patching, not launching, not running) — it does not verify the
         // modded bundle is still on disk. If the user deleted it or the patch
         // never completed, NSWorkspace.openApplication surfaces this as a raw
-        // NSCocoaErrorDomain Code 4 ("file doesn't exist") in Sentry with no
-        // actionable message. Catch it early with a clear log line instead.
+        // NSCocoaErrorDomain Code 4 ("file doesn't exist") with no actionable
+        // message. Catch it early with a clear log line instead.
         guard FileManager.default.fileExists(atPath: binary) else {
             appendLog("Cannot launch: modded Final Cut Pro is missing at \(moddedApp). Run the patch again from the Welcome panel.")
             syncModdedFCPRunningState()
@@ -696,9 +566,6 @@ class PatcherModel: ObservableObject {
                     self.isLaunchInProgress = false
                     self.syncModdedFCPRunningState()
                     self.appendLog("Failed to launch Final Cut Pro: \(error.localizedDescription)")
-                    PatcherSentry.capture(error: error,
-                                          context: "patcher.launch",
-                                          extras: ["binary": binary])
                     return
                 }
                 guard let runningApp else {
@@ -794,9 +661,6 @@ class PatcherModel: ObservableObject {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.appendLog("ERROR: \(error.localizedDescription)")
-                    PatcherSentry.capture(error: error,
-                                          context: "patch.update",
-                                          extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
                 }
             }
             await MainActor.run {
@@ -882,6 +746,10 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: bundledSilence) {
             shell("cp '\(bundledSilence)' '\(silenceBin)'")
         }
+        let bundledAudioLevels = (Bundle.main.resourcePath ?? "") + "/tools/audio-levels"
+        if FileManager.default.fileExists(atPath: bundledAudioLevels) {
+            shell("cp '\(bundledAudioLevels)' '\(buildDir)/audio-levels'")
+        }
 
         let parakeetBin = buildDir + "/parakeet-transcriber"
         let bundledParakeet = (Bundle.main.resourcePath ?? "") + "/tools/parakeet-transcriber"
@@ -927,36 +795,6 @@ class PatcherModel: ObservableObject {
             </dict></plist>
             """
         try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
-        if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
-        }
-
-        // Install BRAW plugin bundles into FCP.app/Contents/PlugIns/
-        // Without these, FCP has no registered VideoToolbox decoder or
-        // MediaToolbox format reader for .braw files — drag/drop and Import
-        // Media both silently fail. The bundles were staged into our app
-        // Resources by bundle_resources.sh.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Installed SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Installed SpliceKitBRAWImport.bundle")
-            }
-        } else {
-            await logAsync("WARNING: BRAW plugin bundles missing from patcher Resources")
-        }
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
@@ -1019,9 +857,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths
@@ -1161,6 +997,10 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: bundledSilence) {
             shell("cp '\(bundledSilence)' '\(silenceBin)'")
         }
+        let bundledAudioLevels = (Bundle.main.resourcePath ?? "") + "/tools/audio-levels"
+        if FileManager.default.fileExists(atPath: bundledAudioLevels) {
+            shell("cp '\(bundledAudioLevels)' '\(buildDir)/audio-levels'")
+        }
 
         let parakeetBin = buildDir + "/parakeet-transcriber"
         let bundledParakeet = (Bundle.main.resourcePath ?? "") + "/tools/parakeet-transcriber"
@@ -1201,32 +1041,6 @@ class PatcherModel: ObservableObject {
             </dict></plist>
             """
         try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
-        if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
-        }
-
-        // Refresh BRAW plugin bundles on upgrade. Same reasoning as fresh
-        // install — FCP needs the VT decoder + FormatReader bundles in
-        // PlugIns/ for .braw files to be recognized and playable.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Updated SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Updated SpliceKitBRAWImport.bundle")
-            }
-        }
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
@@ -1266,9 +1080,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths
@@ -1570,37 +1382,8 @@ class PatcherModel: ObservableObject {
                 appendLog(line)
             }
 
-            // Only report to Sentry if there's an actual failure signal. A user
-            // quitting FCP within 90s after launching it from the patcher is
-            // normal and should not produce a crash event. Real signals:
-            //   1. A FCP crash report newer than launchTime exists.
-            //   2. The injected dylib never initialized (splicekit.log unchanged).
-            //   3. Runtime was extremely short (< 5s) — likely instant exit.
-            let hasCrashReport = latestCrashReportURL(after: launchTime) != nil
-            let dylibNeverLoaded = diagnostics.contains {
-                $0.contains("dylib likely never initialized")
-            }
-            let cleanShutdown = diagnostics.contains {
-                $0.contains("App terminating") || $0.contains("Server socket closed")
-            }
-            let abnormal = hasCrashReport || dylibNeverLoaded || (runtime < 5 && !cleanShutdown)
-
-            if abnormal {
-                PatcherSentry.captureMessage(
-                    "Final Cut Pro terminated shortly after launch",
-                    level: .error,
-                    context: "patcher.launch_termination",
-                    extras: [
-                        "runtime_seconds": runtime,
-                        "has_crash_report": hasCrashReport,
-                        "dylib_never_loaded": dylibNeverLoaded,
-                        "clean_shutdown": cleanShutdown,
-                        "diagnostics": diagnostics
-                    ]
-                )
-            } else {
-                appendLog("Skipping Sentry report: no crash report and dylib initialized cleanly (likely user-initiated quit).")
-            }
+            // Nothing is reported anywhere: the diagnostics above are the whole
+            // record and stay in the patcher log on this Mac.
         }
         if launchedFCPRunningApp?.processIdentifier == app.processIdentifier {
             launchedFCPRunningApp = nil
@@ -1639,16 +1422,10 @@ class PatcherModel: ObservableObject {
     }
 
     private nonisolated func setStepAsync(_ step: PatchStep) async {
-        PatcherSentry.addBreadcrumb(step.rawValue,
-                                    category: "patch.step",
-                                    data: ["step": step.rawValue])
         await MainActor.run { self.currentStep = step }
     }
 
     private nonisolated func completeStepAsync(_ step: PatchStep) async {
-        PatcherSentry.addBreadcrumb("Completed \(step.rawValue)",
-                                    category: "patch.step",
-                                    data: ["step": step.rawValue, "status": "completed"])
         await MainActor.run { _ = self.completedSteps.insert(step) }
     }
 }

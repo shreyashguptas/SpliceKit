@@ -90,6 +90,164 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
     return normalized * lengthPenalty;
 }
 
+#pragma mark - Swift macro plugin path (FoundationModels @Generable, etc.)
+
+static NSString *SpliceKitCachedSwiftMacroPluginDirectory = nil;
+static BOOL SpliceKitSwiftMacroPluginDirectoryLookupDone = NO;
+
+static NSString *SpliceKitSwiftMacroPluginDirectory(void) {
+    if (SpliceKitSwiftMacroPluginDirectoryLookupDone) {
+        return SpliceKitCachedSwiftMacroPluginDirectory;
+    }
+    SpliceKitSwiftMacroPluginDirectoryLookupDone = YES;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *xcodeAppPlugins =
+        @"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins";
+    if ([fm fileExistsAtPath:xcodeAppPlugins]) {
+        SpliceKitCachedSwiftMacroPluginDirectory = xcodeAppPlugins;
+        return xcodeAppPlugins;
+    }
+
+    NSTask *select = [[NSTask alloc] init];
+    select.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcode-select"];
+    select.arguments = @[@"-p"];
+    NSPipe *selectOut = [NSPipe pipe];
+    select.standardOutput = selectOut;
+    select.standardError = [NSPipe pipe];
+    @try {
+        [select launch];
+        [select waitUntilExit];
+        if (select.terminationStatus == 0) {
+            NSData *data = [selectOut.fileHandleForReading readDataToEndOfFile];
+            NSString *devRoot = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            devRoot = [devRoot stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (devRoot.length) {
+                NSString *plugins = [devRoot stringByAppendingPathComponent:
+                    @"Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"];
+                if ([fm fileExistsAtPath:plugins]) {
+                    SpliceKitCachedSwiftMacroPluginDirectory = plugins;
+                    return plugins;
+                }
+            }
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+    }
+
+    return nil;
+}
+
+static NSArray<NSString *> *SpliceKitSwiftArgumentsForScriptPath(NSString *scriptPath) {
+    NSString *pluginDir = SpliceKitSwiftMacroPluginDirectory();
+    if (pluginDir.length) {
+        return @[@"-plugin-path", pluginDir, scriptPath];
+    }
+    return @[scriptPath];
+}
+
+static NSString *SpliceKitFirstReadableSwiftErrorLine(NSString *stderrText) {
+    if (stderrText.length == 0) {
+        return @"Unknown error";
+    }
+    NSArray<NSString *> *lines = [stderrText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length == 0) {
+            continue;
+        }
+        if ([trimmed containsString:@"error:"] || [trimmed hasSuffix:@": error"]) {
+            return trimmed;
+        }
+    }
+    NSString *trimmed = [stderrText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length > 400) {
+        return [trimmed substringToIndex:400];
+    }
+    return trimmed;
+}
+
+static NSString *SpliceKitAppleIntelligenceMacroPluginErrorMessage(void) {
+    return @"Apple Intelligence requires Xcode (Swift macro plugins for FoundationModels). "
+           @"Install Xcode from the App Store, then try again.";
+}
+
+static BOOL SpliceKitStderrIndicatesMissingSwiftMacroPlugin(NSString *stderrText) {
+    return stderrText.length > 0 && [stderrText containsString:@"plugin for module"];
+}
+
+static NSString *SpliceKitFormatSwiftScriptFailure(NSString *stderrText,
+                                                   BOOL usedPluginPath,
+                                                   NSString *prefix) {
+    if (!usedPluginPath && SpliceKitStderrIndicatesMissingSwiftMacroPlugin(stderrText)) {
+        return SpliceKitAppleIntelligenceMacroPluginErrorMessage();
+    }
+    return [NSString stringWithFormat:@"%@%@", prefix, SpliceKitFirstReadableSwiftErrorLine(stderrText)];
+}
+
+typedef void (^SpliceKitSwiftScriptCompletion)(int terminationStatus,
+                                               NSString *stdoutText,
+                                               NSString *stderrText);
+
+static void SpliceKitRunSwiftScriptAtPath(NSString *scriptPath, SpliceKitSwiftScriptCompletion completion) {
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/swift"];
+    task.arguments = SpliceKitSwiftArgumentsForScriptPath(scriptPath);
+
+    NSPipe *outputPipe = [NSPipe pipe];
+    NSPipe *errorPipe = [NSPipe pipe];
+    task.standardOutput = outputPipe;
+    task.standardError = errorPipe;
+
+    NSMutableData *outputData = [NSMutableData data];
+    NSMutableData *errorData = [NSMutableData data];
+    NSFileHandle *outputHandle = outputPipe.fileHandleForReading;
+    NSFileHandle *errorHandle = errorPipe.fileHandleForReading;
+
+    outputHandle.readabilityHandler = ^(NSFileHandle *handle) {
+        NSData *chunk = handle.availableData;
+        if (chunk.length) {
+            [outputData appendData:chunk];
+        }
+    };
+    errorHandle.readabilityHandler = ^(NSFileHandle *handle) {
+        NSData *chunk = handle.availableData;
+        if (chunk.length) {
+            [errorData appendData:chunk];
+        }
+    };
+
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    task.terminationHandler = ^(NSTask *finishedTask) {
+        outputHandle.readabilityHandler = nil;
+        errorHandle.readabilityHandler = nil;
+        NSData *tailOut = [outputHandle readDataToEndOfFile];
+        NSData *tailErr = [errorHandle readDataToEndOfFile];
+        if (tailOut.length) {
+            [outputData appendData:tailOut];
+        }
+        if (tailErr.length) {
+            [errorData appendData:tailErr];
+        }
+        (void)finishedTask;
+        dispatch_semaphore_signal(done);
+    };
+
+    NSError *launchError = nil;
+    if (![task launchAndReturnError:&launchError]) {
+        outputHandle.readabilityHandler = nil;
+        errorHandle.readabilityHandler = nil;
+        completion(-1, @"", launchError.localizedDescription ?: @"Failed to launch swift");
+        return;
+    }
+
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+
+    NSString *stdoutText = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding] ?: @"";
+    NSString *stderrText = [[NSString alloc] initWithData:errorData encoding:NSUTF8StringEncoding] ?: @"";
+    completion((int)task.terminationStatus, stdoutText, stderrText);
+}
+
 static NSColor *FCPPaletteColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
     return [NSColor colorWithSRGBRed:r green:g blue:b alpha:a];
 }
@@ -4933,41 +5091,37 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDate *swiftStart = [NSDate date];
-        NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/swift"];
-        task.arguments = @[scriptPath];
+        BOOL usedPluginPath = SpliceKitSwiftMacroPluginDirectory().length > 0;
 
-        NSPipe *outputPipe = [NSPipe pipe];
-        NSPipe *errorPipe = [NSPipe pipe];
-        task.standardOutput = outputPipe;
-        task.standardError = errorPipe;
+        SpliceKit_log(@"[AppleAI] Swift process launching (plugin-path=%@)...",
+                      usedPluginPath ? @"yes" : @"no");
 
-        NSError *launchError = nil;
-        [task launchAndReturnError:&launchError];
-        if (launchError) {
-            SpliceKit_log(@"[AppleAI] Failed to launch swift: %@", launchError.localizedDescription);
+        SpliceKitRunSwiftScriptAtPath(scriptPath, ^(int terminationStatus, NSString *output, NSString *errorOutput) {
+        NSTimeInterval swiftElapsed = -[swiftStart timeIntervalSinceNow];
+
+        if (terminationStatus == -1) {
+            SpliceKit_log(@"[AppleAI] Failed to launch swift: %@", errorOutput);
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, [NSString stringWithFormat:@"Failed to launch AI: %@", launchError.localizedDescription]);
+                completion(nil, [NSString stringWithFormat:@"Failed to launch AI: %@", errorOutput]);
             });
             return;
         }
 
-        SpliceKit_log(@"[AppleAI] Swift process launched, waiting for response...");
-        [task waitUntilExit];
-        NSTimeInterval swiftElapsed = -[swiftStart timeIntervalSinceNow];
-
-        NSData *outputData = [outputPipe.fileHandleForReading readDataToEndOfFile];
-        NSData *errorData = [errorPipe.fileHandleForReading readDataToEndOfFile];
-        NSString *output = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding];
-        NSString *errorOutput = [[NSString alloc] initWithData:errorData encoding:NSUTF8StringEncoding];
-
         SpliceKit_log(@"[AppleAI] Swift process exited: status=%d, elapsed=%.1fs, output=%lu bytes, stderr=%lu bytes",
-                      task.terminationStatus, swiftElapsed,
-                      (unsigned long)outputData.length, (unsigned long)errorData.length);
+                      terminationStatus, swiftElapsed,
+                      (unsigned long)output.length, (unsigned long)errorOutput.length);
 
-        if (task.terminationStatus != 0) {
-            // If FoundationModels isn't available, fall back to keyword matching
-            SpliceKit_log(@"[AppleAI] Script failed (status %d): %@", task.terminationStatus, errorOutput);
+        if (terminationStatus != 0) {
+            SpliceKit_log(@"[AppleAI] Script failed (status %d): %@", terminationStatus, errorOutput);
+            if (!usedPluginPath && SpliceKitStderrIndicatesMissingSwiftMacroPlugin(errorOutput)) {
+                NSString *msg = SpliceKitAppleIntelligenceMacroPluginErrorMessage();
+                NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
+                SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total | FAILED (no Xcode macros) ═══", totalElapsed);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(nil, msg);
+                });
+                return;
+            }
             NSArray *fallback = [self keywordFallback:query];
             NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
             SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total | fallback=%lu actions | FAILED ═══",
@@ -4976,15 +5130,27 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
                 if (fallback.count > 0) {
                     completion(fallback, nil);
                 } else {
-                    completion(nil, @"Apple Intelligence not available. Try a more specific command name.");
+                    NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
+                                                                         @"Apple Intelligence failed: ");
+                    completion(nil, detail);
                 }
+            });
+            return;
+        }
+
+        NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmedOutput.length == 0 && errorOutput.length > 0) {
+            NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
+                                                                 @"Apple Intelligence failed: ");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(nil, detail);
             });
             return;
         }
 
         // Parse JSON output
         NSDate *parseStart = [NSDate date];
-        output = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        output = trimmedOutput;
 
         // Extract JSON from output (may have extra text around it)
         NSRange jsonStart = [output rangeOfString:@"["];
@@ -5022,6 +5188,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
             SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total (swift=%.1fs parse=%.3fs) | %lu action(s) ═══",
                           totalElapsed, swiftElapsed, parseElapsed, (unsigned long)corrected.count);
             completion(corrected, nil);
+        });
         });
     });
 }
@@ -7522,51 +7689,41 @@ static NSString * const kGemmaSystemPrompt =
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [self updateGemmaStatus:@"Launching Apple Intelligence+..."];
         NSDate *swiftStart = [NSDate date];
-        NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/swift"];
-        task.arguments = @[scriptPath];
+        BOOL usedPluginPath = SpliceKitSwiftMacroPluginDirectory().length > 0;
 
-        NSPipe *outputPipe = [NSPipe pipe];
-        NSPipe *errorPipe = [NSPipe pipe];
-        task.standardOutput = outputPipe;
-        task.standardError = errorPipe;
-
-        NSError *launchError = nil;
-        [task launchAndReturnError:&launchError];
-        if (launchError) {
-            SpliceKit_log(@"[AppleAI+] Failed to launch: %@", launchError.localizedDescription);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, [NSString stringWithFormat:@"Failed to launch: %@", launchError.localizedDescription]);
-            });
-            return;
-        }
-
-        SpliceKit_log(@"[AppleAI+] Swift process launched (pid=%d)", task.processIdentifier);
         [self updateGemmaStatus:@"Apple Intelligence+ thinking..."];
-        [task waitUntilExit];
+        SpliceKitRunSwiftScriptAtPath(scriptPath, ^(int terminationStatus, NSString *output, NSString *errorOutput) {
         NSTimeInterval swiftElapsed = -[swiftStart timeIntervalSinceNow];
-
-        NSData *outputData = [outputPipe.fileHandleForReading readDataToEndOfFile];
-        NSData *errorData = [errorPipe.fileHandleForReading readDataToEndOfFile];
-        NSString *output = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding];
-        NSString *errorOutput = [[NSString alloc] initWithData:errorData encoding:NSUTF8StringEncoding];
-
         NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-        SpliceKit_log(@"[AppleAI+] Swift exited: status=%d, elapsed=%.1fs, output=%lu bytes, stderr=%lu bytes",
-                      task.terminationStatus, swiftElapsed,
-                      (unsigned long)outputData.length, (unsigned long)errorData.length);
 
-        if (task.terminationStatus != 0) {
-            SpliceKit_log(@"[AppleAI+] Script failed: %@", errorOutput);
-            SpliceKit_log(@"[AppleAI+] ═══ Done: %.1fs total | FAILED ═══", totalElapsed);
+        if (terminationStatus == -1) {
+            SpliceKit_log(@"[AppleAI+] Failed to launch: %@", errorOutput);
             dispatch_async(dispatch_get_main_queue(), ^{
-                NSString *errMsg = errorOutput.length > 200 ? [errorOutput substringToIndex:200] : errorOutput;
-                completion(nil, [NSString stringWithFormat:@"Apple Intelligence+ failed: %@", errMsg]);
+                completion(nil, [NSString stringWithFormat:@"Failed to launch: %@", errorOutput]);
             });
             return;
         }
 
-        NSString *result = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        SpliceKit_log(@"[AppleAI+] Swift exited: status=%d, elapsed=%.1fs, output=%lu bytes, stderr=%lu bytes",
+                      terminationStatus, swiftElapsed,
+                      (unsigned long)output.length, (unsigned long)errorOutput.length);
+
+        NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+        if (terminationStatus != 0 || trimmedOutput.length == 0) {
+            if (terminationStatus != 0 || errorOutput.length > 0) {
+                SpliceKit_log(@"[AppleAI+] Script failed: %@", errorOutput);
+                SpliceKit_log(@"[AppleAI+] ═══ Done: %.1fs total | FAILED ═══", totalElapsed);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
+                                                                         @"Apple Intelligence+ failed: ");
+                    completion(nil, detail);
+                });
+                return;
+            }
+        }
+
+        NSString *result = trimmedOutput;
         // Treat "null" output as success with no text (model completed tools but didn't summarize)
         if (result.length == 0 || [result isEqualToString:@"null"] || [result isEqualToString:@"(null)"]) {
             result = @"Done.";
@@ -7586,6 +7743,7 @@ static NSString * const kGemmaSystemPrompt =
 
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(result.length > 0 ? result : @"Done.", nil);
+        });
         });
     });
 }

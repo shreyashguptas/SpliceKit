@@ -10,7 +10,7 @@ void SpliceKitMKV_Bootstrap(void);
 
 // Phased bootstrap parallel to SpliceKitURLImport_bootstrapAtLaunchPhase.
 // Accepts @"will-launch" or @"did-launch" (anything else is treated as
-// did-launch). BRAW-parity: register the provider/plugin shims as early as
+// did-launch). Register the provider/plugin shims as early as
 // possible so the Media Import browser's very first node-enumeration pass
 // sees them.
 void SpliceKitMKV_bootstrapAtLaunchPhase(NSString *phase);

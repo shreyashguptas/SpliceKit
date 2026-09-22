@@ -7,19 +7,54 @@ import unittest
 from pathlib import Path
 
 
-class FakeFastMCP:
-    def __init__(self, name, instructions=""):
+# Wire spellings of the ToolAnnotations fields (what an MCP client receives).
+_ANNOTATION_ALIASES = {
+    "read_only_hint": "readOnlyHint",
+    "destructive_hint": "destructiveHint",
+    "idempotent_hint": "idempotentHint",
+    "open_world_hint": "openWorldHint",
+    "title": "title",
+}
+
+
+class FakeToolAnnotations(dict):
+    """Stands in for mcp.types.ToolAnnotations (mcp 2.x): built with snake_case keyword
+    arguments like the real model, readable by the tests under the camelCase names the
+    real model serializes to (model_dump(by_alias=True))."""
+
+    def __init__(self, **kwargs):
+        unknown = set(kwargs) - set(_ANNOTATION_ALIASES)
+        if unknown:
+            raise TypeError(f"unexpected ToolAnnotations fields: {sorted(unknown)}")
+        super().__init__({_ANNOTATION_ALIASES[k]: v for k, v in kwargs.items()})
+
+    def model_dump(self, by_alias=True, exclude_none=True):
+        return dict(self)
+
+
+class FakeToolError(Exception):
+    """Stands in for mcp.server.mcpserver.exceptions.ToolError."""
+
+
+class FakeMCPServer:
+    """Stands in for mcp.server.mcpserver.MCPServer (mcp 2.x): records every tool,
+    resource and prompt registration so the tests can inspect them without the SDK."""
+
+    def __init__(self, name=None, title=None, description=None, instructions=None,
+                 website_url=None, icons=None, version="", **kwargs):
         self.name = name
         self.instructions = instructions
+        self.version = version
         self.tools = []
         self.resources = []
         self.prompts = []
+        self._tool_manager = types.SimpleNamespace(list_tools=lambda: [])
 
-    def tool(self, annotations=None):
+    def tool(self, name=None, title=None, description=None, annotations=None, **kwargs):
         def decorator(func):
             self.tools.append(
                 {
-                    "name": func.__name__,
+                    "name": name or func.__name__,
                     "annotations": dict(annotations or {}),
                     "func": func,
                 }
@@ -41,19 +76,32 @@ class FakeFastMCP:
         return decorator
 
 
+# Kept under the old name for tests written against it.
+FakeFastMCP = FakeMCPServer
+
+
 def load_server_module():
     repo_root = Path(__file__).resolve().parents[1]
     module_path = repo_root / "mcp" / "server.py"
 
+    # The layout of the mcp 2.x package that mcp/server.py imports from. The fake
+    # mcpserver module has no Image attribute on purpose: the server treats a missing
+    # Image helper as "return text instead of inline images" and the tests rely on that.
     fake_mcp = types.ModuleType("mcp")
     fake_mcp_server = types.ModuleType("mcp.server")
-    fake_fastmcp = types.ModuleType("mcp.server.fastmcp")
-    fake_fastmcp.FastMCP = FakeFastMCP
+    fake_mcpserver = types.ModuleType("mcp.server.mcpserver")
+    fake_mcpserver.MCPServer = FakeMCPServer
+    fake_types = types.ModuleType("mcp.types")
+    fake_types.ToolAnnotations = FakeToolAnnotations
+    fake_exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
+    fake_exceptions.ToolError = FakeToolError
 
     injected_modules = {
         "mcp": fake_mcp,
         "mcp.server": fake_mcp_server,
-        "mcp.server.fastmcp": fake_fastmcp,
+        "mcp.server.mcpserver": fake_mcpserver,
+        "mcp.server.mcpserver.exceptions": fake_exceptions,
+        "mcp.types": fake_types,
     }
     previous_modules = {name: sys.modules.get(name) for name in injected_modules}
 
@@ -85,6 +133,31 @@ class MCPToolAnnotationTests(unittest.TestCase):
         for name, tool in self.tools.items():
             self.assertTrue(required.issubset(tool["annotations"]), name)
 
+    def test_every_registered_tool_is_in_a_classification_set(self):
+        read_only = self.module.READ_ONLY_TOOLS
+        destructive = self.module.DESTRUCTIVE_TOOLS
+        local_write = self.module.LOCAL_WRITE_TOOLS
+        for name in self.tools:
+            classified = name in read_only or name in destructive or name in local_write
+            self.assertTrue(
+                classified,
+                f"{name} is not in READ_ONLY_TOOLS, DESTRUCTIVE_TOOLS, or LOCAL_WRITE_TOOLS",
+            )
+        self.assertEqual(
+            read_only | destructive | local_write,
+            set(self.tools.keys()),
+            "the three sets together must name exactly the registered tools",
+        )
+        # A partition, not just a cover: a tool in two sets gets whichever hint the
+        # first branch of _tool_annotations happens to test for, which is a silent
+        # way to advertise a destructive tool as read-only.
+        for left, right, names in (
+            (read_only, destructive, "READ_ONLY_TOOLS and DESTRUCTIVE_TOOLS"),
+            (read_only, local_write, "READ_ONLY_TOOLS and LOCAL_WRITE_TOOLS"),
+            (destructive, local_write, "DESTRUCTIVE_TOOLS and LOCAL_WRITE_TOOLS"),
+        ):
+            self.assertEqual(left & right, set(), f"tools in both {names}")
+
     def test_split_tools_are_registered(self):
         expected = {
             "background_render_status",
@@ -105,9 +178,9 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "mixer_open_bus_effect",
             "mixer_set_bus_effect_enabled",
             "mixer_remove_bus_effect",
-            "open_livecam",
-            "close_livecam",
-            "get_livecam_status",
+            "livecam_open",
+            "livecam_close",
+            "livecam_status",
         }
         self.assertTrue(expected.issubset(self.tools.keys()))
 
@@ -123,11 +196,13 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "timeline_destructive_action": {"readOnlyHint": False, "destructiveHint": True},
             "history_action": {"readOnlyHint": False, "destructiveHint": True},
             "call_method": {"readOnlyHint": False, "destructiveHint": True},
-            "manage_handles": {"readOnlyHint": False, "destructiveHint": False},
             "list_handles": {"readOnlyHint": True, "destructiveHint": False},
-            "open_livecam": {"readOnlyHint": False, "destructiveHint": False},
-            "close_livecam": {"readOnlyHint": False, "destructiveHint": False},
-            "get_livecam_status": {"readOnlyHint": True, "destructiveHint": False},
+            "inspect_handle": {"readOnlyHint": True, "destructiveHint": False},
+            "release_handle": {"readOnlyHint": False, "destructiveHint": False},
+            "release_all_handles": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_open": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_close": {"readOnlyHint": False, "destructiveHint": False},
+            "livecam_status": {"readOnlyHint": True, "destructiveHint": False},
         }
         for name, expected in checks.items():
             annotations = self.tools[name]["annotations"]
@@ -686,9 +761,9 @@ class MCPToolAnnotationTests(unittest.TestCase):
 
         self.module.bridge.call = fake_call
 
-        self.module.open_livecam()
-        self.module.close_livecam()
-        self.module.get_livecam_status()
+        self.module.livecam_open()
+        self.module.livecam_close()
+        self.module.livecam_status()
 
         self.assertEqual(
             calls,

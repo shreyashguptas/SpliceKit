@@ -29,7 +29,7 @@ fi
 
 # Copy tools
 mkdir -p "$APP_RESOURCES/tools"
-for tool in silence-detector structure-analyzer SpliceKitMixer; do
+for tool in silence-detector structure-analyzer audio-levels SpliceKitMixer; do
     if [ -f "$PREBUILT/$tool" ]; then
         cp "$PREBUILT/$tool" "$APP_RESOURCES/tools/$tool"
         echo "Bundled $tool"
@@ -82,27 +82,6 @@ elif [ -d "$WHISPER_SRC" ]; then
         --exclude '.build' --exclude '.swiftpm' \
         "$WHISPER_SRC/" "$APP_RESOURCES/tools/whisper-transcriber/"
     echo "Bundled whisper-transcriber sources (will build on first use)"
-fi
-
-# Bundle BRAW plugin bundles (VT decoder + FormatReader). PatcherModel copies
-# these into the modded FCP.app/Contents/PlugIns/{Codecs,FormatReaders} during
-# install — without them, FCP has no registered decoder for BRAW fourccs and
-# drag/drop + Import Media silently fail for .braw files.
-BRAW_STAGE_DIR="$PREBUILT/BRAWPlugins"
-BRAW_OUT_DIR="$APP_RESOURCES/BRAWPlugins"
-rm -rf "$BRAW_OUT_DIR"
-mkdir -p "$BRAW_OUT_DIR/Codecs" "$BRAW_OUT_DIR/FormatReaders"
-if [ -d "$BRAW_STAGE_DIR/Codecs/SpliceKitBRAWDecoder.bundle" ]; then
-    cp -R "$BRAW_STAGE_DIR/Codecs/SpliceKitBRAWDecoder.bundle" "$BRAW_OUT_DIR/Codecs/"
-    echo "Bundled SpliceKitBRAWDecoder.bundle"
-else
-    echo "WARNING: SpliceKitBRAWDecoder.bundle not found at $BRAW_STAGE_DIR/Codecs/"
-fi
-if [ -d "$BRAW_STAGE_DIR/FormatReaders/SpliceKitBRAWImport.bundle" ]; then
-    cp -R "$BRAW_STAGE_DIR/FormatReaders/SpliceKitBRAWImport.bundle" "$BRAW_OUT_DIR/FormatReaders/"
-    echo "Bundled SpliceKitBRAWImport.bundle"
-else
-    echo "WARNING: SpliceKitBRAWImport.bundle not found at $BRAW_STAGE_DIR/FormatReaders/"
 fi
 
 echo "Resource bundling complete"

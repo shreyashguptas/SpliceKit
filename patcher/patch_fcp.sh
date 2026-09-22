@@ -82,12 +82,6 @@ sign_modded_app() {
     # fail with "code object is not signed at all" on rebuild / no-copy flows.
     xattr -cr "$MODDED_APP" 2>/dev/null || true
 
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; then
-        return 1
-    fi
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; then
-        return 1
-    fi
     if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; then
         return 1
     fi
@@ -127,7 +121,14 @@ usage() {
     --no-copy        Skip copying (use existing modded copy)
     --rebuild        Rebuild dylib only and redeploy
     --uninstall      Remove the modded copy
+    --yes            Answer yes to the confirmation prompts (low disk space,
+                     overwrite an existing unpatched copy)
     --help           Show this help
+
+  Environment:
+    SPLICEKIT_SKIP_MCP_CONFIG=1  Skip step 7 (writing .mcp.json). `make install`
+                                 sets this: it verifies the MCP server first and
+                                 writes the configs itself afterwards.
 
   What it does:
     1. Copies Final Cut Pro to a writable location
@@ -159,6 +160,7 @@ EOF
 NO_COPY=false
 REBUILD_ONLY=false
 UNINSTALL=false
+ASSUME_YES=false
 APP_NAME_OVERRIDE="${APP_NAME_OVERRIDE:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -169,6 +171,7 @@ while [[ $# -gt 0 ]]; do
         --no-copy)  NO_COPY=true; shift ;;
         --rebuild)  REBUILD_ONLY=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
+        --yes|-y)   ASSUME_YES=true; shift ;;
         --help|-h)  usage ;;
         *)          err "Unknown option: $1"; usage ;;
     esac
@@ -292,9 +295,13 @@ log "Final Cut Pro: v$FCP_VERSION at $SOURCE_APP"
 AVAIL_GB=$(df -g "$HOME" | tail -1 | awk '{print $4}')
 if [[ $AVAIL_GB -lt 8 ]]; then
     warn "Low disk space: ${AVAIL_GB}GB available (need ~7GB)"
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    if $ASSUME_YES; then
+        warn "--yes: continuing anyway"
+    else
+        read -p "Continue anyway? [y/N] " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    fi
 fi
 log "Disk space: ${AVAIL_GB}GB available"
 
@@ -306,8 +313,15 @@ if ! $NO_COPY && ! $REBUILD_ONLY; then
 
     if [[ -d "$MODDED_APP" ]]; then
         warn "Modded copy already exists at $MODDED_APP"
-        read -p "Overwrite? [y/N] " -n 1 -r
-        echo
+        if $ASSUME_YES; then
+            # An unpatched copy at the destination is what a failed earlier
+            # attempt leaves behind; a fresh copy is the reliable way forward.
+            REPLY=y
+            warn "--yes: replacing it with a fresh copy"
+        else
+            read -p "Overwrite? [y/N] " -n 1 -r
+            echo
+        fi
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             rm -rf "$MODDED_APP"
         else
@@ -376,11 +390,25 @@ if [ -d "$LUA_DIR" ]; then
     log "Built: $LUA_LIB"
 fi
 
-info "Compiling ${#SOURCES[@]} source files..."
+# The version string bridge_status and the log report, from the same file the
+# Makefile and the Xcode project read. Without the define the header's fallback
+# ("unversioned") is compiled in, which is how installs used to report a stale
+# number.
+SPLICEKIT_VERSION="$(awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $2); print $2; exit }' \
+    "$REPO_DIR/patcher/SpliceKit/Configuration/Version.xcconfig" 2>/dev/null || true)"
+VERSION_FLAGS=()
+if [ -n "$SPLICEKIT_VERSION" ]; then
+    VERSION_FLAGS=("-DSPLICEKIT_VERSION=\"$SPLICEKIT_VERSION\"")
+    info "Compiling ${#SOURCES[@]} source files (SpliceKit $SPLICEKIT_VERSION)..."
+else
+    warn "Version.xcconfig not readable; the dylib will report its version as 'unversioned'"
+    info "Compiling ${#SOURCES[@]} source files..."
+fi
 clang -arch arm64 -arch x86_64 \
     -mmacosx-version-min=14.0 \
     -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices \
     -fobjc-arc -fmodules -Wno-deprecated-declarations \
+    ${VERSION_FLAGS[@]+"${VERSION_FLAGS[@]}"} \
     -undefined dynamic_lookup -dynamiclib \
     -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit \
     -I "$REPO_DIR/Sources" \
@@ -443,6 +471,49 @@ step "Step 3b: Installing transcription helpers"
 if ! "$REPO_DIR/Scripts/build-transcribers.sh" --framework "$FW_DIR"; then
     warn "Some transcription helpers are unavailable — see the messages above."
     warn "Everything else in Final Cut Pro still works; re-run 'make install' to retry."
+fi
+
+# ============================================================
+# Step 3c: Audio helper binaries
+#
+# timeline.getAudioLevels (the MCP tool get_audio_levels) and the command
+# palette's silence remover shell out to small Swift CLIs, because decoding
+# audio with AVFoundation inside Final Cut Pro's process deadlocks. The dylib
+# looks for them in the framework's Resources first. Built with the swiftc
+# that ships with the Command Line Tools; cached in build/. Never fatal here
+# (Final Cut Pro works without them), but install.sh checks the framework for
+# them afterwards, names any that are missing in its final banner and exits
+# non-zero, so a failed helper build is not hidden behind "Verified".
+# ============================================================
+step "Step 3c: Installing audio helpers"
+
+if command -v swiftc >/dev/null 2>&1; then
+    for helper in audio-levels silence-detector; do
+        src="$REPO_DIR/tools/$helper.swift"
+        out="$BUILD_DIR/$helper"
+        [ -f "$src" ] || continue
+        if [ ! -x "$out" ] || [ "$src" -nt "$out" ]; then
+            if swiftc -O -suppress-warnings -o "$out" "$src" 2>"$BUILD_DIR/$helper-build.log"; then
+                # Ad-hoc sign like build-transcribers.sh does: an unsigned Mach-O inside the
+                # framework's Resources makes the framework's own signature fail to verify.
+                codesign --force --sign - "$out" >/dev/null 2>&1 || true
+                log "Built: $out"
+            else
+                warn "Could not build $helper with $(command -v swiftc) ($(swiftc --version 2>&1 | head -1))."
+                warn "  Compiler output (also in $BUILD_DIR/$helper-build.log):"
+                head -20 "$BUILD_DIR/$helper-build.log" | sed 's/^/    /'
+                warn "  get_audio_levels / the silence remover will report $helper as missing until this builds."
+                continue
+            fi
+        fi
+        if cp "$out" "$FW_DIR/Versions/A/Resources/$helper"; then
+            log "Installed: $helper"
+        else
+            warn "Could not copy $helper into the framework; its features will report it as missing."
+        fi
+    done
+else
+    warn "swiftc not found: audio-levels and silence-detector were not built (get_audio_levels will report the helper as missing)."
 fi
 
 # ============================================================
@@ -633,7 +704,13 @@ MCP_SERVER="$REPO_DIR/mcp/server.py"
 # tell the user they are configured when they are not.
 MCP_STATUS_LINE="Not configured — run ./Scripts/setup-mcp.sh"
 
-if [[ -f "$MCP_SERVER" ]]; then
+if [[ "${SPLICEKIT_SKIP_MCP_CONFIG:-}" == "1" ]]; then
+    # `make install` runs the MCP server's full self-check and writes the configs
+    # itself after this script returns. Writing .mcp.json here would point a
+    # client at a server nothing has verified yet.
+    info "Left to make install (Scripts/setup-mcp.sh runs next)"
+    MCP_STATUS_LINE="Set up by the next step of make install"
+elif [[ -f "$MCP_SERVER" ]]; then
     # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
     # package, which makes the server fail to start with no obvious cause.
     # Honour the same MCP_VENV override the Makefile accepts, and require the
@@ -648,7 +725,7 @@ if [[ -f "$MCP_SERVER" ]]; then
     esac
 
     MCP_PYTHON="$MCP_VENV_DIR/bin/python"
-    if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.fastmcp" 2>/dev/null; then
+    if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c "import mcp.server.mcpserver" 2>/dev/null; then
         # Fall back to an absolute system python3: MCP clients are launched by
         # the OS and do not necessarily inherit this shell's PATH.
         MCP_FALLBACK="$(command -v python3 || true)"
@@ -671,7 +748,7 @@ if [[ -f "$MCP_SERVER" ]]; then
             MCP_FALLBACK="/usr/bin/python3"
         fi
 
-        if [[ -x "$MCP_FALLBACK" ]] && "$MCP_FALLBACK" -c "import mcp.server.fastmcp" 2>/dev/null; then
+        if [[ -x "$MCP_FALLBACK" ]] && "$MCP_FALLBACK" -c "import mcp.server.mcpserver" 2>/dev/null; then
             MCP_PYTHON="$MCP_FALLBACK"
             warn "No MCP virtualenv at $MCP_VENV_DIR — using $MCP_PYTHON"
         else

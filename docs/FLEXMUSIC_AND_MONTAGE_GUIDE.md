@@ -341,7 +341,7 @@ playback_action("goToStart")
 # Navigate to each beat and blade
 for beat_time in timing["beats"]:
     # Seek to the beat timestamp
-    playback_action("seekToTime", time=beat_time)
+    seek_to_time(beat_time)
     timeline_action("blade")
 ```
 

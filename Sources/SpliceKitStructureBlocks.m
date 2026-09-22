@@ -38,24 +38,6 @@ typedef struct {
 
 // --- Constants ---
 static NSString * const kStructureStorylineName = @"SpliceKit Structure";
-static NSString * const kBasicTitleTemplate =
-    @"Bumper:Opener.localized/Basic Title.localized/Basic Title.moti";
-
-// --- Color definitions (RGBA) ---
-typedef struct { CGFloat r, g, b, a; } SBColor;
-
-static SBColor SBColorForLabel(NSString *label) {
-    NSString *lower = [label lowercaseString];
-    if ([lower hasPrefix:@"intro"])     return (SBColor){0.40, 0.45, 0.55, 0.90};
-    if ([lower hasPrefix:@"outro"])     return (SBColor){0.40, 0.45, 0.55, 0.90};
-    if ([lower hasPrefix:@"verse"])     return (SBColor){0.20, 0.50, 0.85, 0.90};
-    if ([lower hasPrefix:@"chorus"])    return (SBColor){0.95, 0.55, 0.10, 0.90};
-    if ([lower hasPrefix:@"bridge"])    return (SBColor){0.55, 0.25, 0.75, 0.90};
-    if ([lower hasPrefix:@"drop"])      return (SBColor){0.90, 0.15, 0.15, 0.90};
-    if ([lower hasPrefix:@"pre-chorus"])return (SBColor){0.80, 0.45, 0.15, 0.90};
-    if ([lower hasPrefix:@"breakdown"]) return (SBColor){0.30, 0.60, 0.50, 0.90};
-    return (SBColor){0.50, 0.50, 0.50, 0.80}; // default gray
-}
 
 // --- Frame arithmetic helpers ---
 
@@ -85,79 +67,6 @@ static id SB_newGap(SB_CMTime duration, SB_CMTime sampleDuration) {
     if (![gapClass respondsToSelector:gapSel]) return nil;
     return ((id (*)(id, SEL, SB_CMTime, SB_CMTime))objc_msgSend)(
         gapClass, gapSel, duration, sampleDuration);
-}
-
-static id SB_newTitleGenerator(long long durationFrames, int fdNum, int fdDen) {
-    Class genClass = objc_getClass("FFAnchoredGeneratorComponent");
-    if (!genClass) return nil;
-    SEL createSel = NSSelectorFromString(@"newGeneratorForEffectIDContainingSubstring:duration:sampleDuration:");
-    if (![genClass respondsToSelector:createSel]) return nil;
-    SB_CMTime sampleDuration = SB_makeTime(1, fdNum, fdDen);
-    SB_CMTime duration = SB_makeTime(MAX(durationFrames, 1), fdNum, fdDen);
-    return ((id (*)(id, SEL, id, SB_CMTime, SB_CMTime))objc_msgSend)(
-        genClass, createSel, kBasicTitleTemplate, duration, sampleDuration);
-}
-
-// --- Text and color application ---
-
-static BOOL SB_setGeneratorText(id generator, NSString *text) {
-    if (!generator || !text) return NO;
-    SEL effectSel = NSSelectorFromString(@"effect");
-    if (![generator respondsToSelector:effectSel]) return NO;
-    id effect = ((id (*)(id, SEL))objc_msgSend)(generator, effectSel);
-    if (!effect) return NO;
-
-    // Try setText:forField: on the effect
-    SEL setTextSel = NSSelectorFromString(@"setText:forField:");
-    if ([effect respondsToSelector:setTextSel]) {
-        NSAttributedString *attr = [[NSAttributedString alloc] initWithString:text attributes:@{
-            NSFontAttributeName: [NSFont boldSystemFontOfSize:36],
-            NSForegroundColorAttributeName: [NSColor whiteColor],
-        }];
-        // Normalize if possible
-        SEL normSel = NSSelectorFromString(@"_newAttributedString:forField:");
-        if ([effect respondsToSelector:normSel]) {
-            id normalized = ((id (*)(id, SEL, id, NSUInteger))objc_msgSend)(effect, normSel, attr, 0);
-            if (normalized) attr = normalized;
-        }
-        @try {
-            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(effect, setTextSel, attr, 0);
-            // Persist
-            SEL saveSel = NSSelectorFromString(@"saveDirtyTextToEffectValues");
-            if ([effect respondsToSelector:saveSel]) {
-                ((void (*)(id, SEL))objc_msgSend)(effect, saveSel);
-            }
-            return YES;
-        } @catch (NSException *e) {}
-    }
-
-    // Fallback: try CHChannelText
-    SEL chFolderSel = NSSelectorFromString(@"channelFolder");
-    if (![effect respondsToSelector:chFolderSel]) return NO;
-    id folder = ((id (*)(id, SEL))objc_msgSend)(effect, chFolderSel);
-    if (!folder) return NO;
-
-    Class textChannelClass = objc_getClass("CHChannelText");
-    if (!textChannelClass) return NO;
-
-    SEL subchannelsSel = NSSelectorFromString(@"subchannels");
-    if (![folder respondsToSelector:subchannelsSel]) return NO;
-    NSArray *subchannels = ((id (*)(id, SEL))objc_msgSend)(folder, subchannelsSel);
-
-    for (id ch in subchannels) {
-        if ([ch isKindOfClass:textChannelClass]) {
-            SEL setAttrSel = NSSelectorFromString(@"setAttributedString:");
-            if ([ch respondsToSelector:setAttrSel]) {
-                NSAttributedString *attr = [[NSAttributedString alloc] initWithString:text attributes:@{
-                    NSFontAttributeName: [NSFont boldSystemFontOfSize:36],
-                    NSForegroundColorAttributeName: [NSColor whiteColor],
-                }];
-                ((void (*)(id, SEL, id))objc_msgSend)(ch, setAttrSel, attr);
-                return YES;
-            }
-        }
-    }
-    return NO;
 }
 
 // --- Removal ---
@@ -296,12 +205,8 @@ static id SB_findSequenceByPrefix(NSString *prefix) {
     return nil;
 }
 
-static void SB_deleteSequence(id sequence) {
-    if (!sequence) return;
-    SEL removeSel = NSSelectorFromString(@"removeFromParent");
-    if ([sequence respondsToSelector:removeSel]) {
-        ((void (*)(id, SEL))objc_msgSend)(sequence, removeSel);
-    }
+static BOOL SB_deleteSequence(id sequence) {
+    return SpliceKit_deleteSequenceLibraryItem(sequence);
 }
 
 NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
@@ -560,7 +465,12 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
     // Clean up temp project
     SpliceKit_executeOnMainThread(^{
         id tempToDelete = SB_findSequenceByPrefix(tempName);
-        if (tempToDelete) SB_deleteSequence(tempToDelete);
+        if (tempToDelete && !SB_deleteSequence(tempToDelete)) {
+            NSString *name = ((id (*)(id, SEL))objc_msgSend)(tempToDelete,
+                NSSelectorFromString(@"displayName"));
+            SpliceKit_log(@"[Structure] Warning: temp project '%@' was not removed from the library",
+                          name ?: tempName);
+        }
     });
 
     SpliceKit_log(@"[Structure] Done: %lu captions placed in caption lane", (unsigned long)captionCount);
@@ -577,207 +487,6 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
 // =================================================================
 // Takes an array of sections [{label, start, end}] and creates a
 // connected storyline of colored title blocks above the primary.
-
-NSDictionary *SpliceKit_handleStructureGenerateBlocks(NSDictionary *params) {
-    NSArray *sections = params[@"sections"];
-    if (!sections || ![sections isKindOfClass:[NSArray class]] || sections.count == 0)
-        return @{@"error": @"sections array required (each: {label, start, end})"};
-
-    __block NSDictionary *result = nil;
-    __block NSData *nativePasteboardData = nil;
-    __block int titleCount = 0;
-
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id timeline = SpliceKit_getActiveTimelineModule();
-            if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
-            id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-            if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
-
-            // Get frame duration
-            int fdN = 100, fdD = 2400; // default 24fps
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SB_CMTime fd = ((SB_CMTime (*)(id, SEL))SB_STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
-            }
-
-            // Create the storyline collection
-            Class collClass = objc_getClass("FFAnchoredCollection");
-            if (!collClass) { result = @{@"error": @"FFAnchoredCollection not found"}; return; }
-
-            id storyline = ((id (*)(id, SEL, id))objc_msgSend)(
-                ((id (*)(id, SEL))objc_msgSend)(collClass, @selector(alloc)),
-                NSSelectorFromString(@"initWithDisplayName:"),
-                kStructureStorylineName);
-            if (!storyline) { result = @{@"error": @"Failed to create storyline"}; return; }
-
-            SEL setIsSpineSel = NSSelectorFromString(@"setIsSpine:");
-            if ([storyline respondsToSelector:setIsSpineSel])
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(storyline, setIsSpineSel, YES);
-
-            SEL setContentCreatedSel = NSSelectorFromString(@"setContentCreated:");
-            if ([storyline respondsToSelector:setContentCreatedSel])
-                ((void (*)(id, SEL, id))objc_msgSend)(storyline, setContentCreatedSel, [NSDate date]);
-
-            SEL setAngleIDSel = NSSelectorFromString(@"setAngleID:");
-            if ([storyline respondsToSelector:setAngleIDSel])
-                ((void (*)(id, SEL, id))objc_msgSend)(storyline, setAngleIDSel, @"");
-
-            SEL setUnclippedStartSel = NSSelectorFromString(@"setUnclippedStart:");
-            if ([storyline respondsToSelector:setUnclippedStartSel])
-                ((void (*)(id, SEL, SB_CMTime))objc_msgSend)(storyline, setUnclippedStartSel,
-                    SB_makeTime(0, fdN, fdD));
-
-            SEL addContainedSel = NSSelectorFromString(@"addObjectToContainedItems:");
-            if (![storyline respondsToSelector:addContainedSel]) {
-                result = @{@"error": @"Storyline cannot accept contained items"};
-                return;
-            }
-
-            // Build title blocks for each section
-            long long cursorFrames = 0;
-            for (NSDictionary *sec in sections) {
-                NSString *label = sec[@"label"] ?: @"Section";
-                double startSec = [sec[@"start"] doubleValue];
-                double endSec = [sec[@"end"] doubleValue];
-                double durSec = endSec - startSec;
-                if (durSec <= 0) continue;
-
-                long long startFrames = SB_frameCount(startSec, fdN, fdD, YES);
-                if (startFrames < cursorFrames) startFrames = cursorFrames;
-                long long durationFrames = SB_frameCount(durSec, fdN, fdD, NO);
-                if (durationFrames <= 0) durationFrames = 1;
-
-                // Insert gap if needed
-                if (startFrames > cursorFrames) {
-                    id gap = SB_newGap(
-                        SB_makeTime(startFrames - cursorFrames, fdN, fdD),
-                        SB_makeTime(1, fdN, fdD));
-                    if (gap) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(storyline, addContainedSel, gap);
-                    }
-                }
-
-                // Create a gap component as the section block.
-                // Gaps render as thin bars in the timeline (much thinner than title generators),
-                // making the structure lane compact and non-obtrusive.
-                id block = SB_newGap(
-                    SB_makeTime(durationFrames, fdN, fdD),
-                    SB_makeTime(1, fdN, fdD));
-                if (!block) {
-                    SpliceKit_log(@"[Structure] Failed to create gap block for '%@'", label);
-                    continue;
-                }
-
-                // Set display name so the section label shows in the timeline
-                NSString *displayLabel = [label uppercaseString];
-                SEL setDisplayNameSel = NSSelectorFromString(@"setDisplayName:");
-                if ([block respondsToSelector:setDisplayNameSel]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(block, setDisplayNameSel, displayLabel);
-                }
-
-                ((void (*)(id, SEL, id))objc_msgSend)(storyline, addContainedSel, block);
-                cursorFrames = startFrames + durationFrames;
-                titleCount++;
-            }
-
-            if (titleCount == 0) {
-                result = @{@"error": @"No structure blocks could be created"};
-                return;
-            }
-
-            // Archive the storyline
-            NSDictionary *archiveRoot = @{@"objects": @[storyline]};
-            NSError *archiveError = nil;
-            NSData *archiveData = [NSKeyedArchiver archivedDataWithRootObject:archiveRoot
-                                                        requiringSecureCoding:NO
-                                                                       error:&archiveError];
-            if (!archiveData) {
-                result = @{@"error": archiveError.localizedDescription ?: @"Archive failed"};
-                return;
-            }
-
-            // Build pasteboard plist
-            NSDictionary *pbDict = @{
-                @"ffpasteboardcopiedtypes": @{@"pb_anchoredObject": @{@"count": @1}},
-                @"ffpasteboardobject": archiveData,
-                @"kffmodelobjectIDs": @[],
-            };
-            NSError *plistError = nil;
-            nativePasteboardData = [NSPropertyListSerialization dataWithPropertyList:pbDict
-                                                                              format:NSPropertyListBinaryFormat_v1_0
-                                                                             options:0
-                                                                               error:&plistError];
-            if (!nativePasteboardData) {
-                result = @{@"error": plistError.localizedDescription ?: @"Pasteboard serialization failed"};
-                return;
-            }
-
-            SpliceKit_log(@"[Structure] Built storyline with %d blocks (%lu bytes)",
-                          titleCount, (unsigned long)nativePasteboardData.length);
-
-            // Remove existing structure storyline
-            NSUInteger removed = SB_removeStoryline(sequence, kStructureStorylineName);
-            if (removed > 0) {
-                SpliceKit_log(@"[Structure] Removed %lu existing structure storyline(s)",
-                              (unsigned long)removed);
-            }
-
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-
-    if (result) return result;
-    if (!nativePasteboardData) return @{@"error": @"No pasteboard data produced"};
-
-    // Paste as connected storyline
-    __block BOOL pasteOk = NO;
-
-    SpliceKit_executeOnMainThread(^{
-        id tm = SpliceKit_getActiveTimelineModule();
-        id seq = tm ? ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence)) : nil;
-        int fdN = 100, fdD = 2400;
-        SEL fdSel = NSSelectorFromString(@"frameDuration");
-        if (seq && [seq respondsToSelector:fdSel]) {
-            SB_CMTime fd = ((SB_CMTime (*)(id, SEL))SB_STRET_MSG)(seq, fdSel);
-            if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
-        }
-
-        NSPasteboard *pb = [NSPasteboard generalPasteboard];
-        [pb clearContents];
-        [pb setData:nativePasteboardData forType:@"com.apple.flexo.proFFPasteboardUTI"];
-
-        // Seek to start
-        if (tm) {
-            SEL setSel = NSSelectorFromString(@"setPlayheadTime:");
-            if ([tm respondsToSelector:setSel]) {
-                ((void (*)(id, SEL, SB_CMTime))objc_msgSend)(tm, setSel, SB_makeTime(0, fdN, fdD));
-            }
-        }
-        [[NSApplication sharedApplication] sendAction:NSSelectorFromString(@"deselectAll:")
-                                                   to:nil from:nil];
-    });
-
-    [NSThread sleepForTimeInterval:0.2];
-
-    SpliceKit_executeOnMainThread(^{
-        pasteOk = [[NSApplication sharedApplication]
-            sendAction:NSSelectorFromString(@"pasteAnchored:")
-                    to:nil from:nil];
-    });
-
-    [NSThread sleepForTimeInterval:0.6];
-
-    SpliceKit_log(@"[Structure] Paste as connected: %@", pasteOk ? @"YES" : @"NO");
-
-    return @{
-        @"status": pasteOk ? @"ok" : @"paste_failed",
-        @"blocks": @(titleCount),
-        @"storylineName": kStructureStorylineName,
-    };
-}
 
 // =================================================================
 // Remove Structure Blocks
@@ -813,13 +522,14 @@ NSDictionary *SpliceKit_handleStructureToggle(NSDictionary *params) {
 
     if (exists) {
         return SpliceKit_handleStructureRemove(params);
-    } else {
-        // Need sections to regenerate — check if they were passed
-        if (params[@"sections"]) {
-            return SpliceKit_handleStructureGenerateBlocks(params);
-        }
-        return @{@"error": @"No structure blocks to toggle. Pass sections array to create."};
     }
+    // The other half of this used to rebuild the blocks from a `sections` array via
+    // SpliceKit_handleStructureGenerateBlocks, which nothing ever reached: the
+    // toggle_structure_blocks tool passes no sections, and the FCPXML-import
+    // implementation behind it had already been replaced by structure.generateCaptions.
+    // Both are gone; this is a remove, and song_structure_blocks builds them again.
+    return @{@"error": @"No structure blocks on the timeline to remove. "
+                       @"Build them with song_structure_blocks(file_path=...)."};
 }
 
 // =================================================================

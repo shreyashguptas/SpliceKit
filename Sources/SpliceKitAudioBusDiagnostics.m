@@ -29,11 +29,6 @@ static NSString *SpliceKitAudioBusPointerString(const void *ptr) {
     return ptr ? [NSString stringWithFormat:@"%p", ptr] : @"";
 }
 
-static void SpliceKitAudioBusSetIfPresent(NSMutableDictionary *dict, NSString *key, id value) {
-    if (!dict || key.length == 0 || !value) return;
-    dict[key] = value;
-}
-
 static id SpliceKitAudioBusObjectAtOffset(void *base, ptrdiff_t offset) {
     if (!base) return nil;
     __unsafe_unretained id object = nil;

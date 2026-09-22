@@ -3773,41 +3773,6 @@ static BOOL SpliceKitCaption_isGeneratorTitleObject(id obj) {
     return NO;
 }
 
-static id SpliceKitCaption_hostItemForTime(id sequence, double seconds, int timescale) {
-    id primary = SpliceKitCaption_primaryObjectForSequence(sequence);
-    if (!primary) return nil;
-
-    SpliceKitCaption_CMTime targetTime = SpliceKitCaption_makeCMTime(seconds, timescale);
-    SEL containedAtTimeSel = NSSelectorFromString(@"containedItemAtTime:");
-    if ([primary respondsToSelector:containedAtTimeSel]) {
-        id item = ((id (*)(id, SEL, SpliceKitCaption_CMTime))objc_msgSend)(
-            primary, containedAtTimeSel, targetTime);
-        if (item) return item;
-    }
-
-    SEL itemsSel = NSSelectorFromString(@"containedItems");
-    NSArray *items = [primary respondsToSelector:itemsSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(primary, itemsSel)
-        : nil;
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return nil;
-
-    id bestItem = nil;
-    double bestStart = -DBL_MAX;
-
-    for (id item in items) {
-        double start = 0.0, end = 0.0;
-        if (SpliceKitCaption_effectiveRangeForObject(primary, item, &start, &end)) {
-            if (seconds >= start && seconds <= end) return item;
-            if (start <= seconds && start > bestStart) {
-                bestStart = start;
-                bestItem = item;
-            }
-        }
-    }
-
-    return bestItem ?: [items lastObject];
-}
-
 static BOOL SpliceKitCaption_setChannelDouble(id channel, double value) {
     if (!channel) return NO;
     @try {
@@ -3829,39 +3794,6 @@ static id SpliceKitCaption_subChannel(id parentChannel, NSString *axis) {
     SEL selector = NSSelectorFromString(selectorName);
     if (![parentChannel respondsToSelector:selector]) return nil;
     return ((id (*)(id, SEL))objc_msgSend)(parentChannel, selector);
-}
-
-static BOOL SpliceKitCaption_applyTransformToTitle(id titleObject, CGFloat yOffset, CGFloat scalePercent) {
-    if (!titleObject) return NO;
-
-    @try {
-        Class cutawayEffects = objc_getClass("FFCutawayEffects");
-        if (!cutawayEffects) return NO;
-
-        SEL transformSel = NSSelectorFromString(@"transformEffectForObject:createIfAbsent:");
-        if (![cutawayEffects respondsToSelector:transformSel]) return NO;
-
-        id xformEffect = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-            cutawayEffects, transformSel, titleObject, YES);
-        if (!xformEffect) return NO;
-
-        id position3D = [xformEffect respondsToSelector:NSSelectorFromString(@"positionChannel3D")]
-            ? ((id (*)(id, SEL))objc_msgSend)(xformEffect, NSSelectorFromString(@"positionChannel3D"))
-            : nil;
-        id scale3D = [xformEffect respondsToSelector:NSSelectorFromString(@"scaleChannel3D")]
-            ? ((id (*)(id, SEL))objc_msgSend)(xformEffect, NSSelectorFromString(@"scaleChannel3D"))
-            : nil;
-
-        BOOL changed = NO;
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(position3D, @"x"), 0.0);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(position3D, @"y"), yOffset);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(scale3D, @"x"), scalePercent);
-        changed |= SpliceKitCaption_setChannelDouble(SpliceKitCaption_subChannel(scale3D, @"y"), scalePercent);
-        return changed;
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Captions] Failed to apply title transform: %@", e.reason);
-    }
-    return NO;
 }
 
 static BOOL SpliceKitCaption_applyGeneratorPositionYOffset(id titleObject, CGFloat yOffset) {
@@ -3941,29 +3873,8 @@ static id SpliceKitCaption_currentSequence(void) {
     return ((id (*)(id, SEL))objc_msgSend)(tm, NSSelectorFromString(@"sequence"));
 }
 
-static void SpliceKitCaption_deleteSequence(id sequence) {
-    if (!sequence) return;
-    @try {
-        SEL containerEventSel = NSSelectorFromString(@"containerEvent");
-        SEL eventSel = NSSelectorFromString(@"event");
-        id event = nil;
-        if ([sequence respondsToSelector:containerEventSel])
-            event = ((id (*)(id, SEL))objc_msgSend)(sequence, containerEventSel);
-        else if ([sequence respondsToSelector:eventSel])
-            event = ((id (*)(id, SEL))objc_msgSend)(sequence, eventSel);
-        if (event) {
-            SEL removeSel = NSSelectorFromString(@"removeObjectFromContainedItems:");
-            if ([event respondsToSelector:removeSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(event, removeSel, sequence);
-                return;
-            }
-        }
-        SEL trashSel = NSSelectorFromString(@"moveToTrash:");
-        if ([sequence respondsToSelector:trashSel])
-            ((void (*)(id, SEL, id))objc_msgSend)(sequence, trashSel, nil);
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Captions] Warning: could not delete temp project: %@", e.reason);
-    }
+static BOOL SpliceKitCaption_deleteSequence(id sequence) {
+    return SpliceKit_deleteSequenceLibraryItem(sequence);
 }
 
 static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double timeoutSec, double intervalSec) {
@@ -5545,7 +5456,10 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     // Clean up temp project
     SpliceKit_executeOnMainThread(^{
         id tempToDelete = SpliceKitCaption_findSequenceByPrefix(tempName);
-        if (tempToDelete) SpliceKitCaption_deleteSequence(tempToDelete);
+        if (tempToDelete && !SpliceKitCaption_deleteSequence(tempToDelete)) {
+            SpliceKit_log(@"[NativeCaptions] Warning: temp project '%@' was not removed from the library",
+                          tempName);
+        }
     });
 
     SpliceKit_log(@"[NativeCaptions] Done: %lu captions via FCPXML import+paste", (unsigned long)captionCount);
@@ -5871,7 +5785,11 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     state[@"segmentCount"] = @(self.mutableSegments.count);
     state[@"style"] = [self.style toDictionary];
 
-    if (self.errorMessage) state[@"error"] = self.errorMessage;
+    // `lastError`, not `error`: this is a state reading, and SpliceKit_handleRequest
+    // turns a top-level `error` key into a JSON-RPC failure. Reporting the panel's
+    // last error under that name made get_caption_state — a read-only tool — look
+    // like the read itself had failed, with the text of an unrelated earlier paste.
+    if (self.errorMessage) state[@"lastError"] = self.errorMessage;
     if (self.lastGenerateResult) state[@"lastGenerateResult"] = self.lastGenerateResult;
 
     // Segments

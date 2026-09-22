@@ -105,8 +105,8 @@ The built-in plugins already handle the most common pain points. But if you ever
 ## How Do I Get Started?
 
 1. **Download or clone the repo** from GitHub
-2. **Run the patcher** -- the GUI patcher (`SpliceKitPatcher`) is the easiest way. It handles everything in one click.
-3. **Launch the patched FCP** from `~/Applications/SpliceKit/`
+2. **Run `make install`** in that folder -- it builds SpliceKit, makes the patched copy of Final Cut Pro and sets up the MCP server. (Do not use the upstream project's downloadable GUI patcher: it ships upstream's build, which still carries the crash reporter this fork removed.)
+3. **Launch "Final Cut Pro Modified"** from `/Applications` (your original Final Cut Pro is untouched)
 4. **Try the Command Palette** -- press Cmd+Shift+P and start typing
 
 That's it. Your original FCP stays right where it is, completely unchanged.
@@ -115,7 +115,7 @@ That's it. Your original FCP stays right where it is, completely unchanged.
 
 ## Still Have Questions?
 
-- Check the [main README](../README.md) for technical details
+- Read [.claude/CLAUDE.md](../.claude/CLAUDE.md), the tool-by-tool guide, for technical details
 - Browse the [docs folder](.) for deep dives on specific features
 - Open an issue on GitHub if something's unclear -- the community is friendly
 

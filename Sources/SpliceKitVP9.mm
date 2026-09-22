@@ -305,7 +305,7 @@ static void VP9RegisterProfessionalWorkflowBundle(void) {
         }
     }
 
-    // Also poke the directory variant. Matches BRAW's approach — some code
+    // Also poke the directory variant — some code
     // paths look up codecs via directory enumeration rather than a specific
     // bundle.
     VP9RegisterVideoCodecsDirectoryFn registerDirectory =

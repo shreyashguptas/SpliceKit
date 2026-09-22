@@ -250,6 +250,34 @@ sk.timeline("trimEnd")               -- trim end
 sk.timeline("joinClips")             -- join adjacent clips
 ```
 
+Exact ripple trim of one edit point by clip handle (handles come from `sk.clips()`):
+
+```lua
+local clips = sk.clips()
+local h = clips.items[2].handle
+-- move the END edit point 0.5s earlier (negative = earlier, positive = later);
+-- FCP's default trim, a ripple edit: subsequent clips move so no gap is left,
+-- and connected clips move with the clips they are attached to
+sk.rpc("timeline.trimClip", {handle = h, edge = "end", deltaSeconds = -0.5, dryRun = true})  -- plan
+local r = sk.rpc("timeline.trimClip", {handle = h, edge = "end", deltaSeconds = -0.5})
+print(r.status, r.before["end"], r.after["end"], r.appliedDelta)  -- "end" is a Lua keyword
+sk.rpc("timeline.trimClip", {handle = h, edge = "start", toSeconds = 6.5})  -- to an absolute time
+```
+
+Audio levels of a clip (dBFS per slice, 50 ms by default and longer for long clips, placed in
+timeline seconds; SpliceKit's measurement of the source media as decoded: FCP's volume, fades,
+effects, retiming and the mix are not applied; needs the `audio-levels` helper `make install` builds):
+
+```lua
+local a = sk.rpc("timeline.getAudioLevels", {handle = h})
+local c = a.clips[1]
+print(c.stats.maxPeakDb, c.stats.tailSilenceSeconds, #c.slices.rmsDb)
+-- whole timeline (first 100 clips), summary only, with the level jump at each straight cut
+-- between neighbouring analysed primary-storyline clips:
+local all = sk.rpc("timeline.getAudioLevels", {includeSlices = false})
+for _, cut in ipairs(all.cuts) do print(cut.atSeconds, cut.jumpDb) end
+```
+
 ### Nudge
 
 ```lua
@@ -266,6 +294,16 @@ sk.select_clip()                     -- select clip at playhead
 sk.timeline("selectAll")             -- select all clips
 sk.timeline("deselectAll")           -- deselect all
 sk.timeline("selectToPlayhead")      -- extend selection to playhead
+```
+
+Select by handle (spine or connected clips; never moves the playhead):
+
+```lua
+local clips = sk.clips()
+sk.rpc("timeline.selectItems", {handles = {clips.items[1].handle}})                 -- replace
+sk.rpc("timeline.selectItems", {handles = {clips.items[2].handle}, mode = "add"})   -- add / "remove"
+sk.rpc("timeline.selectItems", {handles = {}})                                      -- deselect all
+-- result: selected[] (handle, name, class, lane, startTime, endTime), unresolved[], rejected[], matchesRequest
 ```
 
 ### Range Selection
@@ -290,6 +328,15 @@ sk.undo()                    -- undo last action
 sk.redo()                    -- redo
 -- Undo is unlimited — call multiple times to step back
 for i = 1, 5 do sk.undo() end
+```
+
+Group several edits into one undo step (Edit > Undo <name>; FCP's internal term is an undoable action):
+
+```lua
+sk.rpc("timeline.beginEdit", {name = "Rough cut"})
+sk.blade(); sk.seek(6.0); sk.blade()
+sk.rpc("timeline.endEdit", {})       -- always close it, also after an error
+sk.undo()                            -- one undo reverts the whole group
 ```
 
 ### Compound Clips & Storylines
@@ -369,6 +416,25 @@ sk.rpc("timeline.selectClipInLane", {lane = 0})    -- primary storyline
 ```lua
 sk.select_clip()
 local effects = sk.rpc("effects.getClipEffects", {})
+```
+
+### Clip Information (Info inspector fields + SpliceKit extras)
+
+```lua
+-- What is IN a clip, by handle: Info inspector fields (name, notes, roles, source media file and
+-- its media representation: original / optimized / proxy) plus SpliceKit extras (timeline start/end/
+-- duration, effects, title text, markers, transcript words and a frame decoded from the source
+-- media file). Read-only: never moves the playhead.
+local h = sk.clips().items[1].handle
+local info = sk.rpc("timeline.getClipInfo", {handle = h})
+print(info.name, info.kind, info.sourceMedia and info.sourceMedia.path)
+print(info.transcript.wordCount, info.transcript.text)
+-- info.frame.base64 is a JPEG (info.frame.width x info.frame.height); decode it to look at the frame.
+-- Options: includeFrame=false, frameTime=<timeline seconds>, frameMaxWidth=<64..1920>
+
+-- The clip as rendered in the Viewer (effects included). Moves the playhead there and restores it.
+local shot = sk.rpc("timeline.captureClipFrame", {handle = h})
+print(shot.path, shot.playheadRestored)   -- shot.frame.base64 is a JPEG too
 ```
 
 ---
@@ -642,6 +708,34 @@ sk.timeline("deleteMarkersInSelection")
 sk.rpc("timeline.addMarkers", {
     times = {1.0, 5.5, 10.0, 15.5, 20.0}
 })
+```
+
+### Read Markers
+
+```lua
+-- All markers on the active timeline, sorted by time.
+-- Each entry: handle, class, name, kind (standard|todo|chapter|keyword|analysis),
+-- time/endTime/duration (CMTime tables with .seconds), timeSource, and -- when
+-- readable -- completed (to-do markers), note, parentHandle (clip it is anchored to).
+local r = sk.rpc("timeline.getMarkers", {})
+for _, m in ipairs(r.markers or {}) do
+    local secs = m.time and m.time.seconds or -1
+    sk.log(string.format("%8.2fs  %-8s  %s  [%s]", secs, m.kind, m.name, m.handle))
+end
+
+-- Filter by kind
+local chapters = sk.rpc("timeline.getMarkers", {kind = "chapter"})
+
+-- Marker handles feed the direct marker actions
+sk.rpc("timeline.directAction", {action = "changeMarkerName", name = "Intro", marker = r.markers[1].handle})
+
+-- timeline.getDetailedState now also returns connected clips and markers:
+--   state.connectedItems  -- titles, B-roll, music on lanes ~= 0, connected storyline
+--                         -- contents; each has lane, startTime/endTime, parentIndex
+--                         -- (spine index), parentHandle, depth, hasVideo/hasAudio
+--   state.markers         -- same marker entries as timeline.getMarkers
+local state = sk.rpc("timeline.getDetailedState", {})
+sk.log(#(state.connectedItems or {}) .. " connected clips, " .. #(state.markers or {}) .. " markers")
 ```
 
 ### Direct Marker Manipulation

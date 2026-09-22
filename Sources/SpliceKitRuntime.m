@@ -61,6 +61,14 @@ BOOL SpliceKit_sendMsgBool(id target, SEL selector) {
 // Timer/notification callbacks fire with depth == 0, so breakpoints work on them.
 static _Atomic int sMainThreadRPCDispatchDepth = 0;
 
+// Counts main-thread dispatches abandoned at the 20s timeout. Never reset: callers
+// compare the value before and after a request.
+static _Atomic unsigned sMainThreadDispatchTimeouts = 0;
+
+unsigned SpliceKit_mainThreadDispatchTimeoutCount(void) {
+    return sMainThreadDispatchTimeouts;
+}
+
 BOOL SpliceKit_isMainThreadInRPCDispatch(void) {
     return [NSThread isMainThread] && sMainThreadRPCDispatchDepth > 0;
 }
@@ -85,6 +93,12 @@ void SpliceKit_executeOnMainThread(dispatch_block_t block) {
         long waitResult = dispatch_semaphore_wait(sem,
             dispatch_time(DISPATCH_TIME_NOW, 20LL * NSEC_PER_SEC));
         if (waitResult != 0) {
+            // A timed-out block leaves its handler's result nil, and a handler's
+            // fallback for nil is a generic message like "Failed to add transitions to
+            // all clips". That reads as "the operation was attempted and did not work"
+            // when what actually happened is that the main thread never ran it. The
+            // counter lets SpliceKit_handleRequest say which it was.
+            sMainThreadDispatchTimeouts++;
             NSLog(@"[SpliceKit] WARNING: Main thread dispatch timed out (20s). "
                   @"Main thread may be blocked by startup or modal dialog.");
         }

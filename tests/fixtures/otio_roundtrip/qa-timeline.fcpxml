@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+
+<fcpxml version="1.14">
+    <resources>
+        <format id="r1" name="FFVideoFormat3840x2160p2997" frameDuration="1001/30000s" width="3840" height="2160" colorSpace="1-1-1 (Rec. 709)"/>
+        <media id="r2" name="QA Compound Test" uid="mBFUmarjTRSJbmT+73oyFg" modDate="2026-09-19 18:38:54 -0400">
+            <sequence format="r1" duration="540540/30000s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                <spine>
+                    <asset-clip ref="r3" offset="0s" name="Phase 1 - Flight Test No 2 with Design v8 - 2026-07-30" start="1705373670/30000s" duration="300300/30000s" tcFormat="NDF" audioRole="dialogue"/>
+                    <asset-clip ref="r4" offset="300300/30000s" name="Phase 1 - Visualizing the Control Boards 3D model in Apple Vision Pro - 2026-06-16" duration="240240/30000s" format="r5" tcFormat="NDF" audioRole="dialogue">
+                        <conform-rate srcFrameRate="30"/>
+                    </asset-clip>
+                </spine>
+            </sequence>
+        </media>
+        <asset id="r3" name="Phase 1 - Flight Test No 2 with Design v8 - 2026-07-30" uid="A8CD06617AC05183C84112DFF9338212" start="1705373670/30000s" duration="4747743/30000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="192000">
+            <media-rep kind="original-media" sig="A8CD06617AC05183C84112DFF9338212" src="file:///Users/shreyash/Desktop/test%20finalcut%20pro/testing.fcpbundle/9-19-26/Original%20Media/Phase%201%20-%20Flight%20Test%20No%202%20with%20Design%20v8%20-%202026-07-30.mov">
+                <bookmark>Ym9va+wDAAAAAAUQQAAAAHbzuVYyJmWMdfKsx5XdWO61lsRAi1nRJOUzxVmrTlqoAAAAAAAAAAAAAAAAAAAAAMwCAAAgAAAAAQIAAHY6hSjqD51kC52VlRZJ8bj9oil95x5CA2F/JslQ0AVZBAAAAAMDAAAAGAAoBQAAAAEBAABVc2VycwAAAAgAAAABAQAAc2hyZXlhc2gHAAAAAQEAAERlc2t0b3AAEQAAAAEBAAB0ZXN0IGZpbmFsY3V0IHBybwAAABEAAAABAQAAdGVzdGluZy5mY3BidW5kbGUAAAAHAAAAAQEAADktMTktMjYADgAAAAEBAABPcmlnaW5hbCBNZWRpYQAAOgAAAAEBAABQaGFzZSAxIC0gRmxpZ2h0IFRlc3QgTm8gMiB3aXRoIERlc2lnbiB2OCAtIDIwMjYtMDctMzAubW92AAAgAAAAAQYAADgAAABIAAAAWAAAAGgAAACEAAAAoAAAALAAAADIAAAACAAAAAQDAACFDgAAAAAAAAgAAAAEAwAAj6gAAAAAAAAIAAAABAMAAJSoAAAAAAAACAAAAAQDAABfmFAAAAAAAAgAAAAEAwAAiJhQAAAAAAAIAAAABAMAAJqYUAAAAAAACAAAAAQDAABlwFAAAAAAAAgAAAAEAwAAr8BQAAAAAAAgAAAAAQYAADQBAABEAQAAVAEAAGQBAAB0AQAAhAEAAJQBAACkAQAACAAAAAAEAABByA3wyu4UexgAAAABAgAAAQAAAAAAAAAPAAAAAAAAAAAAAAAAAAAACAAAAAQDAAAGAAAAAAAAAAQAAAADAwAA9QEAAAgAAAABCQAAZmlsZTovLy8MAAAAAQEAAE1hY2ludG9zaCBIRAgAAAAEAwAAACBFjNABAAAIAAAAAAQAAEHIJMJRAAAAJAAAAAEBAAAzQTQ2OUMxQS0zRUE0LTQzOEMtQkNGQi0yODRFOTA4MzI2NDYYAAAAAQIAAIEAAAABAAAA7xMAAAEAAAAAAAAAAAAAAAEAAAABAQAALwAAAAAAAAABBQAA2AAAAP7///8BAAAAAAAAABEAAAAEEAAADAEAAAAAAAAFEAAAtAEAAAAAAAAQEAAA7AEAAAAAAABAEAAA3AEAAAAAAAACIAAAuAIAAAAAAAAFIAAAKAIAAAAAAAAQIAAAOAIAAAAAAAARIAAAbAIAAAAAAAASIAAATAIAAAAAAAATIAAAXAIAAAAAAAAgIAAAmAIAAAAAAAAwIAAAxAIAAAAAAAABwAAADAIAAAAAAAARwAAASAAAAAAAAAASwAAAHAIAAAAAAAAQ0AAALAAAAAAAAACE8AAABAAAAAAAAAA=</bookmark>
+            </media-rep>
+        </asset>
+        <asset id="r4" name="Phase 1 - Visualizing the Control Boards 3D model in Apple Vision Pro - 2026-06-16" uid="257CAF3561DB00F12FAC42645EF9C1A4" start="0s" duration="50457/600s" hasVideo="1" format="r5" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="44100">
+            <media-rep kind="original-media" sig="257CAF3561DB00F12FAC42645EF9C1A4" src="file:///Users/shreyash/Desktop/test%20finalcut%20pro/testing.fcpbundle/9-19-26/Original%20Media/Phase%201%20-%20Visualizing%20the%20Control%20Boards%203D%20model%20in%20Apple%20Vision%20Pro%20-%202026-06-16.mp4">
+                <bookmark>Ym9va0wEAAAAAAUQQAAAAM6wPjTk+UglcYZrlOrYAlnxdrD3HU/7u92jAdYC86zzAAAAAAAAAAAAAAAAAgAAACADAAAgAAAAAQIAADxP5O2ZPPeNVj0Mja9f775Ags77d71frBSw6+QvtAmYBAAAAAMDAAAAGAAoBQAAAAEBAABVc2VycwAAAAgAAAABAQAAc2hyZXlhc2gHAAAAAQEAAERlc2t0b3AAEQAAAAEBAAB0ZXN0IGZpbmFsY3V0IHBybwAAABEAAAABAQAAdGVzdGluZy5mY3BidW5kbGUAAAAHAAAAAQEAADktMTktMjYADgAAAAEBAABPcmlnaW5hbCBNZWRpYQAAVgAAAAEBAABQaGFzZSAxIC0gVmlzdWFsaXppbmcgdGhlIENvbnRyb2wgQm9hcmRzIDNEIG1vZGVsIGluIEFwcGxlIFZpc2lvbiBQcm8gLSAyMDI2LTA2LTE2Lm1wNAAAIAAAAAEGAAA4AAAASAAAAFgAAABoAAAAhAAAAKAAAACwAAAAyAAAAAgAAAAEAwAAhQ4AAAAAAAAIAAAABAMAAI+oAAAAAAAACAAAAAQDAACUqAAAAAAAAAgAAAAEAwAAX5hQAAAAAAAIAAAABAMAAIiYUAAAAAAACAAAAAQDAACamFAAAAAAAAgAAAAEAwAAZcBQAAAAAAAIAAAABAMAAGfAUAAAAAAAIAAAAAEGAABQAQAAYAEAAHABAACAAQAAkAEAAKABAACwAQAAwAEAAAgAAAAABAAAQcfwy0AAAAAYAAAAAQIAAAEAAAAAAAAADwAAAAAAAAAAAAAAAAAAAAgAAAAEAwAABgAAAAAAAAAEAAAAAwMAAPUBAAAIAAAAAQkAAGZpbGU6Ly8vDAAAAAEBAABNYWNpbnRvc2ggSEQIAAAABAMAAAAgRYzQAQAACAAAAAAEAABByCTCUQAAACQAAAABAQAAM0E0NjlDMUEtM0VBNC00MzhDLUJDRkItMjg0RTkwODMyNjQ2GAAAAAECAACBAAAAAQAAAO8TAAABAAAAAAAAAAAAAAABAAAAAQEAAC8AAAAAAAAAAQUAAC8AAAABAQAATlNVUkxCb29rbWFya1F1YXJhbnRpbmVNb3VudGVkTmV0d29ya1ZvbHVtZXNLZXkA5AAAAP7///8BAAAAAAAAABIAAAAEEAAAKAEAAAAAAAAFEAAA0AEAAAAAAAAQEAAACAIAAAAAAABAEAAA+AEAAAAAAAACIAAA1AIAAAAAAAAFIAAARAIAAAAAAAAQIAAAVAIAAAAAAAARIAAAiAIAAAAAAAASIAAAaAIAAAAAAAATIAAAeAIAAAAAAAAgIAAAtAIAAAAAAAAwIAAA4AIAAAAAAAABwAAAKAIAAAAAAAARwAAASAAAAAAAAAASwAAAOAIAAAAAAAAQ0AAALAAAAAAAAACE8AAABAAAAAAAAADoAgCA4AIAAAAAAAA=</bookmark>
+            </media-rep>
+        </asset>
+        <format id="r5" name="FFVideoFormat1080p30" frameDuration="100/3000s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+        <asset id="r6" name="Phase 1 - Flying the Drone Pt2 — Reversed Motor Direction, Arming Still Fails (Test 2) - 2026-06-29" uid="55E1CE97E675B998DC095037006ACA9C" start="2294562270/30000s" duration="5591586/30000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="192000">
+            <media-rep kind="original-media" sig="55E1CE97E675B998DC095037006ACA9C" src="file:///Users/shreyash/Desktop/test%20finalcut%20pro/testing.fcpbundle/9-19-26/Original%20Media/Phase%201%20-%20Flying%20the%20Drone%20Pt2%20%E2%80%94%20Reversed%20Motor%20Direction,%20Arming%20Still%20Fails%20(Test%202)%20-%202026-06-29.mov">
+                <bookmark>Ym9vaxwEAAAAAAUQQAAAALOVH6YMVnYq8FTlUDSWpXae1obOqDdlFJSBdiiFT/wOAAAAAAAAAAAAAAAAAAAAAPwCAAAgAAAAAQIAALmEDCDm0rCwcxOLzAnIt8Hz5yVVXux5mFp140srsLV8BAAAAAMDAAAAGAAoBQAAAAEBAABVc2VycwAAAAgAAAABAQAAc2hyZXlhc2gHAAAAAQEAAERlc2t0b3AAEQAAAAEBAAB0ZXN0IGZpbmFsY3V0IHBybwAAABEAAAABAQAAdGVzdGluZy5mY3BidW5kbGUAAAAHAAAAAQEAADktMTktMjYADgAAAAEBAABPcmlnaW5hbCBNZWRpYQAAaQAAAAEBAABQaGFzZSAxIC0gRmx5aW5nIHRoZSBEcm9uZSBQdDIg4oCUIFJldmVyc2VkIE1vdG9yIERpcmVjdGlvbiwgQXJtaW5nIFN0aWxsIEZhaWxzIChUZXN0IDIpIC0gMjAyNi0wNi0yOS5tb3YAAAAgAAAAAQYAADgAAABIAAAAWAAAAGgAAACEAAAAoAAAALAAAADIAAAACAAAAAQDAACFDgAAAAAAAAgAAAAEAwAAj6gAAAAAAAAIAAAABAMAAJSoAAAAAAAACAAAAAQDAABfmFAAAAAAAAgAAAAEAwAAiJhQAAAAAAAIAAAABAMAAJqYUAAAAAAACAAAAAQDAABlwFAAAAAAAAgAAAAEAwAABsFQAAAAAAAgAAAAAQYAAGQBAAB0AQAAhAEAAJQBAACkAQAAtAEAAMQBAADUAQAACAAAAAAEAABBx/mn3KKPWxgAAAABAgAAAQAAAAAAAAAPAAAAAAAAAAAAAAAAAAAACAAAAAQDAAAGAAAAAAAAAAQAAAADAwAA9QEAAAgAAAABCQAAZmlsZTovLy8MAAAAAQEAAE1hY2ludG9zaCBIRAgAAAAEAwAAACBFjNABAAAIAAAAAAQAAEHIJMJRAAAAJAAAAAEBAAAzQTQ2OUMxQS0zRUE0LTQzOEMtQkNGQi0yODRFOTA4MzI2NDYYAAAAAQIAAIEAAAABAAAA7xMAAAEAAAAAAAAAAAAAAAEAAAABAQAALwAAAAAAAAABBQAA2AAAAP7///8BAAAAAAAAABEAAAAEEAAAPAEAAAAAAAAFEAAA5AEAAAAAAAAQEAAAHAIAAAAAAABAEAAADAIAAAAAAAACIAAA6AIAAAAAAAAFIAAAWAIAAAAAAAAQIAAAaAIAAAAAAAARIAAAnAIAAAAAAAASIAAAfAIAAAAAAAATIAAAjAIAAAAAAAAgIAAAyAIAAAAAAAAwIAAA9AIAAAAAAAABwAAAPAIAAAAAAAARwAAASAAAAAAAAAASwAAATAIAAAAAAAAQ0AAALAAAAAAAAACE8AAABAAAAAAAAAA=</bookmark>
+            </media-rep>
+        </asset>
+    </resources>
+    <library location="file:///Users/shreyash/Desktop/test%20finalcut%20pro/testing.fcpbundle/">
+        <event name="9-19-26" uid="7FF49582-F229-41F3-A548-BA40C640CDD5">
+            <project name="QA Timeline" uid="F1C914F8-74CE-4EC5-BB6F-07E26A0C6EEA" modDate="2026-09-21 15:35:31 -0400">
+                <sequence format="r1" duration="1201200/30000s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <ref-clip ref="r2" offset="0s" name="QA Compound Test" duration="540540/30000s">
+                            <adjust-transform position="13.2372 7.5" scale="1.05 1.05"/>
+                            <asset-clip ref="r4" lane="1" offset="359359/30000s" name="Phase 1 - Visualizing the Control Boards 3D model in Apple Vision Pro - 2026-06-16" start="20s" duration="135135/30000s" format="r5" tcFormat="NDF" audioRole="dialogue">
+                                <conform-rate srcFrameRate="30"/>
+                                <adjust-transform position="-2.36637 7.5" scale="1.05 1.05"/>
+                            </asset-clip>
+                        </ref-clip>
+                        <asset-clip ref="r6" offset="540540/30000s" name="Phase 1 - Flying the Drone Pt2 — Reversed Motor Direction, Arming Still Fails (Test 2) - 2026-06-29" start="2294562270/30000s" duration="360360/30000s" tcFormat="NDF" audioRole="dialogue">
+                            <adjust-transform position="-6.559 -2.41695" scale="1.05 1.05"/>
+                        </asset-clip>
+                        <asset-clip ref="r3" offset="900900/30000s" name="Phase 1 - Flight Test No 2 with Design v8 - 2026-07-30" start="1705373670/30000s" duration="300300/30000s" tcFormat="NDF" audioRole="dialogue"/>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+        <smart-collection name="Projects" match="all">
+            <match-clip rule="is" type="project"/>
+        </smart-collection>
+        <smart-collection name="All Video" match="any">
+            <match-media rule="is" type="videoOnly"/>
+            <match-media rule="is" type="videoWithAudio"/>
+        </smart-collection>
+        <smart-collection name="Audio Only" match="all">
+            <match-media rule="is" type="audioOnly"/>
+        </smart-collection>
+        <smart-collection name="Stills" match="all">
+            <match-media rule="is" type="stills"/>
+        </smart-collection>
+        <smart-collection name="Favorites" match="all">
+            <match-ratings value="favorites"/>
+        </smart-collection>
+        <smart-collection name="Missing Analysis" match="all">
+            <match-analysis-type rule="isMissing" value="any"/>
+        </smart-collection>
+    </library>
+</fcpxml>
