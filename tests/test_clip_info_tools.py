@@ -270,8 +270,10 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                ("timeline.captureClipFrame", {"handle": "obj_1", "frameMaxWidth": 960}),
-                ("timeline.captureClipFrame", {"handle": "obj_1", "frameMaxWidth": 480, "frameTime": 4.0}),
+                ("timeline.captureClipFrame", {"handle": "obj_1", "frameMaxWidth": 960,
+                                               "renderTimeout": 5.0, "timeout": 30}),
+                ("timeline.captureClipFrame", {"handle": "obj_1", "frameMaxWidth": 480, "frameTime": 4.0,
+                                               "renderTimeout": 5.0, "timeout": 30}),
             ],
         )
         self.assertIsInstance(out_default, list)

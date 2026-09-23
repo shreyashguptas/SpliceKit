@@ -232,6 +232,7 @@ Undo shows the name SpliceKit passes, "Trim"; inside a `begin_edit` group, that 
 get_timeline_clips()                      # find the clip's handle
 get_clip_info("obj_12")                   # Info inspector fields + (SpliceKit) placement, effects, title text, markers, transcript words, a frame image
 capture_clip_frame("obj_12")              # the clip as rendered in the Viewer (effects included); moves the playhead and restores it
+                                          # waits (render_timeout, 5 s) until the Viewer shows the new frame; stale:true if it never did
 ```
 `get_clip_info` never moves the playhead: its frame is decoded from the source media file (no effects), and the
 tool returns it as MCP image content. Titles, generators and gap clips have no source media file and say so; a
@@ -384,6 +385,22 @@ xml = generate_fcpxml(
 import_fcpxml(xml, internal=True)
 ```
 
+### Import an FCPXML file
+```
+import_fcpxml(path="~/Exports/Edit v2.fcpxml")          # read on the Mac side; no need to pass the XML inline
+import_fcpxml(path="file:///Users/me/a%20b.fcpxml", library="My Library")
+import_fcpxml_status(job_id="3f2a9c1e")                  # a job still running when the wait ended
+```
+Every import runs as a job (`fcpxml.import` with `async=true`); the tool waits up to `wait_seconds`
+(60) and otherwise returns the job id. An FCPXML whose media sits on a network volume keeps FCP's
+"Importing Remote Resources" sheet up for minutes: poll `import_fcpxml_status` (it answers off the
+main thread and lists FCP's on-screen windows while the job runs) and never import the same file
+again while it runs. The library is the one the XML's `<library location>` names when it is open,
+else `library=`, else the first open library; the answer says which and why. `internal=True` (the
+default) is the safe route: FCP's own open-file route (NSWorkspace `openFile:`, `internal=False`)
+asks "Which library do you want to import … into?" in a modal panel that blocks the bridge, so
+`internal=False` switches to the internal importer when the named library is open.
+
 ### Inspect clip effects
 ```
 timeline_action("selectClipAtPlayhead")
@@ -424,9 +441,12 @@ timeline_action("clearRange")      # remove range selection
 ### Text-based editing via transcript
 ```
 open_transcript()                              # transcribe all clips on timeline
-open_transcript(file_url="/path/to/video.mp4") # transcribe a specific file
-open_transcript(force_retranscribe=True)       # discard cache and re-transcribe
-get_transcript()                               # get words with timestamps + speakers + silences + gap histogram
+open_transcript(file_url="/path/to/video.mp4") # transcribe a specific file (a path, ~/..., or a file:// URL)
+open_transcript(force_retranscribe=True)       # discard cache and re-transcribe (stops a run in progress)
+open_transcript(primary_storyline_only=True)   # leave connected clips (B-roll, music) out; remembered
+get_transcript()                               # first 1000 words + silences; status, skipped clips, progress
+get_transcript(start_seconds=60, end_seconds=120, fields="text,startTime,endTime", words_only=True)
+get_transcript(offset=1000)                    # next page (the answer says where the next page starts)
 delete_transcript_words(start_index=5, count=3) # delete words 5-7 (removes video segment)
 move_transcript_words(start_index=10, count=2, dest_index=3) # reorder clips
 search_transcript("hello")                     # search for text in transcript
@@ -437,6 +457,15 @@ set_transcript_speaker(start_index=0, count=50, speaker="Host")  # label speaker
 set_silence_threshold(threshold=0.5)           # recompute silences immediately (no re-transcription)
 close_transcript()                             # close the panel
 ```
+
+Clips that cannot be transcribed are skipped and listed by `get_transcript` with the reason instead
+of failing the run: no audio track (screen recordings), volume at or below -60 dB (a muted connected
+clip), media that is missing or unreadable, or a file the transcriber cannot decode. File mode
+(`file_url`) needs no project open and keeps its words until `open_transcript()` is called without a
+file. A clip FCP rate-conforms (30 fps media in a 29.97 project) is mapped through the conform, so its
+words land where they are heard. The raw `transcript.getState` takes `wordsOnly`, `fields`,
+`startSeconds`/`endSeconds`, `offset`/`limit`, `includeSilences`, `includeText`, `includeGapBuckets`;
+with none of them it returns the full state as before (a 40-minute transcript is ~1.8 M characters).
 
 The transcript panel opens inside FCP as a floating window with an **engine selector dropdown**:
 - **Parakeet v3** (default) — NVIDIA Parakeet TDT 0.6B multilingual (25 languages), on-device via FluidAudio

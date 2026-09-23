@@ -879,26 +879,27 @@ When writing, use both the generic type and the version-specific type matching y
 
 ---
 
-## Recommended Approach: FCPXML Import + Automatic Attribute Restore ✅ TESTED
+## Recommended Approach: FCPXML Import ✅ TESTED
 
-FCP's `importClipsWithOptions:` does not preserve per-clip attributes (`adjust-volume`,
-`adjust-blend`, effects). The import code exists in FCP's `FFXMLImporter` but the
-`importClipsWithOptions:` path skips audio parameter application.
+The pasteboard import now calls `importWithOptions:` (the full-document import) first,
+and on FCP 12.3 that path applies per-clip `adjust-volume` and `adjust-blend` itself: a
+clip imported with `<adjust-volume amount="-8dB"/>` reads a gain of 0.398 (-8.00 dB)
+straight after the import. `importClipsWithOptions:` (browser clips only) is the
+fallback for XML without a project.
 
-**SpliceKit solves this automatically**: the `fcpxml.pasteImport` method parses attributes
-from the FCPXML before import, imports the media, then applies the attributes via the
-inspector. This is a single API call — the two-step process is handled internally.
+SpliceKit used to "restore" those attributes after the import: it parsed them from the
+XML, ran `selectAll:` on whatever timeline was open and set the value through the
+inspector on the selection. With another project open, that selected every clip in the
+user's project and aimed the change at it, so the step was removed.
 
 ### From SpliceKit — Single Call (tested, working):
 
 ```python
-# fcpxml.pasteImport handles everything:
-# 1. Parses adjust-volume, adjust-blend from the FCPXML
-# 2. Imports the clip via FFXMLTranslationTask (media linking)
-# 3. Loads the new project, selects clips
-# 4. Applies parsed attributes via inspector.set
+# fcpxml.pasteImport:
+# 1. Imports the XML via FFXMLTranslationTask (media linking)
+# 2. FCP applies adjust-volume / adjust-blend from the XML itself
 #
-# Returns: {"status": "ok", "importOK": true, "restoredAttributes": ["volume=-8dB"]}
+# Returns: {"status": "ok", "importOK": true, "library": "...", "libraryChosenBy": "..."}
 
 fcpxml.pasteImport(xml='''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -936,16 +937,13 @@ The `SpliceKit_handlePasteboardImportXML` function in `SpliceKitServer.m`:
 3. **Configures `FFXMLImportOptions`** with:
    - `setIncrementalImport:YES` — merge into existing library
    - `setConflictResolutionType:3` — merge, don't replace
-   - `setLibrary:` — targets the active library (prevents "Which library?" dialog)
+   - `setLibrary:` — targets the library named by `library=`, else the one the XML's
+     `<library location>` names when open, else the first open library (prevents "Which library?" dialog)
    - `setTargetEvent:` — targets the current timeline's event
-4. **Calls `importClipsWithOptions:`** — imports media, creates project
-5. **Parses the original FCPXML** with `NSXMLDocument`:
-   - Extracts `adjust-volume amount=` → dB value
-   - Extracts `adjust-blend amount=` → opacity value
-6. **Finds and loads the new project** by matching the `<project name=...>` from the FCPXML
-7. **Selects all clips** in the new timeline
-8. **Calls `inspector.set`** for each parsed attribute (volume, opacity)
-9. **Returns** `{"status":"ok", "restoredAttributes": ["volume=-8dB"]}`
+4. **Calls `importWithOptions:`** (full document), falling back to
+   `importClipsWithOptions:` for clip-only XML — imports media, creates the project;
+   FCP applies `adjust-volume` / `adjust-blend` itself
+5. **Returns** `{"status":"ok", "importOK": true, "library": "...", "libraryChosenBy": "..."}`
 
 ### Building a Workflow Extension That Uses This
 

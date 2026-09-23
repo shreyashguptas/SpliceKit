@@ -289,18 +289,44 @@ Task {
 
         // Phase 1: Transcribe all files (ASR actor serializes these, runs on ANE)
         var asrResults: [(index: Int, file: String, result: ASRResult)] = []
+        // Per-file failures (no audio track, a file on an unmounted volume, a format
+        // the decoder refuses). One of them used to throw out of the loop and fail the
+        // whole batch with exit 1, so a timeline with a single silent screen recording
+        // could not be transcribed at all. Now the file is reported and the rest go on.
+        var fileErrors: [String: String] = [:]
         for (index, entry) in batchEntries.enumerated() {
             let fileURL = URL(fileURLWithPath: entry.file)
             guard FileManager.default.fileExists(atPath: entry.file) else {
                 printError("File not found: \(entry.file)")
+                fileErrors[entry.file] = "File not found"
                 continue
             }
             if showProgress {
                 let pct = 0.20 + (0.50 * Double(index) / totalFiles)
                 reportProgress(pct, "Transcribing \(index+1)/\(Int(totalFiles)): \(fileURL.lastPathComponent)...")
             }
-            let result = try await manager.transcribe(fileURL, source: .system)
-            asrResults.append((index: index, file: entry.file, result: result))
+            do {
+                let result = try await manager.transcribe(fileURL, source: .system)
+                asrResults.append((index: index, file: entry.file, result: result))
+            } catch {
+                let reason = "\(error.localizedDescription)"
+                printError("Could not transcribe \(fileURL.lastPathComponent): \(reason)")
+                fileErrors[entry.file] = reason
+                if !batchMode { throw error }
+            }
+        }
+        if batchMode && asrResults.isEmpty && !fileErrors.isEmpty {
+            // Nothing usable: still print the per-file reasons on stdout, then fail.
+            let failed = batchEntries.map { ["file": $0.file, "words": [] as [Any],
+                                              "error": fileErrors[$0.file] ?? "not transcribed"] as [String: Any] }
+            if let data = try? JSONSerialization.data(withJSONObject: failed, options: [.sortedKeys]),
+               let text = String(data: data, encoding: .utf8) {
+                print(text)
+            }
+            printError("No file in the batch could be transcribed")
+            exitCode = 1
+            semaphore.signal()
+            return
         }
 
         if showProgress { reportProgress(0.70, "Transcription complete — \(asrResults.count) file(s)") }
@@ -340,7 +366,8 @@ Task {
         for entry in batchEntries {
             if !processedFiles.contains(entry.file) {
                 if batchMode {
-                    allResults.append(["file": entry.file, "words": [] as [Any], "error": "File not found"])
+                    allResults.append(["file": entry.file, "words": [] as [Any],
+                                       "error": fileErrors[entry.file] ?? "File not found"])
                 }
             }
         }

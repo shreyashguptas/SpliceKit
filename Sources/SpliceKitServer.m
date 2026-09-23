@@ -2836,17 +2836,124 @@ static NSDictionary *SpliceKit_handleOTIOToFCPXML(NSDictionary *params) {
     return @{@"status": @"ok", @"fcpxml": fcpxml};
 }
 
+NSString *SpliceKit_filesystemPathFromParam(id value);  // defined with the transcript handlers
+NSDictionary *SpliceKit_handleFCPXMLImportAsync(NSDictionary *params);
+NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
+
+// A library's bundle URL. FFLibrary answers -URL; the lowercase -url the import code
+// used to ask for answers nothing, so the target library was never matched by path
+// and setLibraryURL: was never called.
+static NSURL *SpliceKit_libraryBundleURL(id library) {
+    for (NSString *name in @[@"URL", @"url", @"fileURL"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (![library respondsToSelector:sel]) continue;
+        @try {
+            id u = ((id (*)(id, SEL))objc_msgSend)(library, sel);
+            if ([u isKindOfClass:[NSURL class]]) return u;
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
+// The <library location="file:///.../X.fcpbundle/"> an FCPXML document names, as a
+// standardized filesystem path, or nil.
+static NSString *SpliceKit_fcpxmlLibraryLocation(NSString *xml) {
+    if (xml.length == 0) return nil;
+    NSRegularExpression *re = [NSRegularExpression
+        regularExpressionWithPattern:@"<library\\b[^>]*\\blocation\\s*=\\s*\"([^\"]+)\""
+                             options:0 error:nil];
+    // Only the head of the document: <library> encloses everything else.
+    NSRange head = NSMakeRange(0, MIN(xml.length, (NSUInteger)65536));
+    NSTextCheckingResult *m = [re firstMatchInString:xml options:0 range:head];
+    if (!m) return nil;
+    NSString *raw = [xml substringWithRange:[m rangeAtIndex:1]];
+    raw = [raw stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+    NSString *path = SpliceKit_filesystemPathFromParam(raw);
+    return path.length ? [path stringByStandardizingPath] : nil;
+}
+
 NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
-    NSString *xml = params[@"xml"];
-    if (!xml) return @{@"error": @"xml parameter required"};
-    BOOL useInternal = [params[@"internal"] boolValue];
+    // async=true: start the import and return a job id at once (see
+    // SpliceKit_handleFCPXMLImportAsync). An import whose media sits on a network
+    // volume keeps FCP's "Importing Remote Resources" sheet up for minutes, far past
+    // the 20 s the bridge waits for the main thread.
+    if ([params[@"async"] boolValue]) {
+        return SpliceKit_handleFCPXMLImportAsync(params);
+    }
+
+    NSString *xml = [params[@"xml"] isKindOfClass:[NSString class]] ? params[@"xml"] : nil;
+    NSString *sourcePath = nil;
+    if (!xml && params[@"path"]) {
+        // Read the document on the Mac side, so a 30 KB FCPXML does not have to
+        // travel inline through the MCP client.
+        sourcePath = SpliceKit_filesystemPathFromParam(params[@"path"]);
+        NSError *readError = nil;
+        xml = sourcePath ? [NSString stringWithContentsOfFile:sourcePath encoding:NSUTF8StringEncoding
+                                                        error:&readError] : nil;
+        if (!xml) {
+            return @{@"error": [NSString stringWithFormat:@"Could not read FCPXML at %@: %@",
+                                 sourcePath ?: params[@"path"],
+                                 readError.localizedDescription ?: @"not a readable file"]};
+        }
+    }
+    if (!xml) return @{@"error": @"xml or path parameter required (path: a .fcpxml file, plain path or file:// URL)"};
+    // With a path the caller has not seen the XML go by; import it the safe way
+    // unless told otherwise (the file route can open FCP's "which library?" chooser).
+    BOOL useInternal = params[@"internal"] ? [params[@"internal"] boolValue] : (sourcePath != nil);
     BOOL allowFileFallback = params[@"allowFileFallback"] ?
         [params[@"allowFileFallback"] boolValue] : !useInternal;
 
+    // The file route hands the document to FCP (NSWorkspace), and FCP then asks
+    // "Which library do you want to import … into?" in a modal panel, even when the
+    // library the XML's <library location> names is open, and that panel blocks every
+    // main-thread RPC until someone answers it. When that library is open, import
+    // through the internal importer instead, which targets it without asking.
+    NSString *redirectNote = nil;
+    if (!useInternal) {
+        NSString *wantedPath = SpliceKit_fcpxmlLibraryLocation(xml);
+        __block BOOL libraryOpen = NO;
+        if (wantedPath.length) {
+            SpliceKit_executeOnMainThreadWithTimeout(^{
+                @try {
+                    id libs = ((id (*)(id, SEL))objc_msgSend)(
+                        objc_getClass("FFLibraryDocument"), NSSelectorFromString(@"copyActiveLibraries"));
+                    for (id lib in (NSArray *)libs) {
+                        if ([[[SpliceKit_libraryBundleURL(lib) path] stringByStandardizingPath] isEqualToString:wantedPath]) {
+                            libraryOpen = YES;
+                            break;
+                        }
+                    }
+                } @catch (__unused NSException *e) {}
+            }, 5.0, NO);
+        }
+        if (libraryOpen) {
+            useInternal = YES;
+            allowFileFallback = NO;
+            redirectNote = [NSString stringWithFormat:
+                @"internal=false was asked for, but the library the XML names (%@) is open, so the "
+                @"internal importer was used: the file route makes FCP ask which library to import "
+                @"into in a modal panel that blocks the bridge.", wantedPath];
+        }
+    }
+
     // Try the clean path first — no dialogs, no file I/O
     if (useInternal) {
-        NSDictionary *pbResult = SpliceKit_handlePasteboardImportXML(@{@"xml": xml});
+        NSMutableDictionary *pbParams = [@{@"xml": xml} mutableCopy];
+        if (params[@"library"]) pbParams[@"library"] = params[@"library"];
+        if (params[@"mainThreadTimeout"]) pbParams[@"mainThreadTimeout"] = params[@"mainThreadTimeout"];
+        NSDictionary *pbResult = SpliceKit_handlePasteboardImportXML(pbParams);
         if (!pbResult[@"error"]) {
+            if (sourcePath || redirectNote) {
+                NSMutableDictionary *withPath = [pbResult mutableCopy];
+                if (sourcePath) withPath[@"path"] = sourcePath;
+                if (redirectNote) withPath[@"routeNote"] = redirectNote;
+                return withPath;
+            }
+            return pbResult;
+        }
+        if (pbResult[@"mainThreadBusy"]) {
+            // Still running (or queued) on the main thread: a file import now would
+            // import it a second time.
             return pbResult;
         }
         SpliceKit_log(@"Pasteboard import failed (%@), falling back to file import",
@@ -2877,10 +2984,214 @@ NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
             dispatch_semaphore_signal(sem);
         }];
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-    return @{@"status": opened ? @"ok" : @"failed",
+    return @{@"status": opened ? @"handedToFCP" : @"failed",
              @"method": @"file",
-             @"message": opened ? @"FCPXML import triggered (may show library dialog)"
+             @"message": opened ? @"The FCPXML was handed to Final Cut Pro to open; the import runs there and has "
+                                  @"not finished yet. FCP may ask which library to import into in a modal panel "
+                                  @"that blocks the bridge (detect_dialog shows it). Open the library the XML "
+                                  @"names first and import with internal=true to avoid that."
                                 : @"Failed to open file"};
+}
+
+#pragma mark - Final Cut Pro windows, read off the main thread
+//
+// CGWindowListCopyWindowInfo is thread-safe and needs nothing from FCP's main
+// thread, so it answers while that thread is stuck inside a modal progress sheet
+// (an FCPXML import pulling media over the network held it for seven minutes, and
+// every main-thread read timed out meanwhile). A process may read the titles of its
+// own windows without the Screen Recording permission.
+NSArray<NSDictionary *> *SpliceKit_windowSnapshotOffMain(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                                                 kCGNullWindowID);
+    if (!list) return out;
+    pid_t me = getpid();
+    for (NSDictionary *w in (__bridge NSArray *)list) {
+        if ([w[(id)kCGWindowOwnerPID] intValue] != me) continue;
+        NSDictionary *b = w[(id)kCGWindowBounds];
+        double width = [b[@"Width"] doubleValue], height = [b[@"Height"] doubleValue];
+        if (width < 2 || height < 2) continue;
+        NSString *title = w[(id)kCGWindowName] ?: @"";
+        [out addObject:@{
+            @"title": title,
+            @"windowNumber": w[(id)kCGWindowNumber] ?: @0,
+            @"layer": w[(id)kCGWindowLayer] ?: @0,
+            @"alpha": w[(id)kCGWindowAlpha] ?: @1,
+            @"bounds": [NSString stringWithFormat:@"{{%.0f, %.0f}, {%.0f, %.0f}}",
+                        [b[@"X"] doubleValue], [b[@"Y"] doubleValue], width, height],
+        }];
+    }
+    CFRelease(list);
+    return out;
+}
+
+#pragma mark - Async FCPXML import jobs
+//
+// fcpxml.import with async=true runs the import on a worker thread that waits for
+// the main thread as long as the import takes (up to an hour), and returns a job id
+// at once. fcpxml.importStatus reports the job (running / ok / error, elapsed time,
+// the result) and, while it runs, Final Cut Pro's on-screen windows read off the main
+// thread, so the "Import XML" progress sheet shows up there. When the job ends a
+// command.completed event is broadcast with correlation_id = the job id, for clients
+// that subscribed to events.
+
+static NSMutableDictionary<NSString *, NSMutableDictionary *> *sImportJobs = nil;
+static dispatch_queue_t sImportJobsQueue = NULL;
+
+static void SpliceKit_importJobsInit(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sImportJobs = [NSMutableDictionary dictionary];
+        sImportJobsQueue = dispatch_queue_create("com.splicekit.fcpxml-import-jobs", DISPATCH_QUEUE_SERIAL);
+    });
+}
+
+void SpliceKit_broadcastEvent(NSDictionary *event);
+
+NSDictionary *SpliceKit_handleFCPXMLImportAsync(NSDictionary *params) {
+    SpliceKit_importJobsInit();
+    NSMutableDictionary *inner = [params mutableCopy];
+    [inner removeObjectForKey:@"async"];
+    if (!inner[@"mainThreadTimeout"]) inner[@"mainThreadTimeout"] = @3600;
+    // The async path is for the import itself; reading a path that does not exist
+    // should fail now, not in the job.
+    if (!inner[@"xml"] && inner[@"path"]) {
+        NSString *path = SpliceKit_filesystemPathFromParam(inner[@"path"]);
+        if (!path || ![[NSFileManager defaultManager] isReadableFileAtPath:path]) {
+            return @{@"error": [NSString stringWithFormat:@"Could not read FCPXML at %@", path ?: inner[@"path"]]};
+        }
+    }
+    if (!inner[@"xml"] && !inner[@"path"]) {
+        return @{@"error": @"xml or path parameter required"};
+    }
+
+    NSString *jobId = [[[NSUUID UUID] UUIDString] substringToIndex:8].lowercaseString;
+    NSDate *started = [NSDate date];
+    NSMutableDictionary *job = [@{
+        @"jobId": jobId,
+        @"state": @"running",
+        @"started": @([started timeIntervalSince1970]),
+    } mutableCopy];
+    if (inner[@"path"]) job[@"path"] = SpliceKit_filesystemPathFromParam(inner[@"path"]) ?: inner[@"path"];
+    dispatch_sync(sImportJobsQueue, ^{
+        // Keep the 49 most recent finished jobs plus this one; a running job is never dropped.
+        NSArray *finished = [[sImportJobs.allValues filteredArrayUsingPredicate:
+            [NSPredicate predicateWithFormat:@"state != 'running'"]]
+            sortedArrayUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"started" ascending:YES]]];
+        NSInteger excess = (NSInteger)finished.count - 49;
+        for (NSInteger i = 0; i < excess; i++) {
+            [sImportJobs removeObjectForKey:finished[i][@"jobId"]];
+        }
+        sImportJobs[jobId] = job;
+    });
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *result = nil;
+        NSString *exception = nil;
+        @try {
+            // Through the dispatcher, not straight to the handler: the busy check
+            // (a modal dialog up, a drag in the timeline) must run when the import
+            // does, not only when it was queued. An edit landing inside a modal loop
+            // or mid-drag has crashed FCP in its undo handler.
+            NSDictionary *response = SpliceKit_handleRequest(@{@"method": @"fcpxml.import", @"params": inner});
+            if ([response[@"result"] isKindOfClass:[NSDictionary class]]) {
+                result = response[@"result"];
+            } else {
+                id err = response[@"error"];
+                NSMutableDictionary *failed = [NSMutableDictionary dictionary];
+                failed[@"error"] = [err isKindOfClass:[NSDictionary class]] ? (err[@"message"] ?: [err description])
+                                                                             : ([err description] ?: @"import failed");
+                if ([err isKindOfClass:[NSDictionary class]]) {
+                    for (NSString *flag in @[@"mainThreadBusy", @"importStillRunning", @"dialogPending", @"dragPending"]) {
+                        if (err[flag]) failed[flag] = err[flag];
+                    }
+                }
+                result = failed;
+            }
+        } @catch (NSException *e) {
+            exception = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
+        }
+        NSTimeInterval elapsed = -[started timeIntervalSinceNow];
+        __block NSDictionary *snapshot = nil;
+        dispatch_sync(sImportJobsQueue, ^{
+            NSMutableDictionary *j = sImportJobs[jobId];
+            j[@"finished"] = @([[NSDate date] timeIntervalSince1970]);
+            j[@"elapsedSeconds"] = @(round(elapsed * 10) / 10);
+            if (exception || result[@"error"] || !result) {
+                j[@"state"] = @"error";
+                // Not "error": the dispatcher turns a reply's top-level error into an RPC
+                // error, and importStatus would lose the job's state and id with it.
+                j[@"importError"] = exception ?: result[@"error"] ?: @"import returned nothing";
+            } else if ([result[@"status"] isEqualToString:@"handedToFCP"]) {
+                // Opened with FCP: nothing here can tell when (or whether) it finished.
+                j[@"state"] = @"handedToFCP";
+                j[@"message"] = result[@"message"];
+            } else {
+                j[@"state"] = @"ok";
+            }
+            if (result) j[@"result"] = result;
+            snapshot = [j copy];
+        });
+        SpliceKit_log(@"[FCPXMLImport] job %@ finished: %@ (%.1fs)", jobId, snapshot[@"state"], elapsed);
+        NSMutableDictionary *evt = [NSMutableDictionary dictionary];
+        evt[@"type"] = @"command.completed";
+        evt[@"correlation_id"] = jobId;
+        evt[@"method"] = @"fcpxml.import";
+        evt[@"duration_ms"] = @((int)(elapsed * 1000));
+        evt[@"status"] = [snapshot[@"state"] isEqualToString:@"ok"] ? @"ok" : @"error";
+        if (snapshot[@"importError"]) evt[@"error"] = snapshot[@"importError"];
+        if (snapshot[@"result"]) evt[@"result"] = snapshot[@"result"];
+        SpliceKit_broadcastEvent(evt);
+    });
+
+    return @{
+        @"status": @"started",
+        @"jobId": jobId,
+        @"correlation_id": jobId,
+        @"message": @"Import started. Poll fcpxml.importStatus with this jobId; it also shows "
+                    @"Final Cut Pro's progress sheet while the import runs.",
+    };
+}
+
+static NSDictionary *SpliceKit_handleFCPXMLImportStatus(NSDictionary *params) {
+    SpliceKit_importJobsInit();
+    NSString *jobId = [params[@"jobId"] isKindOfClass:[NSString class]] ? params[@"jobId"] : nil;
+    __block NSArray *jobs = nil;
+    dispatch_sync(sImportJobsQueue, ^{
+        if (jobId.length) {
+            NSDictionary *j = sImportJobs[jobId];
+            jobs = j ? @[[j copy]] : @[];
+        } else {
+            NSMutableArray *all = [NSMutableArray array];
+            for (NSDictionary *j in sImportJobs.allValues) [all addObject:[j copy]];
+            [all sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                return [b[@"started"] compare:a[@"started"]];
+            }];
+            jobs = all;
+        }
+    });
+    if (jobId.length && jobs.count == 0) {
+        return @{@"error": [NSString stringWithFormat:@"No import job %@ (jobs live until Final Cut Pro quits)", jobId]};
+    }
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSMutableArray *out = [NSMutableArray array];
+    BOOL anyRunning = NO;
+    for (NSDictionary *j in jobs) {
+        NSMutableDictionary *m = [j mutableCopy];
+        if ([j[@"state"] isEqualToString:@"running"]) {
+            anyRunning = YES;
+            m[@"elapsedSeconds"] = @(round((now - [j[@"started"] doubleValue]) * 10) / 10);
+        }
+        [out addObject:m];
+    }
+    NSMutableDictionary *answer = [NSMutableDictionary dictionary];
+    if (jobId.length) [answer addEntriesFromDictionary:out.firstObject];
+    else answer[@"jobs"] = out;
+    if (anyRunning) {
+        // What FCP shows while the job runs ("Import XML" sheet and the like).
+        answer[@"windows"] = SpliceKit_windowSnapshotOffMain();
+    }
+    return answer;
 }
 
 #pragma mark - FCPXML Pasteboard Import (bypasses library dialog)
@@ -2898,9 +3209,14 @@ NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
 
 NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
     NSString *xml = params[@"xml"];
+    double mainThreadTimeout = [params[@"mainThreadTimeout"] doubleValue];
+    if (mainThreadTimeout <= 0) mainThreadTimeout = 20.0;
 
     __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
+    __block NSString *targetLibraryPath = nil;
+    __block NSString *targetLibraryReason = nil;
+    __block NSString *targetLibraryNote = nil;
+    SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
             // If xml provided, write it to the pasteboard
             if (xml) {
@@ -2973,25 +3289,57 @@ NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
                 ((void (*)(id, SEL, long long))objc_msgSend)(options, setConflictSel, 3);
             }
 
-            // Set the target library (required to avoid "which library?" dialog)
+            // Set the target library (required to avoid "which library?" dialog).
+            // Pick, in order: the library the caller named, the one the document's
+            // <library location> names when it is open, else the first open library.
+            // Always taking the first one put an import meant for library B into A
+            // whenever two were open.
             id activeLibs = ((id (*)(id, SEL))objc_msgSend)(
                 objc_getClass("FFLibraryDocument"), NSSelectorFromString(@"copyActiveLibraries"));
             if (activeLibs && [(NSArray *)activeLibs count] > 0) {
                 id library = ((id (*)(id, SEL, unsigned long))objc_msgSend)(
                     activeLibs, @selector(objectAtIndex:), 0);
+                NSString *wantedName = [params[@"library"] isKindOfClass:[NSString class]] ? params[@"library"] : nil;
+                NSString *wantedPath = SpliceKit_fcpxmlLibraryLocation(xml);
+                NSString *pickedBy = @"first open library";
+                for (id candidate in (NSArray *)activeLibs) {
+                    NSString *name = nil;
+                    NSString *path = nil;
+                    @try {
+                        if ([candidate respondsToSelector:@selector(displayName)]) {
+                            name = [((id (*)(id, SEL))objc_msgSend)(candidate, @selector(displayName)) description];
+                        }
+                        path = [[SpliceKit_libraryBundleURL(candidate) path] stringByStandardizingPath];
+                    } @catch (__unused NSException *e) {}
+                    if (wantedName.length && ([name isEqualToString:wantedName] ||
+                        [[path lastPathComponent] isEqualToString:wantedName] ||
+                        [[[path lastPathComponent] stringByDeletingPathExtension] isEqualToString:wantedName])) {
+                        library = candidate; pickedBy = @"library parameter"; break;
+                    }
+                    if (!wantedName.length && wantedPath.length && [path isEqualToString:wantedPath]) {
+                        library = candidate; pickedBy = @"<library location> in the XML"; break;
+                    }
+                }
+                if (wantedName.length && ![pickedBy isEqualToString:@"library parameter"]) {
+                    result = @{@"error": [NSString stringWithFormat:
+                        @"No open library is named '%@'. Open it first, or leave library out.", wantedName]};
+                    return;
+                }
+                targetLibraryPath = [SpliceKit_libraryBundleURL(library) path];
+                targetLibraryReason = pickedBy;
+                if (wantedPath.length && ![pickedBy isEqualToString:@"<library location> in the XML"] && !wantedName.length) {
+                    targetLibraryNote = [NSString stringWithFormat:
+                        @"The XML names library %@, which is not open; imported into %@ instead.",
+                        wantedPath, targetLibraryPath ?: @"the first open library"];
+                }
                 SEL setLibrarySel = NSSelectorFromString(@"setLibrary:");
                 if ([options respondsToSelector:setLibrarySel]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(options, setLibrarySel, library);
                 }
-                // Also set libraryURL
-                SEL urlSel = NSSelectorFromString(@"url");
-                if ([library respondsToSelector:urlSel]) {
-                    id libURL = ((id (*)(id, SEL))objc_msgSend)(library, urlSel);
-                    SEL setLibURLSel = NSSelectorFromString(@"setLibraryURL:");
-                    if (libURL && [options respondsToSelector:setLibURLSel]) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(options, setLibURLSel, libURL);
-                    }
-                }
+                // Not setLibraryURL: -- the older code asked the library for -url, which it
+                // does not answer, so that call never happened; passing the real bundle URL
+                // (-URL) makes FCP 12.3 show "Which library do you want to import (null)
+                // into?" instead of importing. setLibrary: alone targets the library.
             }
 
             // Set target event from the current timeline's sequence
@@ -3058,130 +3406,13 @@ NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
             id importResults = [task respondsToSelector:resultsSel] ?
                 ((id (*)(id, SEL))objc_msgSend)(task, resultsSel) : nil;
 
-            // ---------------------------------------------------------------
-            // Step 2: Parse attributes from the FCPXML that import stripped,
-            // then apply them to the imported clips via the inspector path.
-            // ---------------------------------------------------------------
-            NSMutableArray *appliedAttrs = [NSMutableArray array];
-            NSString *sourceXML = xml ?: ({
-                // Read back from pasteboard if xml wasn't provided as param
-                NSData *pbData = [pb dataForType:
-                    ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("IXXMLPasteboardType"),
-                        NSSelectorFromString(@"generic"))];
-                pbData ? [[NSString alloc] initWithData:pbData encoding:NSUTF8StringEncoding] : nil;
-            });
-
-            if (sourceXML && importOK) {
-                @try {
-                    NSData *xmlData = [sourceXML dataUsingEncoding:NSUTF8StringEncoding];
-                    NSXMLDocument *doc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:nil];
-                    if (doc) {
-                        // Find all asset-clips and extract their attributes
-                        NSArray *clips = [doc nodesForXPath:@"//asset-clip" error:nil];
-                        for (NSXMLElement *clip in clips) {
-                            NSString *clipName = [[clip attributeForName:@"name"] stringValue];
-                            NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
-                            if (clipName) attrs[@"name"] = clipName;
-
-                            // Extract adjust-volume
-                            NSArray *volNodes = [clip nodesForXPath:@"adjust-volume" error:nil];
-                            if (volNodes.count > 0) {
-                                NSString *amount = [[(NSXMLElement *)volNodes[0] attributeForName:@"amount"] stringValue];
-                                if (amount) {
-                                    // Parse dB value: "-10dB" -> -10.0
-                                    NSString *numStr = [amount stringByReplacingOccurrencesOfString:@"dB" withString:@""];
-                                    attrs[@"volume"] = @([numStr doubleValue]);
-                                }
-                            }
-
-                            // Extract adjust-blend (opacity)
-                            NSArray *blendNodes = [clip nodesForXPath:@"adjust-blend" error:nil];
-                            if (blendNodes.count > 0) {
-                                NSString *amount = [[(NSXMLElement *)blendNodes[0] attributeForName:@"amount"] stringValue];
-                                if (amount) {
-                                    attrs[@"opacity"] = @([amount doubleValue]);
-                                }
-                            }
-
-                            // Only process if we found attributes to restore
-                            if (attrs[@"volume"] || attrs[@"opacity"]) {
-                                // Find the imported clip by loading the new sequence and selecting
-                                // For now, we apply to the most recently created sequence's clips
-                                id activeModule = SpliceKit_getActiveTimelineModule();
-                                if (!activeModule) {
-                                    // The import created a new project; we need to find and load it.
-                                    // Look for a sequence matching the project name in the FCPXML.
-                                    NSArray *projNodes = [doc nodesForXPath:@"//project" error:nil];
-                                    NSString *projName = projNodes.count > 0 ?
-                                        [[(NSXMLElement *)projNodes[0] attributeForName:@"name"] stringValue] : nil;
-
-                                    if (projName) {
-                                        id libs2 = ((id (*)(id, SEL))objc_msgSend)(
-                                            objc_getClass("FFLibraryDocument"),
-                                            NSSelectorFromString(@"copyActiveLibraries"));
-                                        if (libs2 && [(NSArray *)libs2 count] > 0) {
-                                            id lib2 = [(NSArray *)libs2 objectAtIndex:0];
-                                            id seqSet = ((id (*)(id, SEL))objc_msgSend)(
-                                                lib2, NSSelectorFromString(@"_deepLoadedSequences"));
-                                            id allSeqs = ((id (*)(id, SEL))objc_msgSend)(
-                                                seqSet, @selector(allObjects));
-                                            for (id seq in (NSArray *)allSeqs) {
-                                                NSString *seqName = ((id (*)(id, SEL))objc_msgSend)(
-                                                    seq, @selector(displayName));
-                                                if ([seqName isEqualToString:projName]) {
-                                                    // Load this sequence
-                                                    id app = ((id (*)(id, SEL))objc_msgSend)(
-                                                        objc_getClass("NSApplication"), @selector(sharedApplication));
-                                                    id del = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-                                                    id ec = ((id (*)(id, SEL))objc_msgSend)(
-                                                        del, NSSelectorFromString(@"activeEditorContainer"));
-                                                    if (ec) {
-                                                        ((void (*)(id, SEL, id))objc_msgSend)(
-                                                            ec, NSSelectorFromString(@"loadEditorForSequence:"), seq);
-                                                    }
-                                                    // Brief pause for the sequence to load
-                                                    [NSThread sleepForTimeInterval:0.5];
-                                                    activeModule = SpliceKit_getActiveTimelineModule();
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (activeModule) {
-                                    // Select all clips in the timeline
-                                    SEL selAllSel = NSSelectorFromString(@"selectAll:");
-                                    if ([activeModule respondsToSelector:selAllSel]) {
-                                        ((void (*)(id, SEL, id))objc_msgSend)(activeModule, selAllSel, nil);
-                                    }
-                                    [NSThread sleepForTimeInterval:0.2];
-
-                                    // Apply volume via inspector path
-                                    if (attrs[@"volume"]) {
-                                        NSDictionary *volResult = SpliceKit_handleInspectorSet(
-                                            @{@"property": @"volume", @"value": attrs[@"volume"]});
-                                        if (!volResult[@"error"]) {
-                                            [appliedAttrs addObject:
-                                                [NSString stringWithFormat:@"volume=%@dB", attrs[@"volume"]]];
-                                        }
-                                    }
-                                    if (attrs[@"opacity"]) {
-                                        NSDictionary *opaResult = SpliceKit_handleInspectorSet(
-                                            @{@"property": @"opacity", @"value": attrs[@"opacity"]});
-                                        if (!opaResult[@"error"]) {
-                                            [appliedAttrs addObject:
-                                                [NSString stringWithFormat:@"opacity=%@", attrs[@"opacity"]]];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } @catch (NSException *e) {
-                    SpliceKit_log(@"[PasteImport] Attribute restore error: %@", e.reason);
-                }
-            }
+            // No attribute "restore" step after the import. It used to parse
+            // adjust-volume / adjust-blend from the XML, run selectAll: on whatever
+            // timeline was open and set that value through the inspector on the
+            // selection, so importing a project with one -96 dB clip selected every
+            // clip in the user's open project and aimed the volume change at it. FCP
+            // 12.3's importer applies adjust-volume and adjust-blend itself (verified:
+            // a clip imported with adjust-volume -20dB reads gain 0.1).
 
             NSMutableDictionary *info = [NSMutableDictionary dictionary];
             info[@"status"] = @"ok";
@@ -3190,15 +3421,26 @@ NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
                 info[@"hasResults"] = @YES;
                 info[@"resultClass"] = NSStringFromClass([importResults class]);
             }
-            if (appliedAttrs.count > 0) {
-                info[@"restoredAttributes"] = appliedAttrs;
-            }
+            if (targetLibraryPath) info[@"library"] = targetLibraryPath;
+            if (targetLibraryReason) info[@"libraryChosenBy"] = targetLibraryReason;
+            if (targetLibraryNote) info[@"libraryNote"] = targetLibraryNote;
 
             result = info;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
-    });
+    }, mainThreadTimeout, YES);
+    if (!result && SpliceKit_lastMainThreadTimeoutState() != 0) {
+        BOOL running = SpliceKit_lastMainThreadTimeoutState() == 2;
+        return @{@"error": [NSString stringWithFormat:
+                    @"The import %@ after %.0f s on Final Cut Pro's main thread and was not cancelled: "
+                    @"it may still finish (media on a network volume keeps FCP's \"Importing Remote "
+                    @"Resources\" sheet up for minutes). Do not import again; watch detect_dialog, then "
+                    @"check the browser. Pass async=true to get a job id and poll fcpxml.importStatus instead.",
+                    running ? @"was still running" : @"had not started", mainThreadTimeout],
+                 @"mainThreadBusy": @YES,
+                 @"importStillRunning": @(running)};
+    }
     return result;
 }
 
@@ -8389,6 +8631,8 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
     return result ?: @{@"error": @"Failed to trim clip"};
 }
 
+static NSString *SpliceKit_symlinkTarget(NSString *path);
+
 #pragma mark - timeline.getClipInfo / timeline.captureClipFrame
 //
 // Per-clip picture and context for one clip, by handle.
@@ -8864,6 +9108,34 @@ static BOOL SpliceKit_readSourceStart(NSArray *targets, SpliceKit_CMTime *outTim
     return NO;
 }
 
+// A source start read from the item (a collection's clippedRange) in the media file's
+// own time. When FCP conforms a clip's frame rate (30 fps media in a 29.97 project) the
+// collection's ranges are in conformed time and the media component's in file time:
+// media starting at timecode 74435 s reads 74509.435 s on the collection, and
+// subtracting the media origin from that put the clip 74 s into a 45 s file. The two
+// unclipped ranges give the factor. *outFactor is timeline seconds per file second
+// (1 when there is nothing to convert).
+static double SpliceKit_sourceStartInMediaTime(NSArray *targets, double sourceStart, double *outFactor) {
+    if (outFactor) *outFactor = 1.0;
+    if (targets.count < 2) return sourceStart;
+    SpliceKit_CMTimeRange outer = {{0, 0, 0, 0}, {0, 0, 0, 0}}, inner = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    if (!SpliceKit_tryReadCMTimeRangeSelector(targets.firstObject, @"unclippedRange", &outer) ||
+        !SpliceKit_tryReadCMTimeRangeSelector(targets.lastObject, @"unclippedRange", &inner)) {
+        return sourceStart;
+    }
+    double outerStart = SpliceKit_secondsFromTime(outer.start), outerDur = SpliceKit_secondsFromTime(outer.duration);
+    double innerStart = SpliceKit_secondsFromTime(inner.start), innerDur = SpliceKit_secondsFromTime(inner.duration);
+    if (!(outerDur > 0) || !(innerDur > 0)) return sourceStart;
+    // FCP's automatic rate conform only joins close rates (23.98/24/25, 29.97/30); a
+    // container of clips (compound, multicam) spans its own timeline, not a rate.
+    if (SpliceKit_boolForSelector(targets.firstObject, @"isReferenceClip")) return sourceStart;
+    double factor = outerDur / innerDur;
+    if (!isfinite(factor) || factor < 0.95 || factor > 1.05) return sourceStart;
+    if (fabs(factor - 1.0) <= 1e-5 && fabs(outerStart - innerStart) <= 0.001) return sourceStart;
+    if (outFactor) *outFactor = factor;
+    return innerStart + (sourceStart - outerStart) / factor;
+}
+
 // Source media of one timeline item for timeline.getAudioLevels (SpliceKitAudioLevels.m):
 // the same media file, source start and media origin resolution getClipInfo reports,
 // without the frame decode. Main thread only. `fileStart` is how many seconds into the
@@ -8898,6 +9170,11 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
         NSString *sourceStartSelector = @"none";
         BOOL haveSourceStart = SpliceKit_readSourceStart(targets, &sourceStart, &sourceStartSelector);
         double sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+        double rateConform = 1.0;
+        if (haveSourceStart && [sourceStartSelector isEqualToString:@"clippedRange"]) {
+            sourceStartSeconds = SpliceKit_sourceStartInMediaTime(targets, sourceStartSeconds, &rateConform);
+        }
+        if (rateConform != 1.0) out[@"rateConformFactor"] = @(rateConform);
         SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         NSString *mediaOriginSelector = @"none";
         double mediaOriginSeconds = 0.0;
@@ -9153,6 +9430,11 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 : SpliceKit_readSourceStart(probeTargets, &sourceStart, &sourceStartSelector);
             sourceStartKnown = haveSourceStart;
             sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
+            double rateConform = 1.0;
+            if (haveSourceStart && [sourceStartSelector isEqualToString:@"clippedRange"]) {
+                sourceStartSeconds = SpliceKit_sourceStartInMediaTime(probeTargets, sourceStartSeconds, &rateConform);
+            }
+            if (rateConform != 1.0) local[@"rateConformFactor"] = @(rateConform);
             SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *mediaOriginSelector = @"none";
             mediaOriginSeconds = 0.0;
@@ -9178,6 +9460,11 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 double fileStart = sourceStartKnown ? (sourceStartSeconds - mediaOriginSeconds) : 0.0;
                 local[@"sourceMedia"] = @{
                     @"path": path,
+                    // A library's "Original Media" entry is often a symlink to the real
+                    // file (on a NAS, say). Following it with readlink only never touches
+                    // the target volume, so an offline share cannot stall this.
+                    @"resolvedPath": SpliceKit_symlinkTarget(path) ?: path,
+                    @"isSymlink": @(SpliceKit_symlinkTarget(path) != nil),
                     @"fileName": mediaURL.lastPathComponent ?: @"",
                     @"exists": @(exists),
                     @"representation": representation ?: @"unknown",
@@ -9188,7 +9475,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                     @"mediaOrigin": @(mediaOriginSeconds),
                     @"mediaOriginSelector": mediaOriginSelector,
                     @"fileStart": @(fileStart),
-                    @"fileEnd": @(fileStart + clipDuration),
+                    @"fileEnd": @(fileStart + clipDuration / rateConform),
                 };
             } else {
                 local[@"sourceMediaError"] = @"no source media file: this is a title, generator or gap clip (a clip whose media file is missing still reports its path with exists=false)";
@@ -9374,6 +9661,53 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
 // playheadAtCapture is reported for the caller to compare with timelineTime.
 //   params: handle (required), frameTime (default midpoint), frameMaxWidth (960, 64..1920),
 //           path (PNG; default /tmp/splicekit_clip_<handle>.png), restorePlayhead (YES)
+// Where a symlink ultimately points (following up to 8 links with readlink only), or
+// nil when path is not a symlink.
+static NSString *SpliceKit_symlinkTarget(NSString *path) {
+    if (path.length == 0) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *current = path;
+    BOOL followed = NO;
+    for (int hop = 0; hop < 8; hop++) {
+        NSString *dest = [fm destinationOfSymbolicLinkAtPath:current error:nil];
+        if (!dest) break;
+        if (![dest isAbsolutePath]) {
+            dest = [[current stringByDeletingLastPathComponent] stringByAppendingPathComponent:dest];
+        }
+        current = [dest stringByStandardizingPath];
+        followed = YES;
+    }
+    return followed ? current : nil;
+}
+
+// A 64x36 grayscale thumbprint of a PNG on disk, for telling two Viewer captures
+// apart. nil when the file cannot be read.
+static NSData *SpliceKit_viewerThumbprint(NSString *pngPath) {
+    NSData *png = [NSData dataWithContentsOfFile:pngPath];
+    NSBitmapImageRep *rep = png.length ? [NSBitmapImageRep imageRepWithData:png] : nil;
+    CGImageRef image = rep.CGImage;
+    if (!image) return nil;
+    const size_t w = 64, h = 36;
+    NSMutableData *pixels = [NSMutableData dataWithLength:w * h];
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef ctx = CGBitmapContextCreate(pixels.mutableBytes, w, h, 8, w, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGColorSpaceRelease(gray);
+    if (!ctx) return nil;
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), image);
+    CGContextRelease(ctx);
+    return pixels;
+}
+
+// Mean absolute difference of two thumbprints, 0-255; -1 when they cannot be compared.
+static double SpliceKit_thumbprintDistance(NSData *a, NSData *b) {
+    if (!a || !b || a.length != b.length || a.length == 0) return -1;
+    const uint8_t *pa = a.bytes, *pb = b.bytes;
+    double sum = 0;
+    for (NSUInteger i = 0; i < a.length; i++) sum += abs((int)pa[i] - (int)pb[i]);
+    return sum / a.length;
+}
+
 NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
     NSString *handle = [params[@"handle"] isKindOfClass:[NSString class]] ? params[@"handle"] : nil;
     if (handle.length == 0) {
@@ -9391,7 +9725,12 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
 
     __block NSDictionary *result = nil;
     __block NSMutableDictionary *out = nil;
-    SpliceKit_executeOnMainThread(^{
+    // The render wait below runs inside this block, so the main-thread wait has to
+    // cover it: renderTimeout (capped at 15 s) plus the captures and seeks around it.
+    // With the fixed 20 s wait, a 25 s renderTimeout always came back as a timeout.
+    double renderTimeoutParam = [params[@"renderTimeout"] isKindOfClass:[NSNumber class]]
+        ? MAX(0.35, MIN(15.0, [params[@"renderTimeout"] doubleValue])) : 5.0;
+    SpliceKit_executeOnMainThreadWithTimeout(^{
         // Tracked outside the @try so an exception after the seek still puts the
         // playhead back and the error reply says where it was.
         BOOL movedPlayhead = NO;
@@ -9459,6 +9798,34 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
             playheadBefore = havePlayhead ? [before[@"seconds"] doubleValue] : 0.0;
             if (havePlayhead) local[@"playheadBefore"] = @(playheadBefore);
 
+            // What the Viewer shows before the seek, to tell a fresh frame from the
+            // old one. A fixed 0.35 s wait was too short for 60 fps / non-16:9 media
+            // with a Fill conform: three captures in a row came back as the frame the
+            // playhead had left, and nothing said so.
+            BOOL sameFrame = havePlayhead && fabs(playheadBefore - timelineTime) < halfFrame;
+            NSString *beforePath = [path stringByAppendingString:@".before.png"];
+            NSData *beforePrint = nil;
+            if (!sameFrame) {
+                // The reference must be what the Viewer settles on at the current
+                // playhead, not a frame it is still leaving: straight after a seek the
+                // Viewer can still show the previous position, and taking that as the
+                // reference made a correct capture of that same earlier frame read as
+                // stale. Capture until two in a row match (at most ~1 s).
+                NSData *previousPrint = nil;
+                for (int attempt = 0; attempt < 6; attempt++) {
+                    NSDictionary *beforeCapture = SpliceKit_handleCaptureViewer(@{@"path": beforePath});
+                    if (!beforeCapture || beforeCapture[@"error"]) { beforePrint = nil; break; }
+                    beforePrint = SpliceKit_viewerThumbprint(beforePath);
+                    if (previousPrint) {
+                        double d = SpliceKit_thumbprintDistance(beforePrint, previousPrint);
+                        if (d >= 0 && d <= 1.0) break;
+                    }
+                    previousPrint = beforePrint;
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+                }
+                [[NSFileManager defaultManager] removeItemAtPath:beforePath error:nil];
+            }
+
             NSDictionary *seek = SpliceKit_handlePlaybackSeek(@{@"seconds": @(timelineTime)});
             if (!seek || seek[@"error"]) {
                 local[@"status"] = @"failed";
@@ -9469,10 +9836,50 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
             }
             movedPlayhead = YES;
             // Let the Viewer render the new frame before the capture (shipped code
-            // spins the run loop the same way after a model change).
+            // spins the run loop the same way after a model change), then keep
+            // capturing until the image has moved off the pre-seek frame and holds
+            // still across two captures, for up to renderTimeout seconds (default 5).
+            double renderTimeout = renderTimeoutParam;
+            NSDate *renderStart = [NSDate date];
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.35]];
 
             NSDictionary *capture = SpliceKit_handleCaptureViewer(@{@"path": path});
+            if (beforePrint && capture && !capture[@"error"]) {
+                const double changedAt = 1.0;   // mean grey-level difference that counts as a new picture
+                NSData *print = SpliceKit_viewerThumbprint(path);
+                NSData *previous = nil;
+                BOOL changed = SpliceKit_thumbprintDistance(print, beforePrint) > changedAt;
+                BOOL settled = NO;
+                while (-[renderStart timeIntervalSinceNow] < renderTimeout) {
+                    if (changed && previous && SpliceKit_thumbprintDistance(print, previous) <= changedAt) {
+                        settled = YES;
+                        break;
+                    }
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+                    NSDictionary *again = SpliceKit_handleCaptureViewer(@{@"path": path});
+                    if (!again || again[@"error"]) break;
+                    capture = again;
+                    previous = print;
+                    print = SpliceKit_viewerThumbprint(path);
+                    if (!changed) changed = SpliceKit_thumbprintDistance(print, beforePrint) > changedAt;
+                }
+                local[@"renderWaitSeconds"] = @(round(-[renderStart timeIntervalSinceNow] * 100) / 100);
+                if (!print) {
+                    // An unreadable capture says nothing about the Viewer; no verdict.
+                    local[@"staleCheck"] = @"skipped: the capture could not be read back for comparison";
+                } else {
+                    local[@"changedFromBefore"] = @(changed);
+                }
+                if (print && !changed) {
+                    local[@"stale"] = @YES;
+                    local[@"staleWarning"] = [NSString stringWithFormat:
+                        @"the Viewer still showed the frame from before the seek (%.3fs) after %.1f s: this "
+                        @"capture is probably stale, not the clip. Retry with a longer renderTimeout, or "
+                        @"both frames really look alike.", playheadBefore, renderTimeout];
+                } else if (!settled) {
+                    local[@"renderStillChanging"] = @YES;
+                }
+            }
             NSDictionary *atCapture = SpliceKit_handlePlaybackGetPosition(@{});
             if ([atCapture[@"seconds"] isKindOfClass:[NSNumber class]]) {
                 local[@"playheadAtCapture"] = atCapture[@"seconds"];
@@ -9537,7 +9944,7 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
             }
             out = err;
         }
-    });
+    }, renderTimeoutParam + 15.0, YES);
     if (result) return result;
     if (!out) return @{@"error": @"Failed to capture clip frame (main thread did not finish in time)", @"handle": handle};
     if (![out[@"status"] isEqualToString:@"ok"]) return out;
@@ -10401,15 +10808,60 @@ static NSDictionary *SpliceKit_handleTimelineGetState(NSDictionary *params) {
 // Most handlers just forward parameters and return the panel's result.
 //
 
+// A file argument as a plain path, "~/..." or a file:// URL, as a filesystem path.
+// [NSURL fileURLWithPath:] on "file:///Users/a%20b/x.wav" made it relative to
+// FCP's working directory ("/file:/Users/a%20b/x.wav") with the %20s intact.
+NSString *SpliceKit_filesystemPathFromParam(id value) {
+    if (![value isKindOfClass:[NSString class]]) return nil;
+    NSString *raw = [(NSString *)value stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (raw.length == 0) return nil;
+    if ([raw.lowercaseString hasPrefix:@"file:"]) {
+        NSURL *url = [NSURL URLWithString:raw];
+        if (url.isFileURL && url.path.length > 0) return url.path;  // .path percent-decodes
+        NSString *rest = [raw substringFromIndex:5];
+        while ([rest hasPrefix:@"//"]) rest = [rest substringFromIndex:1];
+        return [rest stringByRemovingPercentEncoding] ?: rest;
+    }
+    return [raw stringByExpandingTildeInPath];
+}
+
 static NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
-    NSString *fileURL = params[@"fileURL"];
-    BOOL forceRetranscribe = [params[@"forceRetranscribe"] boolValue];
+    NSString *fileURL = nil;
+    if (params[@"fileURL"] && ![params[@"fileURL"] isKindOfClass:[NSNull class]] &&
+        [[params[@"fileURL"] description] length] > 0) {
+        fileURL = SpliceKit_filesystemPathFromParam(params[@"fileURL"]);
+        BOOL isDir = NO;
+        if (!fileURL || ![[NSFileManager defaultManager] fileExistsAtPath:fileURL isDirectory:&isDir]) {
+            return @{@"error": [NSString stringWithFormat:
+                @"File not found: %@ (from fileURL %@). Pass a plain path or a file:// URL.",
+                fileURL ?: @"(unparseable)", params[@"fileURL"]]};
+        }
+        if (isDir) {
+            return @{@"error": [NSString stringWithFormat:@"%@ is a folder, not a media file.", fileURL]};
+        }
+    }
+    __block BOOL forceRetranscribe = [params[@"forceRetranscribe"] boolValue];
+    id primaryOnlyParam = params[@"primaryStorylineOnly"];
     __block BOOL startedTranscription = NO;
     __block BOOL restoredTranscript = NO;
     __block BOOL alreadyTranscribing = NO;
 
     SpliceKit_executeOnMainThread(^{
         SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
+        if ([primaryOnlyParam respondsToSelector:@selector(boolValue)]) {
+            BOOL primaryOnly = [primaryOnlyParam boolValue];
+            // A different clip set is a different transcript: do not hand back
+            // the one made with the other setting.
+            if (primaryOnly != panel.primaryStorylineOnly) forceRetranscribe = YES;
+            panel.primaryStorylineOnly = primaryOnly;
+        }
+        // Coming back from a file transcript to the timeline: forget the file's
+        // words so the timeline's own transcript is restored (or made).
+        if (!fileURL && panel.sourceFilePath.length > 0 &&
+            panel.status != SpliceKitTranscriptStatusTranscribing) {
+            [panel leaveFileMode];
+        }
         [panel showPanel];
 
         if (fileURL) {
@@ -10466,7 +10918,7 @@ static NSDictionary *SpliceKit_handleTranscriptGetState(NSDictionary *params) {
             [panel ensurePersistedStateLoaded];
         });
     }
-    return [panel getState] ?: @{@"status": @"idle"};
+    return [panel getStateWithOptions:params] ?: @{@"status": @"idle"};
 }
 
 static NSDictionary *SpliceKit_handleTranscriptDeleteWords(NSDictionary *params) {
@@ -10596,7 +11048,9 @@ static NSDictionary *SpliceKit_handleTranscriptSetSilenceThreshold(NSDictionary 
 
 static NSDictionary *SpliceKit_handleTranscriptSetEngine(NSDictionary *params) {
     NSString *engineName = params[@"engine"];
-    if (!engineName) return @{@"error": @"engine is required ('fcpNative', 'appleSpeech', 'parakeetV3', 'parakeetV2', 'whisperLargeV3Turbo', 'whisperLargeV3')"};
+    // The Whisper engines belong to the caption panel (captions.*), not this one; the
+    // old messages offered them here and then rejected them.
+    if (!engineName) return @{@"error": @"engine is required ('parakeet' = 'parakeetV3', 'parakeetV2', 'fcpNative', 'appleSpeech')"};
 
     SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
     if ([engineName isEqualToString:@"fcpNative"]) {
@@ -10610,9 +11064,11 @@ static NSDictionary *SpliceKit_handleTranscriptSetEngine(NSDictionary *params) {
         panel.engine = SpliceKitTranscriptEngineParakeet;
         panel.parakeetModelVersion = @"v2";
     } else {
-        return @{@"error": @"Unknown engine. Use 'fcpNative', 'appleSpeech', 'parakeetV3', 'parakeetV2', 'whisperLargeV3Turbo', or 'whisperLargeV3'"};
+        return @{@"error": @"Unknown engine. Use 'parakeet' (= 'parakeetV3'), 'parakeetV2', 'fcpNative' or 'appleSpeech'"};
     }
-    return @{@"status": @"ok", @"engine": engineName};
+    NSMutableDictionary *answer = [@{@"status": @"ok", @"engine": engineName} mutableCopy];
+    if (panel.engine == SpliceKitTranscriptEngineParakeet) answer[@"parakeetModel"] = panel.parakeetModelVersion ?: @"v3";
+    return answer;
 }
 
 static NSDictionary *SpliceKit_handleTranscriptSetSpeaker(NSDictionary *params) {
@@ -24991,7 +25447,11 @@ NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params) {
 // Check for and auto-dismiss known blocking dialogs (e.g. "video properties not recognized").
 // Called at the start of every request to clear stale dialogs that block interaction.
 static void SpliceKit_autoDismissBlockingDialogs(void) {
-    SpliceKit_executeOnMainThread(^{
+    // Runs before every request. It is opportunistic, so it waits at most 2 s for the
+    // main thread and is not counted as a timeout: with the full 20 s here, a main
+    // thread stuck in a progress sheet made every request (detect_dialog included)
+    // spend 20 s on this before its own work, and the MCP client gave up at 30 s.
+    SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
             // Check for sheets on all windows
             for (NSWindow *window in [NSApp windows]) {
@@ -25076,7 +25536,7 @@ static void SpliceKit_autoDismissBlockingDialogs(void) {
         } @catch (NSException *e) {
             // Silently ignore - auto-dismiss is best-effort
         }
-    });
+    }, 2.0, NO);
 }
 
 #pragma mark - Tool Selection Handler
@@ -25616,12 +26076,13 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
     // knows about, so anything FCP builds from something else reads as empty.
     BOOL includeViewTree = [params[@"viewTree"] boolValue] || [params[@"view_tree"] boolValue];
     __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
+    BOOL answered = SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
             id app = ((id (*)(id, SEL))objc_msgSend)(
                 objc_getClass("NSApplication"), @selector(sharedApplication));
 
             NSMutableArray *dialogs = [NSMutableArray array];
+            NSMutableArray *overlays = [NSMutableArray array];
 
             // Check for modal window
             NSWindow *modalWindow = [NSApp modalWindow];
@@ -25669,6 +26130,23 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
                     NSMutableDictionary *d = [SpliceKit_describeWindowWithViewTree(window, includeViewTree) mutableCopy];
                     d[@"type"] = isAlert ? @"alert" : (isProgressPanel ? @"progress" :
                                   (isSharePanel ? @"share" : @"panel"));
+                    // FCP's own chrome windows (FFOSCOverlayWindow: the Viewer's on-screen
+                    // controls, up after every import) matched the "FF…Window" rule and made
+                    // hasDialog true with nothing to answer. A non-modal window that is an
+                    // overlay, or offers no control at all, is reported apart.
+                    // Matched by what the window is, not by what collectUIElements found in
+                    // it: a panel whose buttons are custom views reads as control-less and
+                    // must still count as a dialog (flagged noControls instead).
+                    BOOL noControls = [d[@"buttons"] count] == 0 && [d[@"textFields"] count] == 0 &&
+                                      [d[@"checkboxes"] count] == 0 && [d[@"popups"] count] == 0;
+                    BOOL isOverlay = window != [NSApp modalWindow] &&
+                                     ([className containsString:@"Overlay"] || [window ignoresMouseEvents]);
+                    if (noControls) d[@"noControls"] = @YES;
+                    if (isOverlay) {
+                        [overlays addObject:@{@"title": d[@"title"] ?: @"", @"class": className,
+                                              @"frame": d[@"frame"] ?: @""}];
+                        continue;
+                    }
                     // Avoid duplicates
                     BOOL isDupe = NO;
                     for (NSDictionary *existing in dialogs) {
@@ -25705,15 +26183,50 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
                 }
             }
 
-            result = @{
+            NSMutableDictionary *r = [@{
                 @"hasDialog": @(dialogs.count > 0),
                 @"dialogCount": @(dialogs.count),
                 @"dialogs": dialogs
-            };
+            } mutableCopy];
+            if (overlays.count > 0) r[@"overlays"] = overlays;
+            result = r;
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
-    });
+    }, 3.0, NO);
+    if (!answered) {
+        // The main thread is inside something long (an import's progress sheet, a
+        // modal the bridge cannot see from here). Answer from the window server
+        // instead of timing out: titles and sizes of FCP's on-screen windows.
+        NSArray *windows = SpliceKit_windowSnapshotOffMain();
+        NSMutableArray *likelyDialogs = [NSMutableArray array];
+        for (NSDictionary *w in windows) {
+            NSString *title = w[@"title"];
+            NSRect frame = NSRectFromString(w[@"bounds"]);
+            int layer = [w[@"layer"] intValue];
+            // By window level: a modal panel or alert sits at the modal-panel level (8);
+            // a sheet at the document level (0) and much smaller than the document
+            // window. Utility panels (SpliceKit's Transcript Editor, Lua REPL, Log,
+            // Mixer; FCP's HUDs) float at level 3 and are not dialogs, nor are menus,
+            // popups and overlays at higher levels.
+            BOOL modalLevel = (layer == kCGModalPanelWindowLevel);
+            BOOL sheetLike = (layer == kCGNormalWindowLevel && frame.size.width < 900 && frame.size.height < 700);
+            if ((modalLevel || sheetLike) && ![title containsString:@"Overlay"]) {
+                [likelyDialogs addObject:w];
+            }
+        }
+        return @{
+            @"mainThreadBusy": @YES,
+            @"hasDialog": @(likelyDialogs.count > 0),
+            @"dialogCount": @(likelyDialogs.count),
+            @"dialogs": likelyDialogs,
+            @"windows": windows,
+            @"note": @"Final Cut Pro's main thread did not answer within 3 s, so this is read from the "
+                     @"window server: window titles, sizes and levels only, no buttons or fields; dialogs are "
+                     @"guessed from the window level (modal panels) and size (sheets). A window named like "
+                     @"\"Import XML\" is a progress sheet; wait for it rather than retrying the operation.",
+        };
+    }
     return result ?: @{@"error": @"Dialog detect failed"};
 }
 
@@ -34119,7 +34632,7 @@ static NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
 // waits for the dialog to be answered.
 static NSWindow *SpliceKit_blockingModalWindow(void) {
     __block NSWindow *blocking = nil;
-    SpliceKit_executeOnMainThread(^{
+    SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
             NSWindow *modal = [NSApp modalWindow];
             if (modal && [modal isVisible]) { blocking = modal; return; }
@@ -34128,7 +34641,7 @@ static NSWindow *SpliceKit_blockingModalWindow(void) {
                 if (sheet && [sheet isVisible]) { blocking = sheet; return; }
             }
         } @catch (NSException *e) {}
-    });
+    }, 5.0, NO);  // pre-check: a busy main thread is the handler's to report
     return blocking;
 }
 
@@ -34149,7 +34662,7 @@ static NSWindow *SpliceKit_blockingModalWindow(void) {
 // thing (-disableActionWhileTracking:).
 static BOOL SpliceKit_timelineIsTracking(void) {
     __block BOOL tracking = NO;
-    SpliceKit_executeOnMainThread(^{
+    SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
             id timeline = SpliceKit_getActiveTimelineModule();
             SEL sel = NSSelectorFromString(@"isTracking");
@@ -34157,7 +34670,7 @@ static BOOL SpliceKit_timelineIsTracking(void) {
                 tracking = ((BOOL (*)(id, SEL))objc_msgSend)(timeline, sel);
             }
         } @catch (NSException *e) { tracking = NO; }
-    });
+    }, 5.0, NO);  // pre-check: a busy main thread is the handler's to report
     return tracking;
 }
 
@@ -34190,8 +34703,14 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 
     SpliceKit_installEffectDragSwizzlesNow();
 
-    // Auto-dismiss known blocking dialogs before processing any request
-    SpliceKit_autoDismissBlockingDialogs();
+    // Auto-dismiss known blocking dialogs before processing any request -- except the
+    // methods that exist to answer while the main thread is busy (liveness, events,
+    // import-job status), which should not wait on it at all.
+    BOOL answersOffMain = [method hasPrefix:@"bridge."] || [method hasPrefix:@"events."] ||
+                          [method hasPrefix:@"async."] || [method isEqualToString:@"fcpxml.importStatus"];
+    if (!answersOffMain) {
+        SpliceKit_autoDismissBlockingDialogs();
+    }
 
     // Anything that changes the document waits while Final Cut Pro is busy; see
     // SpliceKit_blockingModalWindow and SpliceKit_timelineIsTracking for the three
@@ -34245,6 +34764,7 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // cheap and some are per-connection state.
     BOOL wantsAsync = [params[@"async"] boolValue];
     if (wantsAsync
+        && ![method isEqualToString:@"fcpxml.import"]   // has its own job model
         && ![method hasPrefix:@"bridge."]
         && ![method hasPrefix:@"events."]
         && ![method hasPrefix:@"async."]
@@ -34265,6 +34785,7 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 
     NSDictionary *result = nil;
     unsigned timeoutsBefore = SpliceKit_mainThreadDispatchTimeoutCount();
+    SpliceKit_resetMainThreadTimeoutState();
 
     // system.* namespace
     if ([method isEqualToString:@"system.version"]) {
@@ -34360,6 +34881,9 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handlePlaybackShuttle(params);
     }
     // fcpxml.* namespace
+    else if ([method isEqualToString:@"fcpxml.importStatus"]) {
+        result = SpliceKit_handleFCPXMLImportStatus(params);
+    }
     else if ([method isEqualToString:@"fcpxml.import"]) {
         result = SpliceKit_handleFCPXMLImport(params);
     } else if ([method isEqualToString:@"fcpxml.pasteImport"]) {
@@ -34763,19 +35287,45 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // abandoned at the 20s timeout. The two call for different responses, and the
     // generic wording sent this project looking for a bug in the transition code when
     // the transition was sitting behind an unanswered alert.
-    if (SpliceKit_mainThreadDispatchTimeoutCount() > timeoutsBefore) {
+    //
+    // The block is never cancelled, though. It is either still queued (the main thread
+    // was busy and never picked it up; it runs once the main thread is free) or still
+    // running (blocked inside it, typically behind a progress sheet such as FCP's
+    // "Importing Remote Resources"). The old wording said "abandoned", and an FCPXML
+    // import reported that way went on to finish seven minutes later.
+    if (SpliceKit_mainThreadDispatchTimeoutCount() > timeoutsBefore &&
+        !([result isKindOfClass:[NSDictionary class]] && result[@"mainThreadBusy"])) {
+        int state = SpliceKit_lastMainThreadTimeoutState();
+        NSString *message = (state == 2)
+            ? [NSString stringWithFormat:
+                @"'%@' is still running on Final Cut Pro's main thread: the bridge stopped "
+                @"waiting after 20 seconds, but the work was not cancelled and may still "
+                @"finish (a progress sheet, e.g. importing remote media, or a modal "
+                @"dialog opened part-way through). detect_dialog shows what is on screen "
+                @"(it answers from outside the main thread while it is busy); check the "
+                @"result before retrying, or it may be applied twice.", method]
+            : [NSString stringWithFormat:
+                @"'%@' has not run yet: Final Cut Pro's main thread stayed busy for 20 "
+                @"seconds (usually a modal dialog or a long operation already in "
+                @"progress). The request is still queued and runs once the main thread "
+                @"is free — check detect_dialog, and check the result before retrying.",
+                method];
         return @{@"error": @{
             @"code": @(-32002),
-            @"message": [NSString stringWithFormat:
-                @"'%@' did not run: Final Cut Pro's main thread stayed busy for 20 "
-                @"seconds and the work was abandoned. This is usually a modal dialog "
-                @"opened part-way through the operation — check detect_dialog. The "
-                @"operation may be left half-applied.", method],
-            @"mainThreadBlocked": @YES}};
+            @"message": message,
+            @"mainThreadBlocked": @YES,
+            @"mainThreadWork": (state == 2) ? @"running" : @"queued"}};
     }
 
     if (result[@"error"] && ![result[@"error"] isKindOfClass:[NSDictionary class]]) {
-        return @{@"error": @{@"code": @(-32000), @"message": result[@"error"]}};
+        NSMutableDictionary *error = [@{@"code": @(-32000), @"message": result[@"error"]} mutableCopy];
+        // Machine-readable "don't retry" signals survive the collapse to {code, message}:
+        // an FCPXML import that timed out behind a remote-media sheet is still running,
+        // and a caller that cannot tell that from a failure imports it twice.
+        for (NSString *flag in @[@"mainThreadBusy", @"importStillRunning"]) {
+            if (result[flag]) error[flag] = result[flag];
+        }
+        return @{@"error": error};
     }
 
     if (!result) {
