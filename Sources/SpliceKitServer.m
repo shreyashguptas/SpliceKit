@@ -2,7 +2,7 @@
 //  SpliceKitServer.m
 //  The brain of SpliceKit — JSON-RPC 2.0 server that listens on TCP 127.0.0.1:9876.
 //
-//  This is the biggest file in the project (~15K lines) because every FCP operation
+//  This is the biggest file in the project because every FCP operation
 //  is implemented here: timeline editing, playback, effects, transitions, markers,
 //  color correction, retiming, FCPXML import/export, scene detection, and more.
 //
@@ -61,7 +61,6 @@ static int sServerFd = -1;
 
 // Forward declarations
 static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName);
-static NSDictionary *SpliceKit_sendPlayerAction(NSString *selectorName);
 id SpliceKit_getActiveTimelineModule(void);
 static id SpliceKit_getEditorContainer(void);
 static id SpliceKit_getSelectedTimelineItem(id timeline);
@@ -106,7 +105,6 @@ static NSDictionary *SpliceKit_describeWindowWithViewTree(NSWindow *window, BOOL
 static NSString *SpliceKit_readClipRole(id clip);
 static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey);
 static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey);
-static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSString *scopeKey, NSArray<NSDictionary *> *busTargets);
 static NSInteger SpliceKit_mixerIndexOfEffectInStack(id effectStack, id effect);
 static id SpliceKit_mixerFirstManagedEffectInstance(NSMutableDictionary *entry,
                                                     id *outStack,
@@ -3684,35 +3682,6 @@ static NSDictionary *SpliceKit_sendTimelineAction(NSString *selectorName) {
     return result;
 }
 
-// Send an IBAction to the editor container (for playback)
-static NSDictionary *SpliceKit_sendEditorAction(NSString *selectorName) {
-    __block NSDictionary *result = nil;
-
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id container = SpliceKit_getEditorContainer();
-            if (!container) {
-                result = @{@"error": @"No active editor container"};
-                return;
-            }
-
-            SEL sel = NSSelectorFromString(selectorName);
-            if (![container respondsToSelector:sel]) {
-                result = @{@"error": [NSString stringWithFormat:
-                    @"Editor container does not respond to %@", selectorName]};
-                return;
-            }
-
-            ((void (*)(id, SEL, id))objc_msgSend)(container, sel, nil);
-            result = @{@"action": selectorName, @"status": @"ok"};
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-
-    return result;
-}
-
 // Actions that can put up a sheet (a name, a confirmation, a settings panel). Only these
 // get the short run-loop turn below; a blade or an undo in a batch must not pay for it.
 static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
@@ -5573,7 +5542,6 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
 
             if ([action isEqualToString:@"setAudioPlayEnable"]) {
                 BOOL enabled = params[@"enabled"] ? [params[@"enabled"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionSetAudioPlayEnable:error:");
                 NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
@@ -6295,35 +6263,6 @@ static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName) {
              @"main-thread RPC. dismiss_dialog(action=\"cancel\") closes save/open panels."};
 }
 
-// Send action to the player module specifically
-static NSDictionary *SpliceKit_sendPlayerAction(NSString *selectorName) {
-    __block NSDictionary *result = nil;
-
-    SpliceKit_executeOnMainThread(^{
-        @try {
-            id player = SpliceKit_getPlayerModule();
-            if (!player) {
-                result = @{@"error": @"No player module found"};
-                return;
-            }
-
-            SEL sel = NSSelectorFromString(selectorName);
-            if (![player respondsToSelector:sel]) {
-                result = @{@"error": [NSString stringWithFormat:
-                    @"Player module does not respond to %@", selectorName]};
-                return;
-            }
-
-            ((void (*)(id, SEL, id))objc_msgSend)(player, sel, nil);
-            result = @{@"action": selectorName, @"status": @"ok"};
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-
-    return result;
-}
-
 NSDictionary *SpliceKit_handlePlayback(NSDictionary *params) {
     NSString *action = params[@"action"];
     if (!action) return @{@"error": @"action parameter required"};
@@ -6842,31 +6781,12 @@ static NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
             id containedItems = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
             NSMutableArray *clipInfos = [NSMutableArray array];
 
-            // Detect timeline start offset (e.g. 01:00:00:00 = 3600s) using the first clip's
-            // effective range. Input times are relative to content (0 = first frame), so we
-            // add this offset when creating CMTimes for marker placement.
-            double timelineStartOffset = 0;
-            SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
-            BOOL canGetRange = [primaryObj respondsToSelector:erSel];
-
             if ([containedItems isKindOfClass:[NSArray class]]) {
                 double cumulativeStart = 0;
-                BOOL firstClip = YES;
                 for (id item in (NSArray *)containedItems) {
                     if (![item respondsToSelector:@selector(duration)]) continue;
                     SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
                     double dur = (d.timescale > 0) ? (double)d.value / d.timescale : 0;
-
-                    // Get start offset from first clip's absolute position
-                    if (firstClip && canGetRange) {
-                        firstClip = NO;
-                        @try {
-                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
-                                primaryObj, erSel, item);
-                            double absStart = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
-                            timelineStartOffset = absStart; // e.g. 3600.0 for 01:00:00:00
-                        } @catch (NSException *e) {}
-                    }
 
                     [clipInfos addObject:@{@"clip": item, @"start": @(cumulativeStart), @"end": @(cumulativeStart + dur)}];
                     cumulativeStart += dur;
@@ -7612,7 +7532,6 @@ static NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                                      @"with beat_sync_blade or blade_at_times instead."};
                 return;
             }
-            SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceItem);
 
             double sourceStartSec = 0.0;
             double sourceEndSec = 0.0;
@@ -10383,130 +10302,6 @@ static void SpliceKit_swizzled_showSharePanel(id self, SEL _cmd, id sources, id 
     } @catch (NSException *e) {
         SpliceKit_log(@"[BatchExport] Exception in swizzled showSharePanel: %@", e.reason);
     }
-}
-
-// Unused - kept for reference
-static NSString *SpliceKit_queueClipExport(id timeline, SpliceKit_CMTime startTime, SpliceKit_CMTime endTime,
-                                            NSURL *fileURL, id dest) {
-    // Set range for this clip
-    SpliceKit_seekAndMark(timeline, startTime, @"setRangeStart:");
-    SpliceKit_seekAndMark(timeline, endTime, @"setRangeEnd:");
-
-    // Get sources for this range via shareSelection:
-    SEL selSel = NSSelectorFromString(@"shareSelection:");
-    if (![timeline respondsToSelector:selSel]) return @"no shareSelection: method";
-
-    void *rawSources = ((void * (*)(id, SEL, id))objc_msgSend)(timeline, selSel, nil);
-    if (!rawSources) return @"no sources for range";
-
-    id sources = (__bridge id)rawSources;
-    SpliceKit_log(@"[BatchExport] shareSelection: returned %@ (class: %@)", sources, NSStringFromClass([sources class]));
-
-    if (![sources isKindOfClass:[NSArray class]]) {
-        return [NSString stringWithFormat:@"sources not array, got %@", NSStringFromClass([sources class])];
-    }
-    NSUInteger sourceCount = [(NSArray *)sources count];
-    if (sourceCount == 0) return @"empty sources";
-    SpliceKit_log(@"[BatchExport] Got %lu sources", (unsigned long)sourceCount);
-
-    // Create share panel silently to build CK batch objects
-    Class panelClass = objc_getClass("FFConsumerSharePanel")
-        ?: objc_getClass("FFSharePanel")
-        ?: objc_getClass("FFBaseSharePanel");
-    if (!panelClass) return @"no share panel class";
-    SpliceKit_log(@"[BatchExport] Using panel class: %@", NSStringFromClass(panelClass));
-
-    SEL createSel = NSSelectorFromString(@"sharePanelWithSource:destination:error:");
-    if (![(id)panelClass respondsToSelector:createSel]) return @"panel class has no create method";
-
-    id firstSource = [(NSArray *)sources firstObject];
-    SpliceKit_log(@"[BatchExport] First source: %@ (class: %@)", firstSource, NSStringFromClass([firstSource class]));
-
-    __unsafe_unretained id panelError = nil;
-    void *rawPanel = ((void * (*)(id, SEL, id, id, __unsafe_unretained id *))objc_msgSend)(
-        (id)panelClass, createSel, firstSource, dest, &panelError);
-    if (!rawPanel) {
-        NSString *errStr = panelError
-            ? [NSString stringWithFormat:@"panel: %@",
-               ((id (*)(id, SEL))objc_msgSend)(panelError, @selector(localizedDescription))]
-            : @"panel creation returned nil";
-        SpliceKit_log(@"[BatchExport] %@", errStr);
-        return errStr;
-    }
-    id panel = (__bridge id)rawPanel;
-    SpliceKit_log(@"[BatchExport] Panel created: %@", NSStringFromClass([panel class]));
-
-    // Set destination URL
-    SEL setURLSel = NSSelectorFromString(@"setDestinationURL:");
-    if ([panel respondsToSelector:setURLSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(panel, setURLSel, [fileURL URLByDeletingLastPathComponent]);
-    }
-
-    // Extract batches
-    SEL batchesSel = NSSelectorFromString(@"batches");
-    if (![panel respondsToSelector:batchesSel]) return @"panel has no batches method";
-    NSArray *batches = ((id (*)(id, SEL))objc_msgSend)(panel, batchesSel);
-    if (!batches || ![batches isKindOfClass:[NSArray class]]) {
-        SpliceKit_log(@"[BatchExport] batches returned: %@ (class: %@)", batches, batches ? NSStringFromClass([batches class]) : @"nil");
-        return @"no batches";
-    }
-    SpliceKit_log(@"[BatchExport] Got %lu batches", (unsigned long)batches.count);
-    if (batches.count == 0) return @"zero batches";
-
-    // Log batch structure
-    for (NSUInteger bi = 0; bi < batches.count; bi++) {
-        id batch = batches[bi];
-        SpliceKit_log(@"[BatchExport] Batch %lu: %@ (class: %@)", (unsigned long)bi, batch, NSStringFromClass([batch class]));
-        SEL jobsSel = NSSelectorFromString(@"jobs");
-        if ([batch respondsToSelector:jobsSel]) {
-            NSArray *jobs = ((id (*)(id, SEL))objc_msgSend)(batch, jobsSel);
-            SpliceKit_log(@"[BatchExport]   Jobs: %lu", (unsigned long)(jobs ? [(NSArray *)jobs count] : 0));
-            if (jobs && [jobs isKindOfClass:[NSArray class]]) {
-                for (id job in jobs) {
-                    SEL targetsSel = NSSelectorFromString(@"targets");
-                    if ([job respondsToSelector:targetsSel]) {
-                        NSArray *targets = ((id (*)(id, SEL))objc_msgSend)(job, targetsSel);
-                        SpliceKit_log(@"[BatchExport]     Targets: %lu", (unsigned long)(targets ? [(NSArray *)targets count] : 0));
-                        if (targets && [targets isKindOfClass:[NSArray class]]) {
-                            for (id target in targets) {
-                                // Set destination URL on target
-                                SEL setDestSel = NSSelectorFromString(@"setDestinationURL:");
-                                if ([target respondsToSelector:setDestSel]) {
-                                    ((void (*)(id, SEL, id))objc_msgSend)(target, setDestSel, fileURL);
-                                    SpliceKit_log(@"[BatchExport]     Set target URL: %@", fileURL);
-                                }
-                                // Log output URLs
-                                SEL outSel = NSSelectorFromString(@"outputURLs");
-                                if ([target respondsToSelector:outSel]) {
-                                    id urls = ((id (*)(id, SEL))objc_msgSend)(target, outSel);
-                                    SpliceKit_log(@"[BatchExport]     Output URLs: %@", urls);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Create exporter and queue
-    Class exporterClass = objc_getClass("FFSequenceExporter");
-    SEL expSel = NSSelectorFromString(@"sequenceExporterWithSelection:useTimelinePlayback:");
-    if (!exporterClass || ![(id)exporterClass respondsToSelector:expSel]) return @"no exporter class";
-
-    void *rawExporter = ((void * (*)(id, SEL, id, id))objc_msgSend)(
-        (id)exporterClass, expSel, sources, nil);
-    if (!rawExporter) return @"exporter creation failed";
-    id exporter = (__bridge id)rawExporter;
-    SpliceKit_log(@"[BatchExport] Exporter: %@", NSStringFromClass([exporter class]));
-
-    SEL queueSel = NSSelectorFromString(@"queueShareOperationsForBatches:addToTheater:");
-    if (![exporter respondsToSelector:queueSel]) return @"exporter has no queue method";
-
-    SpliceKit_log(@"[BatchExport] Queuing %lu batches...", (unsigned long)batches.count);
-    ((void (*)(id, SEL, id, BOOL))objc_msgSend)(exporter, queueSel, batches, NO);
-    SpliceKit_log(@"[BatchExport] Queued successfully");
-    return @"queued";
 }
 
 NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
@@ -14149,8 +13944,6 @@ static NSDictionary *SpliceKit_handleOptionsSet(NSDictionary *params) {
 // unpredictable return value mapping. By owning the dialog entirely, we control the
 // output parameter (*a3): 1 = accept (create with overlap), 0 = cancel.
 
-static IMP sOrigDefaultOverlapType = NULL;
-static BOOL sForceOverlap = NO; // When YES, defaultTransitionOverlapType returns 2
 static BOOL sFreezeExtendPendingAutoAccept = NO;
 static BOOL sFreezeExtendDidApply = NO;
 
@@ -14159,52 +13952,17 @@ static void SpliceKit_armTransitionAlertAutoAccept(void) {
     sFreezeExtendDidApply = NO;
 }
 
-static BOOL sFreezeExtendInTransitionAlert = NO;
 static BOOL sFreezeExtendUseFreezeFramesForCurrentAlert = NO;
 static IMP sOrigNSAlertRunModal = NULL;
-static IMP sOrigNSAppStopModalWithCode = NULL;
 static IMP sOrigActionAddTransitions = NULL;
 static IMP sOrigOperationAddTransitions = NULL;
 static IMP sOrigOperationAddTransitionsAskedRetry = NULL;
-static id sFreezeExtendTargetRightClip = nil;
 static double sFreezeExtendTargetClipStart = 0.0;
-static double sFreezeExtendTargetClipEnd = 0.0;
-static id sFreezeExtendActionSequence = nil;
-static id sFreezeExtendActionSpineObjects = nil;
-static BOOL sFreezeExtendActionBefore = NO;
-static BOOL sFreezeExtendActionAfter = NO;
-static id sFreezeExtendActionEffects = nil;
-static id sFreezeExtendActionRootItem = nil;
-static BOOL sFreezeExtendActionReportErrors = NO;
-static id sFreezeExtendOperationSequence = nil;
-static id sFreezeExtendOperationSpineObject = nil;
-static id sFreezeExtendOperationObjects = nil;
-static BOOL sFreezeExtendOperationBefore = NO;
-static BOOL sFreezeExtendOperationAfter = NO;
-static id sFreezeExtendOperationEffects = nil;
-static CMTime sFreezeExtendOperationDuration = {0};
-static id sFreezeExtendOperationSpareTransition = nil;
-static int sFreezeExtendOperationReportErrors = 0;
-static BOOL sFreezeExtendHasOperationReplay = NO;
-
-// Swizzled -[FFAnchoredSequence defaultTransitionOverlapType]
-// Original returns 1 (needs handles). We return 2 (overlap/use edge frames) when forced.
-static int SpliceKit_swizzled_defaultTransitionOverlapType(id self, SEL _cmd) {
-    if (sForceOverlap) {
-        SpliceKit_log(@"[FreezeExtend] defaultTransitionOverlapType -> 2 (freeze-frame overlap)");
-        return 2;
-    }
-    return ((int (*)(id, SEL))sOrigDefaultOverlapType)(self, _cmd);
-}
 
 static IMP sOrigDisplayTransitionAlert = NULL;
 
-static BOOL SpliceKit_isFreezeFramesResponse(NSModalResponse response) {
-    return response == NSAlertSecondButtonReturn || response == 0;
-}
-
 static BOOL SpliceKit_shouldForceFreezeOverlap(void) {
-    return sForceOverlap || sFreezeExtendUseFreezeFramesForCurrentAlert;
+    return sFreezeExtendUseFreezeFramesForCurrentAlert;
 }
 
 static double SpliceKit_transitionFrameDurationSeconds(id timeline) {
@@ -14298,28 +14056,6 @@ static BOOL SpliceKit_transitionGetItemBoundsInContext(id context, id item,
     return YES;
 }
 
-static NSArray *SpliceKit_transitionSelectedItems(id timeline) {
-    if (!timeline) return nil;
-
-    SEL richSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
-    if ([timeline respondsToSelector:richSel]) {
-        id items = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(timeline, richSel, NO, YES);
-        if ([items isKindOfClass:[NSArray class]] && [(NSArray *)items count] > 0) {
-            return items;
-        }
-    }
-
-    SEL selSel = NSSelectorFromString(@"selectedItems");
-    if ([timeline respondsToSelector:selSel]) {
-        id items = ((id (*)(id, SEL))objc_msgSend)(timeline, selSel);
-        if ([items isKindOfClass:[NSArray class]] && [(NSArray *)items count] > 0) {
-            return items;
-        }
-    }
-
-    return nil;
-}
-
 static BOOL SpliceKit_transitionSelectItem(id timeline, id item) {
     if (!timeline || !item) return NO;
 
@@ -14331,28 +14067,6 @@ static BOOL SpliceKit_transitionSelectItem(id timeline, id item) {
 
     ((void (*)(id, SEL, id))objc_msgSend)(timeline, setSel, @[item]);
     return YES;
-}
-
-static NSArray *SpliceKit_transitionRangeContexts(id timeline) {
-    if (!timeline) return @[];
-
-    NSMutableArray *contexts = [NSMutableArray array];
-
-    SEL seqSel = @selector(sequence);
-    id sequence = [timeline respondsToSelector:seqSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel)
-        : nil;
-    if (sequence) {
-        SEL primarySel = @selector(primaryObject);
-        if ([sequence respondsToSelector:primarySel]) {
-            id primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, primarySel);
-            if (primaryObj) [contexts addObject:primaryObj];
-        }
-        [contexts addObject:sequence];
-    }
-
-    [contexts addObject:timeline];
-    return contexts;
 }
 
 static NSArray *SpliceKit_transitionContainedItemsForSequence(id sequence) {
@@ -14405,41 +14119,6 @@ static id SpliceKit_transitionFindRightClipInItems(NSArray *items, double timeSe
     }
 
     return bestItem;
-}
-
-static id SpliceKit_transitionFindRightClipNearTime(id timeline, double timeSeconds, double frame) {
-    return SpliceKit_transitionFindRightClipInItems(
-        SpliceKit_transitionContainedItems(timeline), timeSeconds, frame);
-}
-
-static id SpliceKit_transitionFindLeftClipInItems(NSArray *items, double timeSeconds, double frame) {
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return nil;
-    Class transitionClass = objc_getClass("FFAnchoredTransition");
-    id bestItem = nil;
-    double bestEnd = -DBL_MAX;
-    for (id item in items) {
-        if (transitionClass && [item isKindOfClass:transitionClass]) continue;
-
-        NSString *className = NSStringFromClass([item class]) ?: @"";
-        if ([className containsString:@"Gap"]) continue;
-
-        double start = 0.0;
-        double end = 0.0;
-        if (!SpliceKit_transitionGetItemBounds(item, &start, &end)) continue;
-        if (start > timeSeconds + (frame * 2.0)) continue;
-        if (end > timeSeconds + (frame * 2.0)) continue;
-        if (end > bestEnd) {
-            bestEnd = end;
-            bestItem = item;
-        }
-    }
-
-    return bestItem;
-}
-
-static id SpliceKit_transitionFindLeftClipNearTime(id timeline, double timeSeconds, double frame) {
-    return SpliceKit_transitionFindLeftClipInItems(
-        SpliceKit_transitionContainedItems(timeline), timeSeconds, frame);
 }
 
 static NSArray *SpliceKit_transitionCandidateItems(id objects) {
@@ -14504,9 +14183,7 @@ static void SpliceKit_transitionCaptureTargetFromObjects(id objects, id context,
         }
     }
 
-    sFreezeExtendTargetRightClip = bestItem;
     sFreezeExtendTargetClipStart = start;
-    sFreezeExtendTargetClipEnd = end;
     SpliceKit_log(@"[FreezeExtend] Captured target from %@ start=%.4f end=%.4f class=%@",
         source ?: @"transition",
         start,
@@ -14528,298 +14205,9 @@ static NSUInteger SpliceKit_transitionCount(id timeline) {
     return count;
 }
 
-static BOOL SpliceKit_transitionExistsNearTime(id timeline, double timeSeconds, double tolerance) {
-    NSArray *items = SpliceKit_transitionContainedItems(timeline);
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return NO;
-
-    Class transitionClass = objc_getClass("FFAnchoredTransition");
-    for (id item in items) {
-        if (!(transitionClass && [item isKindOfClass:transitionClass])) continue;
-
-        double start = 0.0;
-        double end = 0.0;
-        if (!SpliceKit_transitionGetItemBounds(item, &start, &end)) continue;
-        if (start <= timeSeconds + tolerance && end >= timeSeconds - tolerance) {
-            return YES;
-        }
-    }
-
-    return NO;
-}
-
-static BOOL SpliceKit_failFreezeExtendRepair(NSString **outReason, NSString *reason);
-
 static void SpliceKit_clearFreezeExtendTransientState(void) {
     sFreezeExtendPendingAutoAccept = NO;
     sFreezeExtendUseFreezeFramesForCurrentAlert = NO;
-    sForceOverlap = NO;
-}
-
-static void SpliceKit_captureTransitionReplayRequest(id sequence, id spineObjects,
-                                                     BOOL before, BOOL after, id effects,
-                                                     id rootItem, BOOL reportErrors,
-                                                     NSString *source) {
-    if (!sequence || !spineObjects) return;
-
-    sFreezeExtendActionSequence = sequence;
-    sFreezeExtendActionSpineObjects = spineObjects;
-    sFreezeExtendActionBefore = before;
-    sFreezeExtendActionAfter = after;
-    sFreezeExtendActionEffects = effects;
-    sFreezeExtendActionRootItem = rootItem;
-    sFreezeExtendActionReportErrors = reportErrors;
-
-    SpliceKit_log(
-        @"[FreezeExtend] Captured transition request from %@ before=%@ after=%@ reportErrors=%@ effects=%@ root=%@",
-        source ?: @"transition",
-        before ? @"YES" : @"NO",
-        after ? @"YES" : @"NO",
-        reportErrors ? @"YES" : @"NO",
-        NSStringFromClass([effects class]) ?: @"<nil>",
-        NSStringFromClass([rootItem class]) ?: @"<nil>");
-}
-
-static void SpliceKit_captureOperationTransitionReplayRequest(
-    id sequence, id spineObject, id spineObjectsToAddTransition, BOOL before, BOOL after,
-    id effects, CMTime transitionDuration, id spareTransition, int reportErrors,
-    NSString *source) {
-    if (!sequence || !spineObjectsToAddTransition) return;
-
-    sFreezeExtendOperationSequence = sequence;
-    sFreezeExtendOperationSpineObject = spineObject;
-    sFreezeExtendOperationObjects = spineObjectsToAddTransition;
-    sFreezeExtendOperationBefore = before;
-    sFreezeExtendOperationAfter = after;
-    sFreezeExtendOperationEffects = effects;
-    sFreezeExtendOperationDuration = transitionDuration;
-    sFreezeExtendOperationSpareTransition = spareTransition;
-    sFreezeExtendOperationReportErrors = reportErrors;
-    sFreezeExtendHasOperationReplay = YES;
-
-    double durationSeconds = 0.0;
-    if (transitionDuration.timescale > 0) {
-        durationSeconds = (double)transitionDuration.value / (double)transitionDuration.timescale;
-    }
-
-    SpliceKit_log(
-        @"[FreezeExtend] Captured operation replay from %@ before=%@ after=%@ reportErrors=%d duration=%.4f spare=%@",
-        source ?: @"transition",
-        before ? @"YES" : @"NO",
-        after ? @"YES" : @"NO",
-        reportErrors,
-        durationSeconds,
-        NSStringFromClass([spareTransition class]) ?: @"<nil>");
-}
-
-static void SpliceKit_clearCapturedTransitionRequest(void) {
-    sFreezeExtendActionSequence = nil;
-    sFreezeExtendActionSpineObjects = nil;
-    sFreezeExtendActionEffects = nil;
-    sFreezeExtendActionRootItem = nil;
-    sFreezeExtendActionReportErrors = NO;
-    sFreezeExtendActionBefore = NO;
-    sFreezeExtendActionAfter = NO;
-    sFreezeExtendOperationSequence = nil;
-    sFreezeExtendOperationSpineObject = nil;
-    sFreezeExtendOperationObjects = nil;
-    sFreezeExtendOperationBefore = NO;
-    sFreezeExtendOperationAfter = NO;
-    sFreezeExtendOperationEffects = nil;
-    sFreezeExtendOperationDuration = (CMTime){0};
-    sFreezeExtendOperationSpareTransition = nil;
-    sFreezeExtendOperationReportErrors = 0;
-    sFreezeExtendHasOperationReplay = NO;
-}
-
-static id SpliceKit_transitionSequenceForTimeline(id timeline) {
-    if (!timeline) return nil;
-    SEL seqSel = @selector(sequence);
-    return [timeline respondsToSelector:seqSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel)
-        : nil;
-}
-
-static id SpliceKit_transitionWrapReplayItemLikePrototype(id prototype, id item) {
-    if (!item) return nil;
-    if (!prototype) return item;
-
-    if ([prototype isKindOfClass:[NSArray class]]) {
-        return @[item];
-    }
-    if ([prototype isKindOfClass:[NSSet class]]) {
-        return [NSSet setWithObject:item];
-    }
-    if ([prototype isKindOfClass:[NSOrderedSet class]]) {
-        return [NSOrderedSet orderedSetWithObject:item];
-    }
-
-    return item;
-}
-
-static id SpliceKit_transitionResolveLiveRightClipForReplay(id timeline) {
-    if (!timeline) return nil;
-    double frame = SpliceKit_transitionFrameDurationSeconds(timeline);
-    if (!(sFreezeExtendTargetClipEnd > sFreezeExtendTargetClipStart)) return nil;
-    return SpliceKit_transitionFindRightClipNearTime(timeline,
-        sFreezeExtendTargetClipStart, frame);
-}
-
-static BOOL SpliceKit_replayCapturedTransitionRequest(id timeline, NSString **outReason) {
-    if (!sOrigActionAddTransitions || !sFreezeExtendActionSequence || !sFreezeExtendActionSpineObjects) {
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            @"missing captured transition request for replay");
-    }
-
-    id sequence = SpliceKit_transitionSequenceForTimeline(timeline) ?: sFreezeExtendActionSequence;
-    id liveRightClip = SpliceKit_transitionResolveLiveRightClipForReplay(timeline);
-    id spineObjects = liveRightClip
-        ? SpliceKit_transitionWrapReplayItemLikePrototype(
-            sFreezeExtendActionSpineObjects, liveRightClip)
-        : sFreezeExtendActionSpineObjects;
-    id rootItem = sFreezeExtendActionRootItem;
-    if (liveRightClip && (!rootItem || [rootItem isKindOfClass:[liveRightClip class]])) {
-        rootItem = liveRightClip;
-    }
-
-    SEL actionSel = NSSelectorFromString(
-        @"actionAddTransitionsToSpineObjects:before:after:effects:transitionOverlapType:transitionsCreated:rootItem:reportErrors:error:");
-    if (![sequence respondsToSelector:actionSel]) {
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            @"captured sequence no longer responds to actionAddTransitionsToSpineObjects");
-    }
-
-    SpliceKit_log(
-        @"[FreezeExtend] Action replay using sequence=%@ spineObjects=%@ root=%@ liveRight=%@",
-        NSStringFromClass([sequence class]) ?: @"<nil>",
-        NSStringFromClass([spineObjects class]) ?: @"<nil>",
-        NSStringFromClass([rootItem class]) ?: @"<nil>",
-        NSStringFromClass([liveRightClip class]) ?: @"<nil>");
-
-    id transitionsCreated = nil;
-    __autoreleasing id error = nil;
-    // The repair always targets the cut before the captured right-hand clip.
-    // Do not mirror clip-level "both edges" requests here or FCP will build
-    // transitions on both sides of the clip and recreate the original bug.
-    BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, BOOL, id, int, id *, id, BOOL, id *))
-        sOrigActionAddTransitions)(sequence,
-            actionSel,
-            spineObjects,
-            YES,
-            NO,
-            sFreezeExtendActionEffects,
-            2,
-            &transitionsCreated,
-            rootItem,
-            sFreezeExtendActionReportErrors,
-            &error);
-
-    if (!ok) {
-        NSString *reason = nil;
-        if ([error respondsToSelector:@selector(localizedDescription)]) {
-            reason = [error localizedDescription];
-        }
-        if (!reason && error) {
-            reason = [error description];
-        }
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            reason ?: @"captured transition replay returned failure");
-    }
-
-    return YES;
-}
-
-static BOOL SpliceKit_callCapturedOperationTransitionRequest(id sequence, SEL selector,
-                                                             id spineObject, id objects,
-                                                             id effects, CMTime duration,
-                                                             id spareTransition,
-                                                             int reportErrors,
-                                                             int *askedRetry,
-                                                             id *error) {
-    id created = nil;
-    return ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, id *, id, CMTime, int, id, int, int *, id *))
-        sOrigOperationAddTransitionsAskedRetry)(
-            sequence,
-            selector,
-            spineObject,
-            objects,
-            sFreezeExtendOperationBefore,
-            sFreezeExtendOperationAfter,
-            &created,
-            effects,
-            duration,
-            2,
-            spareTransition,
-            reportErrors,
-            askedRetry,
-            error);
-}
-
-static BOOL SpliceKit_replayCapturedOperationTransitionRequest(id timeline, NSString **outReason) {
-    if (!sOrigOperationAddTransitionsAskedRetry || !sFreezeExtendHasOperationReplay ||
-        !sFreezeExtendOperationSequence || !sFreezeExtendOperationObjects) {
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            @"missing captured operation transition request for replay");
-    }
-
-    id sequence = SpliceKit_transitionSequenceForTimeline(timeline) ?: sFreezeExtendOperationSequence;
-    id liveRightClip = SpliceKit_transitionResolveLiveRightClipForReplay(timeline);
-    id spineObject = sFreezeExtendOperationSpineObject;
-    if (liveRightClip && (!spineObject || [spineObject isKindOfClass:[liveRightClip class]])) {
-        spineObject = liveRightClip;
-    }
-    id objects = liveRightClip
-        ? SpliceKit_transitionWrapReplayItemLikePrototype(
-            sFreezeExtendOperationObjects, liveRightClip)
-        : sFreezeExtendOperationObjects;
-
-    SEL opAddRetrySel = NSSelectorFromString(
-        @"operationAddTransitionsToObjectsOnSpineObject:spineObjectsToAddTransition:before:after:spineTransitionClipsCreated:effects:transitionDuration:transitionOverlapType:spareTransition:reportErrors:askedRetry:error:");
-    if (![sequence respondsToSelector:opAddRetrySel]) {
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            @"captured sequence no longer responds to operationAddTransitions...askedRetry");
-    }
-
-    SpliceKit_log(@"%@", [NSString stringWithFormat:
-        @"[FreezeExtend] Operation replay using sequence=%@ spineObject=%@ objects=%@ liveRight=%@ spare=%@",
-        NSStringFromClass([sequence class]) ?: @"<nil>",
-        NSStringFromClass([spineObject class]) ?: @"<nil>",
-        NSStringFromClass([objects class]) ?: @"<nil>",
-        NSStringFromClass([liveRightClip class]) ?: @"<nil>",
-        NSStringFromClass([sFreezeExtendOperationSpareTransition class]) ?: @"<nil>"]);
-
-    int askedRetry = 0;
-    __autoreleasing id error = nil;
-    BOOL ok = SpliceKit_callCapturedOperationTransitionRequest(
-        sequence, opAddRetrySel, spineObject, objects, sFreezeExtendOperationEffects,
-        sFreezeExtendOperationDuration, sFreezeExtendOperationSpareTransition,
-        sFreezeExtendOperationReportErrors, &askedRetry, &error);
-    if (!ok && sFreezeExtendOperationSpareTransition) {
-        SpliceKit_log(@"[FreezeExtend] Operation replay failed with captured spareTransition; retrying with nil spareTransition");
-        askedRetry = 0;
-        error = nil;
-        ok = SpliceKit_callCapturedOperationTransitionRequest(
-            sequence, opAddRetrySel, spineObject, objects, sFreezeExtendOperationEffects,
-            sFreezeExtendOperationDuration, nil,
-            sFreezeExtendOperationReportErrors, &askedRetry, &error);
-    }
-
-    if (!ok) {
-        NSString *reason = nil;
-        if ([error respondsToSelector:@selector(localizedDescription)]) {
-            reason = [error localizedDescription];
-        }
-        if (!reason && error) {
-            reason = [error description];
-        }
-        if (!reason && askedRetry != 0) {
-            reason = [NSString stringWithFormat:
-                @"captured operation replay returned failure with askedRetry=%d", askedRetry];
-        }
-        return SpliceKit_failFreezeExtendRepair(outReason,
-            reason ?: @"captured operation transition replay returned failure");
-    }
-
-    return YES;
 }
 
 static BOOL SpliceKit_waitForTransitionInsertion(id timeline, NSUInteger previousCount,
@@ -14839,25 +14227,6 @@ static BOOL SpliceKit_waitForTransitionInsertion(id timeline, NSUInteger previou
     return SpliceKit_transitionCount(timeline) > previousCount;
 }
 
-static BOOL SpliceKit_waitForTransitionNearTime(id timeline, NSUInteger previousCount,
-                                                double timeSeconds, double tolerance,
-                                                NSTimeInterval timeoutSeconds) {
-    if (!timeline) return NO;
-
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MAX(timeoutSeconds, 0.0)];
-    while ([deadline timeIntervalSinceNow] > 0.0) {
-        BOOL inserted = SpliceKit_transitionCount(timeline) > previousCount;
-        BOOL placed = SpliceKit_transitionExistsNearTime(timeline, timeSeconds, tolerance);
-        if (inserted && placed) return YES;
-
-        [[NSRunLoop currentRunLoop] runUntilDate:
-            [NSDate dateWithTimeIntervalSinceNow:0.02]];
-    }
-
-    return SpliceKit_transitionCount(timeline) > previousCount &&
-        SpliceKit_transitionExistsNearTime(timeline, timeSeconds, tolerance);
-}
-
 static double SpliceKit_defaultTransitionDurationSeconds(id timeline) {
     double seconds = 1.0;
     SEL seqSel = @selector(sequence);
@@ -14874,14 +14243,6 @@ static double SpliceKit_defaultTransitionDurationSeconds(id timeline) {
         seconds = (double)duration.value / (double)duration.timescale;
     }
     return MAX(seconds, 0.1);
-}
-
-static BOOL SpliceKit_failFreezeExtendRepair(NSString **outReason, NSString *reason) {
-    NSString *message = reason ?: @"unknown reason";
-    if (outReason) *outReason = message;
-    SpliceKit_log(@"%@", [NSString stringWithFormat:
-        @"[FreezeExtend] Synthetic repair step failed: %@", message]);
-    return NO;
 }
 
 static int SpliceKit_effectiveTransitionOverlapType(int overlapType, NSString *source) {
@@ -14904,17 +14265,13 @@ static NSModalResponse SpliceKit_swizzled_NSAlert_runModal(id self, SEL _cmd) {
     // Only intercept when a freeze_extend API call is in progress.
     // All other alerts (including FCP's native transition dialog) pass through
     // completely unmodified so the user sees the original FCP behavior.
-    if (!sFreezeExtendPendingAutoAccept && !sFreezeExtendInTransitionAlert) {
+    if (!sFreezeExtendPendingAutoAccept) {
         return ((NSModalResponse (*)(id, SEL))sOrigNSAlertRunModal)(self, _cmd);
     }
 
-    if (sFreezeExtendPendingAutoAccept) {
-        SpliceKit_log(@"[FreezeExtend] Auto-accepting NSAlert");
-        sFreezeExtendUseFreezeFramesForCurrentAlert = YES;
-        return 0;
-    }
-
-    return ((NSModalResponse (*)(id, SEL))sOrigNSAlertRunModal)(self, _cmd);
+    SpliceKit_log(@"[FreezeExtend] Auto-accepting NSAlert");
+    sFreezeExtendUseFreezeFramesForCurrentAlert = YES;
+    return 0;
 }
 
 static BOOL SpliceKit_swizzled_actionAddTransitions(id self, SEL _cmd, id spineObjects,
@@ -14922,8 +14279,6 @@ static BOOL SpliceKit_swizzled_actionAddTransitions(id self, SEL _cmd, id spineO
                                                     int transitionOverlapType,
                                                     id *transitionsCreated, id rootItem,
                                                     BOOL reportErrors, id *error) {
-    SpliceKit_captureTransitionReplayRequest(self, spineObjects, before, after, effects,
-        rootItem, reportErrors, @"actionAddTransitionsToSpineObjects");
     SpliceKit_transitionCaptureTargetFromObjects(spineObjects, rootItem ?: self,
         @"actionAddTransitionsToSpineObjects");
     int effectiveType = SpliceKit_effectiveTransitionOverlapType(transitionOverlapType,
@@ -14955,10 +14310,6 @@ static BOOL SpliceKit_swizzled_operationAddTransitionsAskedRetry(
     BOOL after, id *spineTransitionClipsCreated, id effects, CMTime transitionDuration,
     int transitionOverlapType, id spareTransition, int reportErrors, int *askedRetry,
     id *error) {
-    SpliceKit_captureOperationTransitionReplayRequest(
-        self, spineObject, spineObjectsToAddTransition, before, after, effects,
-        transitionDuration, spareTransition, reportErrors,
-        @"operationAddTransitionsToObjectsOnSpineObject askedRetry");
     SpliceKit_transitionCaptureTargetFromObjects(spineObjectsToAddTransition, spineObject ?: self,
         @"operationAddTransitionsToObjectsOnSpineObject askedRetry");
     int effectiveType = SpliceKit_effectiveTransitionOverlapType(transitionOverlapType,
@@ -14968,20 +14319,6 @@ static BOOL SpliceKit_swizzled_operationAddTransitionsAskedRetry(
             spineObjectsToAddTransition, before, after, spineTransitionClipsCreated,
             effects, transitionDuration, effectiveType, spareTransition, reportErrors,
             askedRetry, error);
-}
-
-static void SpliceKit_swizzled_NSApp_stopModalWithCode(id self, SEL _cmd, NSModalResponse code) {
-    if (sFreezeExtendInTransitionAlert) {
-        SpliceKit_log(@"%@", [NSString stringWithFormat:
-            @"[FreezeExtend] stopModalWithCode raw=%ld", (long)code]);
-        if (SpliceKit_isFreezeFramesResponse(code)) {
-            SpliceKit_log(@"[FreezeExtend] stopModalWithCode detected 'Use Freeze Frames'");
-            sForceOverlap = YES;
-            sFreezeExtendUseFreezeFramesForCurrentAlert = YES;
-        }
-    }
-
-    ((void (*)(id, SEL, NSModalResponse))sOrigNSAppStopModalWithCode)(self, _cmd, code);
 }
 
 // Helper: get all clip info from the timeline for debugging
@@ -15180,23 +14517,8 @@ static BOOL SpliceKit_applyHoldFrameExtension(id timelineModule, double clipStar
     return holdWorked;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // State for the async hold-frame-then-retry workflow
 static double sFreezeExtendEditPointTime = 0.0;
-static NSString *sFreezeExtendPendingEffectID = nil;
 static BOOL sFreezeExtendAsyncPending = NO;
 
 // Replacement for -[FFAnchoredSequence displayTransitionAvailableMediaAlertDialog:]
@@ -15439,15 +14761,6 @@ void SpliceKit_installTransitionFreezeExtendSwizzle(void) {
         return;
     }
 
-    // Swizzle defaultTransitionOverlapType to allow forcing freeze-frame overlap
-    SEL overlapSel = NSSelectorFromString(@"defaultTransitionOverlapType");
-    Method overlapMethod = class_getInstanceMethod(seqClass, overlapSel);
-    if (overlapMethod) {
-        sOrigDefaultOverlapType = method_setImplementation(overlapMethod,
-            (IMP)SpliceKit_swizzled_defaultTransitionOverlapType);
-        SpliceKit_log(@"[FreezeExtend] Swizzled -[FFAnchoredSequence defaultTransitionOverlapType]");
-    }
-
     // Swizzle displayTransitionAvailableMediaAlertDialog: to add our button
     SEL alertSel = NSSelectorFromString(@"displayTransitionAvailableMediaAlertDialog:");
     Method alertMethod = class_getInstanceMethod(seqClass, alertSel);
@@ -15462,14 +14775,6 @@ void SpliceKit_installTransitionFreezeExtendSwizzle(void) {
         sOrigNSAlertRunModal = method_setImplementation(runModalMethod,
             (IMP)SpliceKit_swizzled_NSAlert_runModal);
         SpliceKit_log(@"[FreezeExtend] Swizzled -[NSAlert runModal]");
-    }
-
-    Method stopModalMethod = class_getInstanceMethod([NSApplication class],
-        @selector(stopModalWithCode:));
-    if (stopModalMethod) {
-        sOrigNSAppStopModalWithCode = method_setImplementation(stopModalMethod,
-            (IMP)SpliceKit_swizzled_NSApp_stopModalWithCode);
-        SpliceKit_log(@"[FreezeExtend] Swizzled -[NSApplication stopModalWithCode:]");
     }
 
     SEL actionAddSel = NSSelectorFromString(
@@ -15497,48 +14802,6 @@ void SpliceKit_installTransitionFreezeExtendSwizzle(void) {
         sOrigOperationAddTransitionsAskedRetry = method_setImplementation(opAddRetryMethod,
             (IMP)SpliceKit_swizzled_operationAddTransitionsAskedRetry);
         SpliceKit_log(@"[FreezeExtend] Swizzled operationAddTransitionsToObjectsOnSpineObject...askedRetry...");
-    }
-
-    // Temporarily log all trim operations to understand what FCP does when
-    // the user manually drags a clip edge after applying a hold frame.
-    // operationTrimEdit:endEdits:edgeType:byDelta:trimCommand:trimFlags:temporalResolutionMode:animationHint:error:
-    SEL trimSel = NSSelectorFromString(
-        @"operationTrimEdit:endEdits:edgeType:byDelta:trimCommand:trimFlags:temporalResolutionMode:animationHint:error:");
-    Method trimMethod = class_getInstanceMethod(seqClass, trimSel);
-    if (trimMethod) {
-        static IMP sOrigTrimEdit = NULL;
-        sOrigTrimEdit = method_getImplementation(trimMethod);
-        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id startEdits, id endEdits,
-            int edgeType, SpliceKit_CMTime delta, int trimCommand, int trimFlags,
-            int temporalResMode, id animHint, id *error) {
-            double deltaSeconds = (delta.timescale > 0) ? (double)delta.value / (double)delta.timescale : 0;
-            SpliceKit_log(@"[TrimLog] operationTrimEdit edgeType=%d delta=%.4fs trimCommand=%d trimFlags=%d temporalRes=%d startEdits=%@ endEdits=%@",
-                edgeType, deltaSeconds, trimCommand, trimFlags, temporalResMode,
-                startEdits ? [startEdits description] : @"nil",
-                endEdits ? [endEdits description] : @"nil");
-            return ((BOOL (*)(id, SEL, id, id, int, SpliceKit_CMTime, int, int, int, id, id *))
-                sOrigTrimEdit)(self, trimSel, startEdits, endEdits, edgeType, delta,
-                    trimCommand, trimFlags, temporalResMode, animHint, error);
-        });
-        method_setImplementation(trimMethod, newImp);
-        SpliceKit_log(@"[FreezeExtend] Swizzled operationTrimEdit for logging");
-    }
-
-    // Also log setClippedRange: calls
-    SEL setCRSel = NSSelectorFromString(@"setClippedRange:");
-    Method setCRMethod = class_getInstanceMethod(objc_getClass("FFAnchoredObject"), setCRSel);
-    if (setCRMethod) {
-        static IMP sOrigSetCR = NULL;
-        sOrigSetCR = method_getImplementation(setCRMethod);
-        IMP newImp = imp_implementationWithBlock(^void(id self, SpliceKit_CMTimeRange range) {
-            double start = (range.start.timescale > 0) ? (double)range.start.value / (double)range.start.timescale : 0;
-            double dur = (range.duration.timescale > 0) ? (double)range.duration.value / (double)range.duration.timescale : 0;
-            SpliceKit_log(@"[TrimLog] setClippedRange: start=%.4f dur=%.4f on %@ %p",
-                start, dur, NSStringFromClass([self class]), self);
-            ((void (*)(id, SEL, SpliceKit_CMTimeRange))sOrigSetCR)(self, setCRSel, range);
-        });
-        method_setImplementation(setCRMethod, newImp);
-        SpliceKit_log(@"[FreezeExtend] Swizzled setClippedRange: for logging");
     }
 }
 
@@ -15669,68 +14932,6 @@ static Class SpliceKit_findLoadedClassNamed(const char *wantedName) {
 
     free(classes);
     return foundClass;
-}
-
-static NSArray *SpliceKit_effectDragSelectedItems(id timelineModule) {
-    if (!timelineModule) return nil;
-
-    SEL selSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
-    if (![timelineModule respondsToSelector:selSel]) return nil;
-
-    id selected = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(timelineModule, selSel, NO, NO);
-    return [selected isKindOfClass:[NSArray class]] ? [(NSArray *)selected copy] : nil;
-}
-
-static NSArray *SpliceKit_effectDragContainedItems(id timelineModule) {
-    if (!timelineModule) return nil;
-
-    SEL seqSel = NSSelectorFromString(@"sequence");
-    id sequence = [timelineModule respondsToSelector:seqSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, seqSel)
-        : nil;
-    if (!sequence) return nil;
-
-    id itemsSource = nil;
-    if ([sequence respondsToSelector:@selector(primaryObject)]) {
-        id primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject));
-        if (primaryObj && [primaryObj respondsToSelector:@selector(containedItems)]) {
-            itemsSource = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
-        }
-    }
-    if (!itemsSource && [sequence respondsToSelector:@selector(containedItems)]) {
-        itemsSource = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(containedItems));
-    }
-
-    return [itemsSource isKindOfClass:[NSArray class]] ? [(NSArray *)itemsSource copy] : nil;
-}
-
-static NSSet *SpliceKit_effectDragPointerSet(NSArray *objects) {
-    NSMutableSet *result = [NSMutableSet setWithCapacity:objects.count];
-    for (id object in objects) {
-        if (object) {
-            [result addObject:[NSValue valueWithNonretainedObject:object]];
-        }
-    }
-    return result;
-}
-
-static BOOL SpliceKit_effectDragLooksLikeAdjustmentClip(id clip) {
-    if (!clip) return NO;
-
-    NSString *className = NSStringFromClass([clip class]) ?: @"";
-    if ([className localizedCaseInsensitiveContainsString:@"adjust"]) {
-        return YES;
-    }
-
-    if ([clip respondsToSelector:@selector(displayName)]) {
-        id name = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName));
-        if ([name isKindOfClass:[NSString class]] &&
-            [(NSString *)name localizedCaseInsensitiveContainsString:@"adjustment"]) {
-            return YES;
-        }
-    }
-
-    return NO;
 }
 
 static void SpliceKit_effectDragExtractEffectInfo(
@@ -17308,115 +16509,6 @@ NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params) {
             if (freezeExtend) {
                 // Freeze-extend auto-hold is disabled pending further development.
                 // Just set the fallback auto-accept flag for the API path.
-                sFreezeExtendPendingAutoAccept = YES;
-                sFreezeExtendDidApply = NO;
-            }
-            if (NO && freezeExtend) {
-                // DISABLED: Add hold-frame media handles to short clips BEFORE adding the
-                // transition. retimeHold: (Shift+H) adds a hold
-                // segment to a clip's retime curve, extending its available media
-                // with frozen edge frames. We then trim the clip back to its
-                // original duration — the hold frames become hidden handles that
-                // FCP uses for the transition overlap.
-                double frame = SpliceKit_transitionFrameDurationSeconds(timelineModule);
-                double defaultDur = SpliceKit_defaultTransitionDurationSeconds(timelineModule);
-                double halfTransition = defaultDur / 2.0;
-                double editPointTime = SpliceKit_transitionCurrentTimeSeconds(timelineModule);
-
-                // Scan adjacent clips via sequence->primaryObject->containedItems
-                id sequence = [timelineModule respondsToSelector:@selector(sequence)]
-                    ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, @selector(sequence))
-                    : nil;
-                id primaryObj = nil;
-                NSArray *items = nil;
-                if (sequence) {
-                    primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
-                        ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject))
-                        : nil;
-                    if (primaryObj && [primaryObj respondsToSelector:@selector(containedItems)])
-                        items = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
-                }
-
-                SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
-                BOOL canGetRange = primaryObj && [primaryObj respondsToSelector:erSel];
-                Class transCls = objc_getClass("FFAnchoredTransition");
-
-                typedef struct { double start; double end; double dur; } ClipInfo;
-                ClipInfo leftInfo = {0, 0, DBL_MAX};
-                ClipInfo rightInfo = {0, 0, DBL_MAX};
-
-                if (canGetRange && [items isKindOfClass:[NSArray class]]) {
-                    for (id item in items) {
-                        if (transCls && [item isKindOfClass:transCls]) continue;
-                        @try {
-                            SpliceKit_CMTimeRange range =
-                                ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
-                                    primaryObj, erSel, item);
-                            if (range.duration.timescale <= 0 || range.duration.value <= 0) continue;
-                            double s = (double)range.start.value / (double)range.start.timescale;
-                            double d = (double)range.duration.value / (double)range.duration.timescale;
-                            double e = s + d;
-                            if (fabs(e - editPointTime) < frame * 2.0 && d < leftInfo.dur)
-                                leftInfo = (ClipInfo){s, e, d};
-                            if (fabs(s - editPointTime) < frame * 2.0 && d < rightInfo.dur)
-                                rightInfo = (ClipInfo){s, e, d};
-                        } @catch (NSException *ex) { continue; }
-                    }
-                }
-
-                SEL holdSel = NSSelectorFromString(@"retimeHold:");
-                BOOL canHold = [timelineModule respondsToSelector:holdSel];
-                BOOL didExtend = NO;
-
-                // Extend clips that are shorter than the transition half-overlap
-                for (int side = 0; side < 2; side++) {
-                    ClipInfo info = (side == 0) ? rightInfo : leftInfo;
-                    if (info.dur >= halfTransition || info.dur >= DBL_MAX) continue;
-                    if (!canHold) continue;
-
-                    // Position playhead inside the short clip
-                    double seekTime = info.start + (info.dur / 2.0);
-                    SpliceKit_transitionSeekToSeconds(timelineModule, seekTime);
-
-                    // Select the clip at the playhead
-                    SpliceKit_sendTimelineSimpleAction(timelineModule, @"selectClipAtPlayhead:");
-                    [[NSRunLoop currentRunLoop] runUntilDate:
-                        [NSDate dateWithTimeIntervalSinceNow:0.1]];
-
-                    // Apply retimeHold — adds hold-frame segment extending the
-                    // clip's available media with frozen edge frames
-                    SpliceKit_log(@"[FreezeExtend] Applying retimeHold to %s clip "
-                        @"(dur=%.4f < halfTransition=%.4f) at %.4fs",
-                        side == 0 ? "right" : "left", info.dur, halfTransition, seekTime);
-                    ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, holdSel, nil);
-                    [[NSRunLoop currentRunLoop] runUntilDate:
-                        [NSDate dateWithTimeIntervalSinceNow:0.3]];
-
-                    // Trim the clip back to its original end time so the hold
-                    // frames become hidden media handles. Select the clip, seek
-                    // to its original end, and trim.
-                    SpliceKit_sendTimelineSimpleAction(timelineModule, @"selectClipAtPlayhead:");
-                    SpliceKit_transitionSeekToSeconds(timelineModule, info.end);
-                    SpliceKit_sendTimelineSimpleAction(timelineModule, @"trimEnd:");
-                    [[NSRunLoop currentRunLoop] runUntilDate:
-                        [NSDate dateWithTimeIntervalSinceNow:0.2]];
-
-                    SpliceKit_log(@"[FreezeExtend] Hold applied and trimmed back to %.4fs", info.end);
-                    didExtend = YES;
-                }
-
-                if (didExtend) {
-                    // Deselect and navigate back to the edit point
-                    SpliceKit_sendTimelineSimpleAction(timelineModule, @"deselectAll:");
-                    SpliceKit_transitionSeekToSeconds(timelineModule, MAX(0, editPointTime - frame));
-                    SpliceKit_sendTimelineSimpleAction(timelineModule, @"nextEdit:");
-                    [[NSRunLoop currentRunLoop] runUntilDate:
-                        [NSDate dateWithTimeIntervalSinceNow:0.2]];
-                    SpliceKit_log(@"[FreezeExtend] Repositioned at edit point");
-                    transitionsBefore = SpliceKit_transitionCount(timelineModule);
-                }
-
-                // Fallback auto-accept in case FCP still shows the dialog
                 sFreezeExtendPendingAutoAccept = YES;
                 sFreezeExtendDidApply = NO;
             }
@@ -20908,7 +20000,6 @@ BOOL SpliceKit_mixerWriteAutomationPoint(id clip, id channel, double value) {
     return ok;
 }
 
-static NSNumber *SpliceKit_mixerJSONDBNumber(double db, double floorDB);
 static NSNumber *SpliceKit_mixerJSONDBNumberFromLinear(double linear, double floorDB);
 static NSArray<NSDictionary *> *SpliceKit_mixerRecordDebugState(NSDictionary *state);
 void SpliceKit_installMixerSkimHooks(void);
@@ -20967,11 +20058,6 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
             }
         } @catch (NSException *e) {}
     }
-}
-
-static NSNumber *SpliceKit_mixerJSONDBNumber(double db, double floorDB) {
-    if (!isfinite(db) || db < floorDB) db = floorDB;
-    return @(db);
 }
 
 static NSNumber *SpliceKit_mixerJSONDBNumberFromLinear(double linear, double floorDB) {
@@ -21801,98 +20887,6 @@ static BOOL SpliceKit_mixerSetEffectEnabledInStack(id effect, id effectStack, BO
     return YES;
 }
 
-static id SpliceKit_mixerCopyEffectSelectorValue(id effect, NSString *selectorName) {
-    if (!effect || selectorName.length == 0) return nil;
-    @try {
-        SEL sel = NSSelectorFromString(selectorName);
-        if (![effect respondsToSelector:sel]) return nil;
-        id value = ((id (*)(id, SEL))objc_msgSend)(effect, sel);
-        if ([value conformsToProtocol:@protocol(NSCopying)]) return [value copy];
-        return value;
-    } @catch (NSException *e) {}
-    return nil;
-}
-
-static BOOL SpliceKit_mixerObjectsDiffer(id current, id next) {
-    if (current == next) return NO;
-    if (!current || !next) return YES;
-    @try {
-        if ([current respondsToSelector:@selector(isEqual:)]) {
-            return ![current isEqual:next];
-        }
-    } @catch (NSException *e) {}
-    return YES;
-}
-
-static NSDictionary *SpliceKit_mixerAudioEffectStateSnapshot(id effect) {
-    if (!effect) return nil;
-    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
-    id effectState = SpliceKit_mixerCopyEffectSelectorValue(effect, @"effectState");
-    if (effectState) snapshot[@"effectState"] = effectState;
-    id parameterInfoMap = SpliceKit_mixerCopyEffectSelectorValue(effect, @"parameterInfoMap");
-    if (parameterInfoMap) snapshot[@"parameterInfoMap"] = parameterInfoMap;
-    return snapshot.count > 0 ? snapshot : nil;
-}
-
-static BOOL SpliceKit_mixerApplyAudioEffectStateSnapshot(id effect, id effectStack, NSDictionary *snapshot) {
-    if (!effect || snapshot.count == 0) return NO;
-    BOOL changed = NO;
-    @try {
-        id effectState = snapshot[@"effectState"];
-        SEL setEffectStateSel = NSSelectorFromString(@"setEffectState:");
-        if (effectState && [effect respondsToSelector:setEffectStateSel]) {
-            id current = SpliceKit_mixerCopyEffectSelectorValue(effect, @"effectState");
-            if (SpliceKit_mixerObjectsDiffer(current, effectState)) {
-                ((void (*)(id, SEL, id))objc_msgSend)(effect, setEffectStateSel, effectState);
-                changed = YES;
-            }
-        }
-    } @catch (NSException *e) {}
-
-    @try {
-        id parameterInfoMap = snapshot[@"parameterInfoMap"];
-        SEL setParameterInfoMapSel = NSSelectorFromString(@"setParameterInfoMap:");
-        if (parameterInfoMap && [effect respondsToSelector:setParameterInfoMapSel]) {
-            id current = SpliceKit_mixerCopyEffectSelectorValue(effect, @"parameterInfoMap");
-            if (SpliceKit_mixerObjectsDiffer(current, parameterInfoMap)) {
-                ((void (*)(id, SEL, id))objc_msgSend)(effect, setParameterInfoMapSel, parameterInfoMap);
-                changed = YES;
-            }
-        }
-    } @catch (NSException *e) {}
-
-    if (changed && effectStack) {
-        @try {
-            SEL postSel = NSSelectorFromString(@"postEffectsChangedNotification");
-            if ([effectStack respondsToSelector:postSel]) {
-                ((void (*)(id, SEL))objc_msgSend)(effectStack, postSel);
-            }
-        } @catch (NSException *e) {}
-    }
-    return changed;
-}
-
-static void SpliceKit_mixerSyncManagedBusEntryState(NSMutableDictionary *entry) {
-    if (!entry) return;
-    id sourceStack = nil;
-    NSInteger sourceIndex = NSNotFound;
-    id sourceEffect = SpliceKit_mixerFirstManagedEffectInstance(entry, &sourceStack, &sourceIndex);
-    NSDictionary *snapshot = SpliceKit_mixerAudioEffectStateSnapshot(sourceEffect);
-    if (snapshot.count == 0) return;
-
-    NSMutableArray *instances = [entry[@"instances"] isKindOfClass:[NSMutableArray class]]
-        ? entry[@"instances"]
-        : nil;
-    for (NSDictionary *instance in [instances copy]) {
-        NSString *effectHandle = [instance[@"effectHandle"] isKindOfClass:[NSString class]] ? instance[@"effectHandle"] : @"";
-        NSString *stackHandle = [instance[@"effectStackHandle"] isKindOfClass:[NSString class]] ? instance[@"effectStackHandle"] : @"";
-        id effect = effectHandle.length > 0 ? SpliceKit_resolveHandle(effectHandle) : nil;
-        if (!effect || effect == sourceEffect) continue;
-        id stack = stackHandle.length > 0 ? SpliceKit_resolveHandle(stackHandle) : nil;
-        SpliceKit_mixerApplyAudioEffectStateSnapshot(effect, stack, snapshot);
-    }
-}
-
 static BOOL SpliceKit_mixerRemoveEffectFromStackAtIndex(id effectStack, NSInteger effectIndex) {
     if (!effectStack || effectIndex == NSNotFound || effectIndex < 0) return NO;
     BOOL ok = NO;
@@ -22164,47 +21158,6 @@ static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(
         [summaries addObject:summary];
     }
     return summaries;
-}
-
-static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role,
-                                                          NSString *scopeKey,
-                                                          NSArray<NSDictionary *> *busTargets) {
-    if (role.length == 0 || busTargets.count == 0) return;
-    if (SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey).count > 0) return;
-
-    NSMutableDictionary<NSString *, NSMutableDictionary *> *entryBySlot = [NSMutableDictionary dictionary];
-    for (NSDictionary *target in busTargets) {
-        id object = target[@"object"];
-        id effectStack = target[@"effectStack"];
-        NSArray *effects = SpliceKit_mixerEffectsInStack(effectStack);
-        for (NSUInteger effectIndex = 0; effectIndex < effects.count; effectIndex++) {
-            id effect = effects[effectIndex];
-            NSDictionary *effectSummary = SpliceKit_mixerEffectSummary(effect, effectIndex);
-            NSString *effectID = [effectSummary[@"effectID"] isKindOfClass:[NSString class]] ? effectSummary[@"effectID"] : @"";
-            NSString *name = [effectSummary[@"name"] isKindOfClass:[NSString class]] ? effectSummary[@"name"] : @"";
-            NSString *identity = effectID.length > 0 ? effectID : name;
-            if (identity.length == 0) identity = NSStringFromClass([effect class]) ?: @"Effect";
-            NSString *slotKey = [NSString stringWithFormat:@"%lu:%@", (unsigned long)effectIndex, identity];
-
-            NSMutableDictionary *entry = entryBySlot[slotKey];
-            if (!entry) {
-                entry = SpliceKit_mixerNewManagedBusEntry(role, scopeKey, effectSummary);
-                entry[@"enabled"] = effectSummary[@"enabled"] ?: @YES;
-                entry[@"adopted"] = @YES;
-                entryBySlot[slotKey] = entry;
-            }
-            SpliceKit_mixerRememberManagedInstance(entry, object, effectStack, effect);
-        }
-    }
-
-    NSMutableArray *entries = SpliceKit_mixerManagedBusEntriesForRole(role, NO);
-    for (NSMutableDictionary *entry in [[entryBySlot allValues] copy]) {
-        NSArray *instances = [entry[@"instances"] isKindOfClass:[NSArray class]] ? entry[@"instances"] : @[];
-        if (instances.count < busTargets.count) {
-            [entries removeObject:entry];
-        }
-    }
-    SpliceKit_mixerPruneManagedBusRole(role);
 }
 
 static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey) {
@@ -22636,7 +21589,6 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             if (maxFaders > 64) maxFaders = 64;
 
             // Step 3: For each role, find the clip at the playhead and build fader data
-            NSMutableArray *faders = [NSMutableArray array];
             NSMutableArray *indexed = [NSMutableArray array];
             NSInteger faderIdx = 0;
             NSString *scopeKey = SpliceKit_mixerManagedBusScopeKey(sequence, primaryObj);
@@ -26078,9 +25030,6 @@ static NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params) {
     __block NSDictionary *result = nil;
     BOOL answered = SpliceKit_executeOnMainThreadWithTimeout(^{
         @try {
-            id app = ((id (*)(id, SEL))objc_msgSend)(
-                objc_getClass("NSApplication"), @selector(sharedApplication));
-
             NSMutableArray *dialogs = [NSMutableArray array];
             NSMutableArray *overlays = [NSMutableArray array];
 
@@ -27060,20 +26009,6 @@ static NSString *SpliceKit_escapeXMLString(NSString *value) {
     escaped = [escaped stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
     escaped = [escaped stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
     return escaped;
-}
-
-static NSString *SpliceKit_fcpxmlTimeString(double seconds, SpliceKit_CMTime frameDuration) {
-    if (!isfinite(seconds) || seconds <= 0.000001) return @"0s";
-    if (frameDuration.timescale <= 0 || frameDuration.value <= 0) {
-        long long millis = llround(seconds * 1000.0);
-        return [NSString stringWithFormat:@"%lld/1000s", millis];
-    }
-
-    double frameSeconds = SpliceKit_secondsFromTime(frameDuration);
-    long long frames = llround(seconds / MAX(frameSeconds, 0.000001));
-    long long value = frames * frameDuration.value;
-    if (value == 0) value = frameDuration.value;
-    return [NSString stringWithFormat:@"%lld/%ds", value, frameDuration.timescale];
 }
 
 static NSString *SpliceKit_fcpxmlTimeStringForFrameCount(long long frameCount,
@@ -28299,7 +27234,6 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
                 double startSec = [sortedBoundaries[boundaryIndex] doubleValue];
                 NSMutableArray<NSMutableDictionary *> *eligible = nil;
                 double segmentDuration = 0.0;
-                double endSec = startSec;
                 NSUInteger nextBoundaryIndex = NSNotFound;
 
                 for (NSInteger step = requestedStep; step >= 1; step--) {
@@ -28319,7 +27253,6 @@ static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *pa
                     if (candidates.count > 0) {
                         eligible = candidates;
                         segmentDuration = candidateDuration;
-                        endSec = candidateEndSec;
                         nextBoundaryIndex = candidateNextIndex;
                         requestedStep = step;
                         break;
@@ -34138,8 +33071,6 @@ static NSDictionary *SpliceKit_handleDebugObserveNotification(NSDictionary *para
     return @{@"status": @"ok", @"observing": name};
 }
 
-#pragma mark - Debug: Hidden UI (Settings Panel + Menu Bar)
-
 #pragma mark - Debug: Breakpoints
 
 // True breakpoint system: swizzle a method, pause the calling thread,
@@ -34559,27 +33490,6 @@ static NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
         bpConfig[@"installed"] = @YES;
         bpConfig[@"mode"] = @"swizzle";
     } else {
-        // Multi-arg methods: install a no-arg trampoline that captures self + stack
-        // but can't intercept the arguments
-        IMP trampoline = imp_implementationWithBlock(^(id _self) {
-            NSDictionary *currentConfig = sBreakpoints[key];
-            if (!currentConfig || ![currentConfig[@"enabled"] boolValue]) {
-                // Can't forward properly with unknown args, so just log
-                SpliceKit_log(@"[Breakpoint] %@ called but breakpoint disabled, skipping", key);
-                return;
-            }
-            NSArray *stack = [NSThread callStackSymbols];
-            SpliceKit_breakpointHit(key, _self, sel, nil, stack, currentConfig);
-
-            if ([currentConfig[@"oneShot"] boolValue]) {
-                SpliceKit_unswizzleMethod(cls, sel);
-                [sBreakpoints removeObjectForKey:key];
-            }
-            // NOTE: We can't forward to original here because we don't have the args.
-            // The method will NOT execute its original behavior.
-            // For multi-arg methods, use debug.traceMethod instead.
-        });
-
         // Don't actually swizzle multi-arg methods — it would break them
         bpConfig[@"installed"] = @NO;
         bpConfig[@"mode"] = @"trace_only";

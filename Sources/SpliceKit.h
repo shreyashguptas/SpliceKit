@@ -22,10 +22,6 @@
 // Cap it so a forgetful client can't balloon our memory.
 #define SPLICEKIT_MAX_HANDLES 2000
 
-// The socket lives in /tmp when possible, but FCP's sandbox can block that.
-// This resolves the right path at runtime and caches it.
-const char *SpliceKit_getSocketPath(void);
-
 // Dual-output logger: NSLog for Console.app + append to ~/Library/Logs/SpliceKit/splicekit.log.
 // The log file is handy for post-mortem debugging when Console isn't open.
 void SpliceKit_log(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
@@ -39,13 +35,9 @@ void SpliceKit_markServerReady(void);
 // Thin wrappers around objc_msgSend that nil-check the target first.
 // Saves a crash when chasing a long KVC chain and something in the middle is nil.
 id SpliceKit_sendMsg(id target, SEL selector);
-id SpliceKit_sendMsg1(id target, SEL selector, id arg1);
-id SpliceKit_sendMsg2(id target, SEL selector, id arg1, id arg2);
-BOOL SpliceKit_sendMsgBool(id target, SEL selector);
 
 // Enumerate classes loaded from a specific Mach-O image, or grab everything in the process.
 // Useful for reverse-engineering which frameworks FCP pulls in.
-NSArray *SpliceKit_classesInImage(const char *imageName);
 NSDictionary *SpliceKit_methodsForClass(Class cls);
 NSArray *SpliceKit_allLoadedClasses(void);
 
@@ -159,7 +151,7 @@ BOOL SpliceKit_asyncFdWantsEvent(int fd, NSString *eventType);
 
 #pragma mark - Server
 
-// Starts the TCP listener on port 9876 and the Unix domain socket.
+// Starts the TCP listener on port 9876.
 // Called once from the app-launch notification handler.
 void SpliceKit_startControlServer(void);
 id SpliceKit_getActiveTimelineModule(void);
@@ -310,7 +302,6 @@ NSString *SpliceKit_getDefaultSpatialConformType(void);
 void SpliceKit_installDualTimeline(void);
 void SpliceKit_installDualTimelineCrossWindowDrag(void);
 BOOL SpliceKit_isDualTimelineInstalled(void);
-NSString *SpliceKit_dualTimelineSecondaryIdentifier(void);
 id SpliceKit_dualTimelineFocusedEditorContainer(void);
 id SpliceKit_dualTimelinePrimaryEditorContainer(void);
 id SpliceKit_dualTimelineSecondaryEditorContainer(BOOL createIfNeeded);

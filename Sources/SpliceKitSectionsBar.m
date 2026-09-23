@@ -103,8 +103,6 @@ static NSArray<NSDictionary *> *SectionColorPresets(void) {
 
 static const CGFloat kSectionsBarHeight = 24.0;
 
-static const CGFloat kEdgeHitZone = 3.0;  // pixels from edge to trigger resize cursor
-
 typedef NS_ENUM(NSInteger, SBDragMode) {
     SBDragModeNone = 0,
     SBDragModeEdgeLeft,
@@ -122,11 +120,9 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
 @property (nonatomic) BOOL isDragging;
 @property (nonatomic) double dragAnchorOffset;           // for move: offset from section start to click point
 @property (nonatomic) NSUInteger dragInsertIndex;        // for move: where the dragged section will land
-@property (nonatomic) CGFloat lastClickX;                // debug: last click X position
 @property (nonatomic) CGFloat dragGhostX;                // for move: current mouse X for ghost drawing
 @property (nonatomic, strong) SpliceKitSection *dragGhostSection; // copy of section being dragged (for ghost rendering)
 + (instancetype)shared;
-- (void)updateFromTimeline;
 - (void)setSectionsFromArray:(NSArray<NSDictionary *> *)arr;
 - (NSArray<NSDictionary *> *)sectionsAsArray;
 @end
@@ -157,78 +153,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
 // cycle — actual rendering happens in drawRect:
 - (void)rebuildLayers {
     [self setNeedsDisplay:YES];
-    return;
-    // Dead code below kept for reference — original CALayer approach
-    // that didn't work in FCP's layer-backed hierarchy.
-    // Remove old section layers
-    NSArray *sublayers = [self.layer.sublayers copy];
-    for (CALayer *sub in sublayers) {
-        if ([sub.name hasPrefix:@"section_"] || [sub.name isEqualToString:@"sections_bg"]) {
-            [sub removeFromSuperlayer];
-        }
-    }
-
-    if (_sections.count == 0) return;
-
-    CGRect bounds = self.layer.bounds;
-
-    // Render the sections bar into an NSImage and set it as layer.contents.
-    // This uses pure Cocoa drawing (NSBezierPath/NSColor) which handles
-    // coordinate systems correctly in all scenarios.
-    CGFloat scale = self.window.backingScaleFactor ?: 2.0;
-    NSSize imageSize = bounds.size;
-    if (imageSize.width <= 0 || imageSize.height <= 0) return;
-
-    NSImage *image = [[NSImage alloc] initWithSize:imageSize];
-    [image lockFocusFlipped:YES];
-
-    // Dark background
-    [[NSColor colorWithWhite:0.12 alpha:1.0] setFill];
-    NSRectFill(NSMakeRect(0, 0, imageSize.width, imageSize.height));
-
-    NSDictionary *labelAttrs = @{
-        NSFontAttributeName: [NSFont boldSystemFontOfSize:10],
-        NSForegroundColorAttributeName: [NSColor whiteColor],
-    };
-
-    for (SpliceKitSection *sec in _sections) {
-        CGFloat x1 = [self xForTime:sec.startTime];
-        CGFloat x2 = [self xForTime:sec.endTime];
-
-        if (x2 < -10 || x1 > imageSize.width + 10) continue;
-        x1 = MAX(x1, 0);
-        x2 = MIN(x2, imageSize.width);
-        CGFloat width = x2 - x1;
-        if (width < 1) continue;
-
-        // Colored rectangle
-        NSRect rect = NSMakeRect(x1, 1, width, imageSize.height - 2);
-        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:3 yRadius:3];
-        [sec.color setFill];
-        [path fill];
-
-        // Border
-        [[sec.color blendedColorWithFraction:0.4 ofColor:[NSColor blackColor]] setStroke];
-        path.lineWidth = 0.5;
-        [path stroke];
-
-        // Label text
-        if (width > 20) {
-            CGFloat textY = (imageSize.height - 13) / 2;
-            [sec.label drawAtPoint:NSMakePoint(x1 + 5, textY) withAttributes:labelAttrs];
-        }
-    }
-
-    // Bottom separator
-    [[NSColor colorWithWhite:0.06 alpha:1.0] setFill];
-    NSRectFill(NSMakeRect(0, imageSize.height - 1, imageSize.width, 1));
-
-    [image unlockFocus];
-
-    // Set as layer contents
-    self.layer.contents = image;
-    self.layer.contentsScale = scale;
-    self.layer.contentsGravity = kCAGravityResize;
 }
 
 #pragma mark - Coordinate Mapping
@@ -277,12 +201,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
 
     NSPoint panelPoint = [self.window convertPointFromScreen:screenPoint];
     return [self convertPoint:panelPoint fromView:nil];
-}
-
-- (NSRect)screenRectForView:(NSView *)view {
-    if (!view || !view.window) return NSZeroRect;
-    NSRect rectInWindow = [view convertRect:view.bounds toView:nil];
-    return [view.window convertRectToScreen:rectInWindow];
 }
 
 #pragma mark - Drawing
@@ -429,18 +347,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
             CGContextRestoreGState(cgCtx);
         }
     }
-
-    // Debug: draw a red vertical line at the last click position
-    // so the user can see where the code registered their click
-    if (_lastClickX > 0) {
-        CGContextRef cgCtx = [[NSGraphicsContext currentContext] CGContext];
-        if (cgCtx) {
-            CGContextSaveGState(cgCtx);
-            CGContextSetRGBFillColor(cgCtx, 1.0, 0.0, 0.0, 0.8);
-            CGContextFillRect(cgCtx, CGRectMake(_lastClickX - 1, 0, 2, bounds.size.height));
-            CGContextRestoreGState(cgCtx);
-        }
-    }
 }
 
 - (BOOL)isFlipped { return YES; }
@@ -517,33 +423,7 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    NSWindow *eventWindow = event.window ?: self.window;
-    NSPoint winLoc = event.locationInWindow;
-    NSPoint screenLoc = eventWindow ? [eventWindow convertPointToScreen:winLoc] : winLoc;
     NSPoint loc = [self localPointForEvent:event];
-    NSRect panelScreenFrame = self.window ? self.window.frame : NSZeroRect;
-    NSRect clipScreenFrame = [self screenRectForView:_clipView];
-    NSRect timelineScreenFrame = [self screenRectForView:_timelineView];
-
-    SpliceKit_log(@"[Sections][DOWN_RAW] eventWindow=%@ winLoc=(%.1f,%.1f) screenLoc=(%.1f,%.1f) local=(%.1f,%.1f)",
-                  NSStringFromClass([eventWindow class]), winLoc.x, winLoc.y, screenLoc.x, screenLoc.y, loc.x, loc.y);
-
-    SpliceKit_log(@"[Sections][DOWN_GEOM] panel=(x=%.1f w=%.1f) clip=(x=%.1f w=%.1f) timeline=(x=%.1f w=%.1f) deltaClip=%.1f deltaTimeline=%.1f",
-                  panelScreenFrame.origin.x, panelScreenFrame.size.width,
-                  clipScreenFrame.origin.x, clipScreenFrame.size.width,
-                  timelineScreenFrame.origin.x, timelineScreenFrame.size.width,
-                  screenLoc.x - clipScreenFrame.origin.x,
-                  screenLoc.x - timelineScreenFrame.origin.x);
-
-    _lastClickX = loc.x;  // save for debug drawing
-
-    for (SpliceKitSection *sec in _sections) {
-        CGFloat x1 = [self xForTime:sec.startTime];
-        CGFloat x2 = [self xForTime:sec.endTime];
-        CGFloat midX = (x1 + x2) / 2.0;
-        SpliceKit_log(@"[Sections][DOWN_POS] '%@' x1=%.1f x2=%.1f mid=%.1f deltaMid=%.1f (%.1fs-%.1fs)",
-                      sec.label, x1, x2, midX, loc.x - midX, sec.startTime, sec.endTime);
-    }
 
     SpliceKitSection *sec = nil;
     SBDragMode mode = [self dragModeAtPoint:loc forSection:&sec];
@@ -582,12 +462,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
         _dragGhostSection = sec;
         _dragAnchorOffset = MAX(0.0, MIN(loc.x - x1, x2 - x1));
         _dragGhostX = loc.x;
-
-        // Compute the ghost width in pixels (stays constant during drag)
-        double draggedDuration = sec.endTime - sec.startTime;
-        double tpp = [self timePerPixelSeconds];
-        if (tpp <= 0) tpp = 0.05;
-        CGFloat ghostWidthPx = MAX(10.0, (CGFloat)(draggedDuration / tpp));
 
         // Remove from the live array but DON'T re-tile yet.
         // The remaining sections stay at their original positions during
@@ -676,7 +550,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
     if (newTime < 0) newTime = 0;
 
     double minDur = 0.1;
-    double snapThreshold = 0.15;
 
     // Keep sections sorted for neighbor detection
     [_sections sortUsingComparator:^NSComparisonResult(SpliceKitSection *a, SpliceKitSection *b) {
@@ -826,10 +699,6 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
         [arr addObject:[s toDict]];
     }
     return arr;
-}
-
-- (void)updateFromTimeline {
-    [self rebuildLayers];
 }
 
 #pragma mark - Scroll/Zoom Observation

@@ -604,7 +604,6 @@ static SpliceKitCaptionAnimation SpliceKitCaption_animationFromName(NSString *na
 @property (nonatomic, strong) NSButton *exportSRTButton;
 @property (nonatomic, strong) NSButton *exportTXTButton;
 @property (nonatomic, strong) NSProgressIndicator *spinner;
-@property (nonatomic, strong) NSProgressIndicator *progressBar;
 
 // Frame rate info (detected from timeline)
 @property (nonatomic) int fdNum;   // frame duration numerator
@@ -622,68 +621,6 @@ static SpliceKitCaptionAnimation SpliceKitCaption_animationFromName(NSString *na
 - (NSArray<SpliceKitTranscriptWord *> *)normalizedCaptionWordsFromWords:(NSArray<SpliceKitTranscriptWord *> *)words
                                                                  context:(NSString *)context;
 @end
-
-// Swizzle LKTileView's draggingEntered: to log what FCP receives during drags
-static IMP sOrigLKTileViewDraggingEntered = NULL;
-static NSDragOperation SpliceKit_swizzled_LKTileView_draggingEntered(id self, SEL _cmd, id draggingInfo) {
-    // Log the dragging info
-    NSPasteboard *pb = [draggingInfo draggingPasteboard];
-    NSArray *types = [pb types];
-    id source = [draggingInfo draggingSource];
-    NSWindow *srcWin = [draggingInfo draggingDestinationWindow];
-    NSDragOperation srcMask = [draggingInfo draggingSourceOperationMask];
-    SpliceKit_log(@"[DragSpy] LKTileView draggingEntered:");
-    SpliceKit_log(@"[DragSpy]   pasteboard types: %@", types);
-    SpliceKit_log(@"[DragSpy]   source: %@ (class: %@)", source, [source class]);
-    SpliceKit_log(@"[DragSpy]   destWindow: %@", srcWin);
-    SpliceKit_log(@"[DragSpy]   sourceMask: %lu", (unsigned long)srcMask);
-    SpliceKit_log(@"[DragSpy]   draggingLocation: %@", NSStringFromPoint([draggingInfo draggingLocation]));
-
-    NSDragOperation result = ((NSDragOperation (*)(id, SEL, id))sOrigLKTileViewDraggingEntered)(self, _cmd, draggingInfo);
-    SpliceKit_log(@"[DragSpy]   → result: %lu (0=None,1=Copy)", (unsigned long)result);
-    return result;
-}
-
-static IMP sOrigTLKTimelineViewDraggingEntered = NULL;
-static NSDragOperation SpliceKit_swizzled_TLKTimelineView_draggingEntered(id self, SEL _cmd, id draggingInfo) {
-    NSPasteboard *pb = [draggingInfo draggingPasteboard];
-    NSArray *types = [pb types];
-    id source = [draggingInfo draggingSource];
-    NSDragOperation srcMask = [draggingInfo draggingSourceOperationMask];
-    SpliceKit_log(@"[DragSpy] TLKTimelineView draggingEntered:");
-    SpliceKit_log(@"[DragSpy]   pasteboard types: %@", types);
-    SpliceKit_log(@"[DragSpy]   source: %@ (class: %@)", source,
-                  source ? NSStringFromClass([source class]) : @"nil");
-    SpliceKit_log(@"[DragSpy]   sourceMask: %lu", (unsigned long)srcMask);
-
-    NSDragOperation result = ((NSDragOperation (*)(id, SEL, id))sOrigTLKTimelineViewDraggingEntered)(self, _cmd, draggingInfo);
-    SpliceKit_log(@"[DragSpy]   → returned: %lu (0=None,1=Copy)", (unsigned long)result);
-    return result;
-}
-
-__attribute__((constructor))
-static void SpliceKit_installDragSpy(void) {
-    // Swizzle TLKTimelineView (the actual timeline drop target)
-    Class cls = objc_getClass("TLKTimelineView");
-    if (cls) {
-        Method m = class_getInstanceMethod(cls, @selector(draggingEntered:));
-        if (m) {
-            sOrigTLKTimelineViewDraggingEntered = method_getImplementation(m);
-            method_setImplementation(m, (IMP)SpliceKit_swizzled_TLKTimelineView_draggingEntered);
-            SpliceKit_log(@"[DragSpy] Installed TLKTimelineView draggingEntered: swizzle");
-        }
-    }
-    // Also swizzle LKTileView
-    cls = objc_getClass("LKTileView");
-    if (cls) {
-        Method m = class_getInstanceMethod(cls, @selector(draggingEntered:));
-        if (m) {
-            sOrigLKTileViewDraggingEntered = method_getImplementation(m);
-            method_setImplementation(m, (IMP)SpliceKit_swizzled_LKTileView_draggingEntered);
-            SpliceKit_log(@"[DragSpy] Installed LKTileView draggingEntered: swizzle");
-        }
-    }
-}
 
 @implementation SpliceKitCaptionPanel
 
@@ -1681,11 +1618,6 @@ static void SpliceKit_installDragSpy(void) {
         [self.spinner startAnimation:nil];
         self.transcribeButton.enabled = NO;
         self.statusLabel.stringValue = @"Transcribing timeline...";
-        if (self.progressBar) {
-            self.progressBar.hidden = NO;
-            self.progressBar.indeterminate = YES;
-            [self.progressBar startAnimation:nil];
-        }
     });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1871,9 +1803,6 @@ static void SpliceKit_installDragSpy(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.spinner.hidden = YES;
         [self.spinner stopAnimation:nil];
-        if (self.progressBar) {
-            self.progressBar.hidden = YES;
-        }
         self.transcribeButton.enabled = YES;
         self.statusLabel.stringValue = [NSString stringWithFormat:@"%lu words, %lu segments",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSegments.count];
@@ -1889,9 +1818,6 @@ static void SpliceKit_installDragSpy(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.spinner.hidden = YES;
         [self.spinner stopAnimation:nil];
-        if (self.progressBar) {
-            self.progressBar.hidden = YES;
-        }
         self.transcribeButton.enabled = YES;
         self.statusLabel.stringValue = [NSString stringWithFormat:@"Error: %@", error];
     });
@@ -2174,10 +2100,6 @@ static void SpliceKit_installDragSpy(void) {
     return nil;
 }
 
-- (void)addMediaClip:(id)clip duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
-    [self addMediaClip:clip timelineObject:clip duration:clipDuration atTimeline:timelinePos into:clipInfos];
-}
-
 - (void)addMediaClip:(id)clip timelineObject:(id)timelineObject duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
     double trimStart = 0;
     SEL unclippedSel = NSSelectorFromString(@"unclippedRange");
@@ -2195,15 +2117,6 @@ static void SpliceKit_installDragSpy(void) {
     }
     [self addMediaClip:clip
           timelineObject:timelineObject
-               duration:clipDuration
-              trimStart:trimStart
-             atTimeline:timelinePos
-                   into:clipInfos];
-}
-
-- (void)addMediaClip:(id)clip duration:(double)clipDuration trimStart:(double)trimStart atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
-    [self addMediaClip:clip
-          timelineObject:clip
                duration:clipDuration
               trimStart:trimStart
              atTimeline:timelinePos
@@ -2377,11 +2290,6 @@ static void SpliceKit_installDragSpy(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.stringValue = [NSString stringWithFormat:@"Transcribing %lu clips with %@...",
             (unsigned long)transcribableClips.count, engineLabel];
-        if (self.progressBar) {
-            self.progressBar.hidden = NO;
-            self.progressBar.indeterminate = NO;
-            self.progressBar.doubleValue = 0;
-        }
     });
 
     // Build batch manifest — deduplicate source files
@@ -2438,14 +2346,9 @@ static void SpliceKit_installDragSpy(void) {
             if ([line hasPrefix:@"PROGRESS:"]) {
                 NSArray *parts = [line componentsSeparatedByString:@":"];
                 if (parts.count >= 3) {
-                    double frac = [parts[1] doubleValue];
                     NSString *msg = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)]
                         componentsJoinedByString:@":"];
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        if (self.progressBar) {
-                            self.progressBar.indeterminate = NO;
-                            self.progressBar.doubleValue = frac;
-                        }
                         self.statusLabel.stringValue = [NSString stringWithFormat:@"%@: %@", engineLabel, msg];
                     });
                 }
@@ -2815,11 +2718,6 @@ static NSString *SpliceKitCaption_durRational(double seconds, int fdNum, int fdD
     return [NSString stringWithFormat:@"%lld/%ds", frames * fdNum, fdDen];
 }
 
-static NSString *SpliceKitCaption_frameRational(long long frames, int fdNum, int fdDen) {
-    if (frames <= 0) return @"0s";
-    return [NSString stringWithFormat:@"%lld/%ds", frames * MAX(fdNum, 1), MAX(fdDen, 1)];
-}
-
 static NSString *SpliceKitCaption_previewText(NSString *text, NSUInteger maxLength) {
     NSString *safe = text ?: @"";
     safe = [[safe stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
@@ -2895,16 +2793,6 @@ static void SpliceKitCaption_writeJSONDebugFile(id object, NSString *path, NSStr
         return;
     }
     SpliceKitCaption_writeDataDebugFile(jsonData, path, label);
-}
-
-static SpliceKitCaption_CMTime SpliceKitCaption_makeCMTime(double seconds, int timescale) {
-    int safeTimescale = MAX(timescale, 1);
-    SpliceKitCaption_CMTime time;
-    time.value = (int64_t)llround(seconds * safeTimescale);
-    time.timescale = safeTimescale;
-    time.flags = 1;
-    time.epoch = 0;
-    return time;
 }
 
 static long long SpliceKitCaption_frameCountForSeconds(double seconds, int fdNum, int fdDen, BOOL allowZero) {
@@ -3160,23 +3048,6 @@ static NSAttributedString *SpliceKitCaption_makeHighlightedGeneratorAttributedSt
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:wordText attributes:attrs]];
     }
     return result;
-}
-
-static NSAttributedString *SpliceKitCaption_makeHighlightedGeneratorAttributedString(SpliceKitCaptionSegment *seg,
-                                                                                    NSUInteger activeWordIndex,
-                                                                                    SpliceKitCaptionStyle *style) {
-    if (!seg || seg.words.count == 0) {
-        return SpliceKitCaption_makeGeneratorAttributedString(seg.text ?: @"", style);
-    }
-    NSMutableArray<NSString *> *displayWords = [NSMutableArray arrayWithCapacity:seg.words.count];
-    for (SpliceKitTranscriptWord *word in seg.words) {
-        NSString *wordText = word.text ?: @"";
-        if (style.allCaps) wordText = [wordText uppercaseString];
-        [displayWords addObject:wordText];
-    }
-    return SpliceKitCaption_makeHighlightedGeneratorAttributedStringFromWords(displayWords,
-                                                                              activeWordIndex,
-                                                                              style);
 }
 
 static NSAttributedString *SpliceKitCaption_effectFieldAttributedTextTemplate(id effect) {
@@ -3889,15 +3760,6 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     return NO;
 }
 
-- (NSArray<NSView *> *)allSubviewsOf:(NSView *)view {
-    NSMutableArray *result = [NSMutableArray array];
-    for (NSView *sub in view.subviews) {
-        [result addObject:sub];
-        [result addObjectsFromArray:[self allSubviewsOf:sub]];
-    }
-    return result;
-}
-
 - (NSDictionary *)addCaptionTitlesDirectlyToTimeline {
     // Native pasteboard insertion modeled on the earlier caption workflow:
     // build a real FFAnchoredCollection storyline containing generator and gap
@@ -4517,10 +4379,6 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     return xml;
 }
 
-- (CGFloat)yOffsetForPosition {
-    return [self yOffsetForStyle:self.style];
-}
-
 // Content Position Y for the FCPXML <param> element (Motion template coordinate space).
 // This is different from yOffsetForPosition which uses FFCutawayEffects transform space.
 // The legacy template uses height * 0.7 for bottom position in this coordinate space.
@@ -4540,10 +4398,6 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     if (fabs(y) < 1.0) return @""; // center — no param needed
     return [NSString stringWithFormat:
         @"<param name=\"Content Position\" key=\"9999/10003/1/100/101\" value=\"0 %.0f\"/>\n", y];
-}
-
-- (NSString *)animationXMLForSegmentDuration:(double)segDur isFirstWord:(BOOL)isFirst isLastWord:(BOOL)isLast {
-    return @"";
 }
 
 #pragma mark - Word-Progress Caption Generation
@@ -4794,170 +4648,6 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     return xml;
 }
 
-// Generate per-word highlight titles for a segment using Basic Title.
-// One <title> per word timing — all words visible, active word highlighted.
-- (NSString *)wordHighlightTitlesForSegment:(SpliceKitCaptionSegment *)seg
-                                  tsCounter:(int *)tsCounter
-                                     indent:(NSString *)indent
-                                       lane:(NSString *)lane {
-    SpliceKitCaptionStyle *s = self.style;
-    int fdN = self.fdNum, fdD = self.fdDen;
-    NSArray<SpliceKitTranscriptWord *> *words = seg.words;
-    if (words.count == 0) return @"";
-
-    // Resolve font family (FCPXML needs family name, not PostScript name)
-    NSString *fontName = s.font ?: @"Helvetica";
-    NSFont *resolvedFont = [NSFont fontWithName:fontName size:s.fontSize];
-    NSString *familyName = resolvedFont ? resolvedFont.familyName : fontName;
-    if ([familyName containsString:@"-"])
-        familyName = [familyName componentsSeparatedByString:@"-"].firstObject;
-
-    // Basic Title's coordinate system renders text larger than the custom template.
-    // Scale to ~2/3 for equivalent visual size at 1080p.
-    CGFloat fontSize = round(s.fontSize * 0.67);
-
-    NSColor *hilite = s.highlightColor ?: [NSColor yellowColor];
-    NSString *highlightColorStr = SpliceKitCaption_colorToFCPXML(hilite);
-    NSString *baseColorStr = SpliceKitCaption_colorToFCPXML(s.textColor);
-
-    NSMutableString *xml = [NSMutableString string];
-    NSString *laneAttr = lane ? [NSString stringWithFormat:@" lane=\"%@\"", lane] : @"";
-
-    for (NSUInteger i = 0; i < words.count; i++) {
-        SpliceKitTranscriptWord *word = words[i];
-
-        // Title starts when this word starts, ends when next word starts (or segment ends)
-        double titleStart = word.startTime;
-        double titleEnd = (i + 1 < words.count) ? words[i + 1].startTime : seg.endTime;
-        if (!isfinite(titleEnd) || titleEnd <= titleStart) {
-            titleEnd = titleStart + ((double)MAX(fdN, 1) / (double)MAX(fdD, 1));
-        }
-        long long startFrames = SpliceKitCaption_frameCountForSeconds(titleStart, fdN, fdD, YES);
-        long long endFrames = SpliceKitCaption_frameCountForSeconds(titleEnd, fdN, fdD, NO);
-        if (endFrames <= startFrames) endFrames = startFrames + 1;
-        long long durationFrames = MAX(endFrames - startFrames, 1);
-
-        NSString *offsetStr = SpliceKitCaption_frameRational(startFrames, fdN, fdD);
-        NSString *durStr = SpliceKitCaption_frameRational(durationFrames, fdN, fdD);
-
-        int tsBase = (*tsCounter);
-        NSString *tsH = [NSString stringWithFormat:@"ts%d", tsBase];
-        NSString *tsB = [NSString stringWithFormat:@"ts%d", tsBase + 1];
-        *tsCounter = tsBase + 2;
-
-        [xml appendFormat:@"%@<title ref=\"r2\"%@ offset=\"%@\" name=\"Cap%03lu-%lu\" "
-            @"duration=\"%@\" start=\"3600s\">\n",
-            indent, laneAttr, offsetStr,
-            (unsigned long)seg.segmentIndex + 1, (unsigned long)i + 1, durStr];
-
-        // Position via Motion template param — must come BEFORE <text> in FCPXML.
-        // Key 9999/10003/1/100/101 = Content Position on the Widget layer.
-        [xml appendFormat:@"%@    <param name=\"Position\" key=\"9999/10003/1/100/101\" value=\"0 -447\"/>\n", indent];
-
-        // Text with per-word highlighting: only the active word gets the
-        // highlight color; all other words stay at the base color.
-        [xml appendFormat:@"%@    <text>\n", indent];
-        for (NSUInteger j = 0; j < words.count; j++) {
-            NSString *w = s.allCaps ? [words[j].text uppercaseString] : words[j].text;
-            NSString *ref = (j == i) ? tsH : tsB;
-            NSString *space = (j > 0) ? @" " : @"";
-            [xml appendFormat:@"%@        <text-style ref=\"%@\">%@%@</text-style>\n",
-                indent, ref, space, SpliceKitCaption_escapeXML(w)];
-        }
-        [xml appendFormat:@"%@    </text>\n", indent];
-
-        // Drop shadow: black, 70% opacity, blur 2.43, distance 5, angle 315°
-        // Shadow offset from polar: 5*cos(315°)=3.54, 5*sin(315°)=-3.54
-        NSString *shadowAttrs = @" shadowColor=\"0 0 0 0.7\" shadowOffset=\"3.54 -3.54\" shadowBlurRadius=\"2.43\"";
-
-        // Highlight text-style
-        [xml appendFormat:@"%@    <text-style-def id=\"%@\">\n", indent, tsH];
-        [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" "
-            @"fontColor=\"%@\" alignment=\"center\"%@/>\n",
-            indent, SpliceKitCaption_escapeXML(familyName), fontSize, highlightColorStr, shadowAttrs];
-        [xml appendFormat:@"%@    </text-style-def>\n", indent];
-
-        // Base text-style
-        [xml appendFormat:@"%@    <text-style-def id=\"%@\">\n", indent, tsB];
-        [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" "
-            @"fontColor=\"%@\" alignment=\"center\"%@/>\n",
-            indent, SpliceKitCaption_escapeXML(familyName), fontSize, baseColorStr, shadowAttrs];
-        [xml appendFormat:@"%@    </text-style-def>\n", indent];
-
-        [xml appendFormat:@"%@</title>\n", indent];
-    }
-
-    return xml;
-}
-
-// Generate a single title for one word position in a segment (spine-only format, no lane).
-- (NSString *)wordHighlightTitleForSegment:(SpliceKitCaptionSegment *)seg
-                                 wordIndex:(NSUInteger)i
-                                 tsCounter:(int *)tsCounter
-                                    indent:(NSString *)indent
-                                  duration:(double)titleDur {
-    SpliceKitCaptionStyle *s = self.style;
-    int fdN = self.fdNum, fdD = self.fdDen;
-    NSArray<SpliceKitTranscriptWord *> *words = seg.words;
-    if (i >= words.count) return @"";
-
-    NSString *fontName = s.font ?: @"Helvetica";
-    NSFont *resolvedFont = [NSFont fontWithName:fontName size:s.fontSize];
-    NSString *familyName = resolvedFont ? resolvedFont.familyName : fontName;
-    if ([familyName containsString:@"-"])
-        familyName = [familyName componentsSeparatedByString:@"-"].firstObject;
-
-    CGFloat fontSize = round(s.fontSize * 0.67);
-    NSColor *hilite = s.highlightColor ?: [NSColor yellowColor];
-    NSString *highlightColorStr = SpliceKitCaption_colorToFCPXML(hilite);
-    NSString *baseColorStr = SpliceKitCaption_colorToFCPXML(s.textColor);
-    NSString *durStr = SpliceKitCaption_durRational(titleDur, fdN, fdD);
-    NSString *shadowAttrs = @" shadowColor=\"0 0 0 0.7\" shadowOffset=\"3.54 -3.54\" shadowBlurRadius=\"2.43\"";
-
-    int tsBase = (*tsCounter);
-    NSString *tsH = [NSString stringWithFormat:@"ts%d", tsBase];
-    NSString *tsB = [NSString stringWithFormat:@"ts%d", tsBase + 1];
-    *tsCounter = tsBase + 2;
-
-    NSMutableString *xml = [NSMutableString string];
-
-    [xml appendFormat:@"%@<title ref=\"r2\" name=\"Cap%03lu-%lu\" duration=\"%@\" start=\"3600s\">\n",
-        indent, (unsigned long)seg.segmentIndex + 1, (unsigned long)i + 1, durStr];
-
-    // Content Position param — baked into FCPXML so every title gets it
-    NSString *posParam = [self contentPositionParamXML];
-    if (posParam.length > 0) [xml appendFormat:@"%@    %@", indent, posParam];
-    // NOTE: Do NOT add <adjust-transform> here — it crashes FCP's FCPXML parser
-    // when combined with multiple <text-style ref> elements (word-highlight mode).
-    // Content Position param handles positioning for word-highlight titles.
-
-    // Text with per-word highlighting
-    [xml appendFormat:@"%@    <text>\n", indent];
-    for (NSUInteger j = 0; j < words.count; j++) {
-        NSString *w = s.allCaps ? [words[j].text uppercaseString] : words[j].text;
-        NSString *ref = (j == i) ? tsH : tsB;
-        NSString *space = (j > 0) ? @" " : @"";
-        [xml appendFormat:@"%@        <text-style ref=\"%@\">%@%@</text-style>\n",
-            indent, ref, space, SpliceKitCaption_escapeXML(w)];
-    }
-    [xml appendFormat:@"%@    </text>\n", indent];
-
-    // Text style defs with drop shadow
-    [xml appendFormat:@"%@    <text-style-def id=\"%@\">\n", indent, tsH];
-    [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" "
-        @"fontColor=\"%@\" alignment=\"center\"%@/>\n",
-        indent, SpliceKitCaption_escapeXML(familyName), fontSize, highlightColorStr, shadowAttrs];
-    [xml appendFormat:@"%@    </text-style-def>\n", indent];
-    [xml appendFormat:@"%@    <text-style-def id=\"%@\">\n", indent, tsB];
-    [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" "
-        @"fontColor=\"%@\" alignment=\"center\"%@/>\n",
-        indent, SpliceKitCaption_escapeXML(familyName), fontSize, baseColorStr, shadowAttrs];
-    [xml appendFormat:@"%@    </text-style-def>\n", indent];
-
-    [xml appendFormat:@"%@</title>\n", indent];
-    return xml;
-}
-
 #pragma mark - FCPXML Builder Helpers
 
 // Build the FCPXML document skeleton (resources + opening tags).
@@ -4968,8 +4658,6 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
                               tsCounter:(int *)outTsCounter {
     int fdN = self.fdNum, fdD = self.fdDen;
     NSString *fmtId = @"r1";
-    NSString *totalDurStr = SpliceKitCaption_durRational(totalDuration, fdN, fdD);
-    NSString *titleEffectId = @"r2";
 
     NSMutableString *xml = [NSMutableString string];
     [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"];
@@ -5004,14 +4692,7 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
 // one title per segment with Custom Speed keyframes for word-by-word animation.
 // Saved to /tmp for manual import / debugging.
 - (NSString *)buildWordLevelFCPXML {
-    double totalDuration = 0;
-    for (SpliceKitCaptionSegment *seg in self.mutableSegments) {
-        if (seg.endTime > totalDuration) totalDuration = seg.endTime;
-    }
-    totalDuration += 1.0;
-
     int fdN = self.fdNum, fdD = self.fdDen;
-    NSString *totalDurStr = SpliceKitCaption_durRational(totalDuration, fdN, fdD);
 
     NSMutableString *xml = [NSMutableString string];
     [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"];

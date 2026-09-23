@@ -16,7 +16,4 @@
 // Called once from SpliceKit_appDidLaunch() after Lua is initialized.
 void SpliceKitPlugins_loadAll(void);
 
-// Reload a specific plugin by ID (re-execute its Lua init or re-dlopen native).
-NSDictionary *SpliceKitPlugins_reloadPlugin(NSString *pluginId);
-
 #endif /* SpliceKitPlugins_h */

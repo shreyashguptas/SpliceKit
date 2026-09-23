@@ -64,7 +64,6 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 // Primary storyline only: connected clips (B-roll, music, lanes != 0) are left out.
 // Remembered for later timeline runs until changed.
 @property (nonatomic) BOOL primaryStorylineOnly;
-- (void)transcribeFromURL:(NSURL *)audioURL;   // transcribe a specific audio/video file
 - (void)transcribeFromURL:(NSURL *)audioURL
        timelineStart:(double)timelineStart
        trimStart:(double)trimStart

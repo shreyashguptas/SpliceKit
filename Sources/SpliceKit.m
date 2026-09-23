@@ -309,39 +309,6 @@ void SpliceKit_markServerReady(void) {
                   toLaunch, toServer, total);
 }
 
-#pragma mark - Socket Path
-//
-// FCP runs in a partial sandbox. Our entitlements grant read-write to "/",
-// so /tmp usually works. But on some setups it doesn't — the sandbox silently
-// denies the write. We probe for it and fall back to the app's cache dir.
-//
-
-static char sSocketPath[1024] = {0};
-
-const char *SpliceKit_getSocketPath(void) {
-    if (sSocketPath[0] != '\0') return sSocketPath;
-
-    NSString *path = @"/tmp/splicekit.sock";
-
-    // Quick write test to see if the sandbox lets us use /tmp
-    NSString *testPath = @"/tmp/splicekit_test";
-    BOOL canWrite = [[NSFileManager defaultManager] createFileAtPath:testPath
-                                                            contents:[@"test" dataUsingEncoding:NSUTF8StringEncoding]
-                                                          attributes:nil];
-    if (canWrite) {
-        [[NSFileManager defaultManager] removeItemAtPath:testPath error:nil];
-    } else {
-        // /tmp blocked — use the container instead
-        NSString *cacheDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/SpliceKit"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir withIntermediateDirectories:YES attributes:nil error:nil];
-        path = [cacheDir stringByAppendingPathComponent:@"splicekit.sock"];
-        SpliceKit_log(@"Using fallback socket path: %@", path);
-    }
-
-    strncpy(sSocketPath, [path UTF8String], sizeof(sSocketPath) - 1);
-    return sSocketPath;
-}
-
 #pragma mark - Cached Class References
 //
 // We look these up once and stash them globally. Most of these come from Flexo.framework
@@ -1643,7 +1610,6 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
             NSString *audioUrl = ref[@"target_url"];
             NSString *aid = assets[audioUrl] ?: @"r2";
             double clipRate = [child[@"source_range"][@"duration"][@"rate"] doubleValue] ?: fps;
-            double audioSrcStart = otio_sourceStart(child);
 
             // Find the spine item that uses the SAME asset (matched by URL)
             for (NSMutableDictionary *si in spineItems) {
@@ -3279,19 +3245,16 @@ static void SpliceKit_scheduleSoundIsolationUnhideAttempt(NSUInteger attempt) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         [NSThread sleepForTimeInterval:delay];
         __block BOOL success = NO;
-        __block BOOL didThrow = NO;
         @try {
             SpliceKit_executeOnMainThread(^{
                 @try {
                     success = SpliceKit_tryUnhideSoundIsolationNow();
                 } @catch (NSException *e) {
-                    didThrow = YES;
                     SpliceKit_log(@"SoundIsolation unhide attempt %lu threw %@: %@",
                                   (unsigned long)attempt, e.name, e.reason);
                 }
             });
         } @catch (NSException *e) {
-            didThrow = YES;
             SpliceKit_log(@"SoundIsolation unhide dispatch %lu threw %@: %@",
                           (unsigned long)attempt, e.name, e.reason);
         }
@@ -3437,10 +3400,9 @@ static void SpliceKit_appDidLaunch(void) {
     // Swizzle J/L to use configurable speed ladders
     SpliceKit_installPlaybackSpeedSwizzle();
 
-    // Rebuild FCP's hidden Debug pane + Debug menu bar (Apple strips the NIB
-    // and leaves the menu unassigned in release builds; we reconstruct both).
+    // Rebuild FCP's hidden Debug pane (Apple strips the NIB in release builds;
+    // we reconstruct it).
     SpliceKit_installDebugSettingsPanel();
-    // SpliceKit_installDebugMenuBar();  // disabled — don't add the Debug menu to the bar
 
     // Install right-click context menu for structure block color changes
     SpliceKit_safeInstall("StructureBlockContextMenu", ^{

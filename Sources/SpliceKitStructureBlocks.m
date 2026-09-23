@@ -23,11 +23,6 @@ typedef struct {
     int64_t  epoch;
 } SB_CMTime;
 
-typedef struct {
-    SB_CMTime start;
-    SB_CMTime duration;
-} SB_CMTimeRange;
-
 // On ARM64, structs <= 16 bytes return in registers; our CMTime is 24 bytes so
 // we always use objc_msgSend (ARM64 passes large structs via hidden pointer).
 #if defined(__arm64__)
@@ -38,36 +33,6 @@ typedef struct {
 
 // --- Constants ---
 static NSString * const kStructureStorylineName = @"SpliceKit Structure";
-
-// --- Frame arithmetic helpers ---
-
-static long long SB_frameCount(double seconds, int fdNum, int fdDen, BOOL roundUp) {
-    if (fdNum <= 0 || fdDen <= 0) { fdNum = 100; fdDen = 2400; }
-    double fps = (double)fdDen / (double)fdNum;
-    long long frames = roundUp ? (long long)ceil(seconds * fps) : (long long)floor(seconds * fps);
-    if (frames < 0) frames = 0;
-    return frames;
-}
-
-static SB_CMTime SB_makeTime(long long frames, int fdNum, int fdDen) {
-    SB_CMTime t;
-    t.value = frames * MAX(fdNum, 1);
-    t.timescale = MAX(fdDen, 1);
-    t.flags = 1;
-    t.epoch = 0;
-    return t;
-}
-
-// --- Gap and generator creation ---
-
-static id SB_newGap(SB_CMTime duration, SB_CMTime sampleDuration) {
-    Class gapClass = objc_getClass("FFAnchoredGapGeneratorComponent");
-    if (!gapClass) return nil;
-    SEL gapSel = NSSelectorFromString(@"newGap:ofSampleDuration:");
-    if (![gapClass respondsToSelector:gapSel]) return nil;
-    return ((id (*)(id, SEL, SB_CMTime, SB_CMTime))objc_msgSend)(
-        gapClass, gapSel, duration, sampleDuration);
-}
 
 // --- Removal ---
 
@@ -284,7 +249,6 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
         totalDurStr];
 
     NSUInteger captionCount = 0;
-    NSMutableSet *usedLanes = [NSMutableSet set];
     NSMutableDictionary *roleLaneMap = [NSMutableDictionary dictionary];
     int nextLane = 1;
 

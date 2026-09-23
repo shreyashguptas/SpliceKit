@@ -215,11 +215,6 @@ static NSDictionary<NSAttributedStringKey, id> *SpliceKitLogPanel_attributesForF
     return attributeMap[kind][role];
 }
 
-static NSDictionary<NSAttributedStringKey, id> *SpliceKitLogPanel_attributesForLine(NSString *line) {
-    return SpliceKitLogPanel_attributesForFragment(SpliceKitLogPanel_lineKind(line),
-                                                   SKLogFragmentRoleBase);
-}
-
 static void SpliceKitLogPanel_appendString(NSMutableAttributedString *output,
                                            NSString *text,
                                            NSDictionary<NSAttributedStringKey, id> *attributes) {

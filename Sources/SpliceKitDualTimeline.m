@@ -510,104 +510,6 @@ static id SpliceKit_dualTimelineLookupInstalledContainer(NSString *identifier) {
     return ((id (*)(id, SEL, id))objc_msgSend)((id)lkViewModuleClass, installedSel, identifier);
 }
 
-static void SpliceKit_dualTimelineInvokeVoidIfSupported(id target, SEL selector) {
-    if (target && selector && [target respondsToSelector:selector]) {
-        ((void (*)(id, SEL))objc_msgSend)(target, selector);
-    }
-}
-
-// FCP's PEEditorContainerModule registers story/sequence observers when a sequence is
-// loaded (_startObservingEditorModule / _startObservingStoryPresentation). removeSubmodule:
-// alone can deallocate the container while those NSNotificationCenter / KVO registrations
-// remain, which surfaces later as SIGSEGV in -[FFStoryTimelinePresentation postStoryChanged:].
-static void SpliceKit_dualTimelineStopStoryObserversForTimelineModule(id timelineModule) {
-    if (!timelineModule) return;
-
-    SEL storyPresentationSel = NSSelectorFromString(@"storyPresentation");
-    id storyPresentation = [timelineModule respondsToSelector:storyPresentationSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, storyPresentationSel)
-        : nil;
-    if (!storyPresentation) return;
-
-    SpliceKit_dualTimelineInvokeVoidIfSupported(storyPresentation, NSSelectorFromString(@"stopListeningToSequence"));
-    SpliceKit_dualTimelineInvokeVoidIfSupported(storyPresentation,
-                                                NSSelectorFromString(@"_stopListeningToSequenceDefaults"));
-
-    SEL bridgeSel = NSSelectorFromString(@"storySequenceBridge");
-    id bridge = [storyPresentation respondsToSelector:bridgeSel]
-        ? ((id (*)(id, SEL))objc_msgSend)(storyPresentation, bridgeSel)
-        : nil;
-    if (bridge) {
-        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge, NSSelectorFromString(@"stopListeningToSequence"));
-        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge,
-                                                    NSSelectorFromString(@"stopObservingRootItemForEnabledRoleChanges"));
-        SpliceKit_dualTimelineInvokeVoidIfSupported(bridge,
-                                                    NSSelectorFromString(@"nullifyWeakReferenceToStoryTimelinePresentation"));
-    }
-}
-
-// Retained for reference only — not called from close. FCP does not expose a complete
-// observer unregister path; synthesized teardown reproduced KVO/notification crashes.
-static void SpliceKit_dualTimelinePrepareSecondaryContainerForTeardown(id secondary) {
-    if (!secondary) return;
-
-    if (sFocusedEditorContainer == secondary) {
-        sFocusedEditorContainer = SpliceKit_dualTimelinePrimaryEditorContainer();
-    }
-
-    SEL stopSkimmingSel = NSSelectorFromString(@"stopSkimmingForOwner:");
-    if ([secondary respondsToSelector:stopSkimmingSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(secondary, stopSkimmingSel, secondary);
-    }
-
-    SEL windowWillCloseSel = NSSelectorFromString(@"windowWillClose:");
-    if ([secondary respondsToSelector:windowWillCloseSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(secondary, windowWillCloseSel, nil);
-    }
-
-    // Reverse _startObservingStoryPresentation / _startObservingEditorModule (see PEEditorContainerModule).
-    SpliceKit_dualTimelineInvokeVoidIfSupported(secondary, NSSelectorFromString(@"_stopObservingStoryPresentation"));
-    SpliceKit_dualTimelineInvokeVoidIfSupported(secondary, NSSelectorFromString(@"_stopObservingEditorModule"));
-
-    id timelineModule = SpliceKit_dualTimelineTimelineModuleForContainer(secondary);
-    SpliceKit_dualTimelineStopStoryObserversForTimelineModule(timelineModule);
-}
-
-// Retained for reference only — not called from close. See hide-via-orderOut: above.
-static BOOL SpliceKit_dualTimelineDestroySecondaryContainer(id secondary) {
-    if (!secondary) return YES;
-
-    NSString *identifier = SpliceKit_dualTimelineIdentifierForContainer(secondary);
-    if (![identifier isEqualToString:kSpliceKitDualEditorContainerID]) {
-        return NO;
-    }
-
-    @try {
-        SpliceKit_dualTimelinePrepareSecondaryContainerForTeardown(secondary);
-
-        id parent = nil;
-        SEL supermoduleSel = NSSelectorFromString(@"supermodule");
-        if ([secondary respondsToSelector:supermoduleSel]) {
-            parent = ((id (*)(id, SEL))objc_msgSend)(secondary, supermoduleSel);
-        }
-
-        SEL removeSubmoduleSel = NSSelectorFromString(@"removeSubmodule:");
-        if (parent && [parent respondsToSelector:removeSubmoduleSel]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(parent, removeSubmoduleSel, secondary);
-        } else {
-            id window = SpliceKit_dualTimelineWindowForContainer(secondary);
-            if (window && [window respondsToSelector:@selector(close)]) {
-                ((void (*)(id, SEL))objc_msgSend)(window, @selector(close));
-            }
-        }
-    } @catch (NSException *exception) {
-        SpliceKit_log(@"[DualTimeline] Exception during secondary container teardown: %@", exception);
-        return NO;
-    }
-
-    return SpliceKit_dualTimelineLookupInstalledContainer(kSpliceKitDualEditorContainerID) == nil;
-}
-
 static void SpliceKit_dualTimelineSetFocusedContainer(id container, BOOL rebindEditorState) {
     if (!container) return;
     sFocusedEditorContainer = container;
@@ -1044,10 +946,6 @@ void SpliceKit_installDualTimeline(void) {
 
 BOOL SpliceKit_isDualTimelineInstalled(void) {
     return sDualTimelineInstalled;
-}
-
-NSString *SpliceKit_dualTimelineSecondaryIdentifier(void) {
-    return kSpliceKitDualEditorContainerID;
 }
 
 id SpliceKit_dualTimelineFocusedEditorContainer(void) {

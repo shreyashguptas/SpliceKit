@@ -365,32 +365,6 @@ static NSString * const kSpliceKitLiveCamMetalSource =
 @"    float pull = 1.0 - amount * smoothstep(0.0, 0.8, radius);\n"
 @"    return center + delta * pull;\n"
 @"}\n"
-@"// Joint bilateral mask refinement: re-weights mask samples by RGB similarity to the\n"
-@"// guide pixel so the alpha boundary snaps to color edges in the source image.\n"
-@"[[ stitchable ]] half4 maskRefine(coreimage::sampler_h mask, coreimage::sampler_h guide, float radius, float colorSigma) {\n"
-@"    float2 mc = mask.coord();\n"
-@"    float2 gc = guide.coord();\n"
-@"    half3 centerRGB = guide.sample(gc).rgb;\n"
-@"    half centerA = mask.sample(mc).r;\n"
-@"    float invSigma = 1.0 / max(colorSigma * colorSigma, 1e-4);\n"
-@"    float wSum = 0.0;\n"
-@"    float aSum = 0.0;\n"
-@"    for (int dy = -1; dy <= 1; dy++) {\n"
-@"        for (int dx = -1; dx <= 1; dx++) {\n"
-@"            float2 off = float2(float(dx), float(dy)) * radius;\n"
-@"            half3 sRGB = guide.sample(gc + off).rgb;\n"
-@"            half sA = mask.sample(mc + off).r;\n"
-@"            half3 d = sRGB - centerRGB;\n"
-@"            float colorD = float(dot(d, d));\n"
-@"            float spatialD = float(dx * dx + dy * dy) * 0.18;\n"
-@"            float w = exp(-(colorD * invSigma) - spatialD);\n"
-@"            wSum += w;\n"
-@"            aSum += w * float(sA);\n"
-@"        }\n"
-@"    }\n"
-@"    half refined = (wSum > 1e-6) ? half(aSum / wSum) : centerA;\n"
-@"    return half4(refined, refined, refined, 1.0h);\n"
-@"}\n"
 @"// Signed morphological op: positive = erode (shrink mask, kills halo);\n"
 @"// negative = dilate (grow mask). Output is mixed with original by amount magnitude.\n"
 @"[[ stitchable ]] half4 maskChoke(coreimage::sampler_h mask, float amount) {\n"
@@ -1299,7 +1273,7 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
                          arguments:(NSArray<id> *)arguments {
     // Despite the "Color" name, the method also handles general CIKernels so
     // stitchable Metal shaders that sample neighbor pixels (rgbSplit, glitch,
-    // scanline, maskRefine, maskChoke) are not silently skipped.
+    // scanline, maskChoke) are not silently skipped.
     CIKernel *kernel = self.kernels[name];
     if (!kernel) return image;
     CIImage *result = nil;
@@ -2317,13 +2291,6 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
     [defaults setBool:[self currentTimestampOverlayEnabled] forKey:kLiveCamTimestampOverlayKey];
 }
 
-- (NSTextField *)sectionTitleWithText:(NSString *)text {
-    NSTextField *label = [NSTextField labelWithString:text ?: @""];
-    label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
-    label.textColor = [NSColor secondaryLabelColor];
-    return label;
-}
-
 - (NSView *)labeledRowWithLabel:(NSString *)label control:(NSView *)control {
     NSTextField *title = [NSTextField labelWithString:label ?: @""];
     title.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
@@ -2361,22 +2328,6 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
         [view.leadingAnchor constraintGreaterThanOrEqualToAnchor:row.leadingAnchor],
         [view.trailingAnchor constraintLessThanOrEqualToAnchor:row.trailingAnchor],
     ]];
-    return row;
-}
-
-- (NSView *)pairedCenteredRowsWithFirstLabel:(NSString *)firstLabel
-                                     firstControl:(NSView *)firstControl
-                                        secondLabel:(NSString *)secondLabel
-                                      secondControl:(NSView *)secondControl {
-    NSView *firstRow = [self labeledRowWithLabel:firstLabel control:firstControl];
-    NSView *secondRow = [self labeledRowWithLabel:secondLabel control:secondControl];
-    NSStackView *row = [NSStackView stackViewWithViews:@[firstRow, secondRow]];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.spacing = 12.0;
-    row.distribution = NSStackViewDistributionFillEqually;
-    row.alignment = NSLayoutAttributeCenterY;
-    row.detachesHiddenViews = YES;
     return row;
 }
 
@@ -4076,15 +4027,6 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 - (void)toggleAdvancedControls:(id)sender {
     self.advancedVisible = !self.advancedVisible;
     [self refreshAdvancedUI];
-    [self persistDefaults];
-}
-
-- (void)presetClicked:(NSButton *)sender {
-    NSInteger index = sender.tag;
-    if (index < 0 || index >= (NSInteger)self.presets.count) return;
-    SpliceKitLiveCamPreset *preset = self.presets[(NSUInteger)index];
-    [self storeSelectedPresetIdentifier:preset.identifier];
-    [self refreshPresetButtons];
     [self persistDefaults];
 }
 

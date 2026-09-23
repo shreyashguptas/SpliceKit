@@ -1927,10 +1927,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     return nil;
 }
 
-- (void)addMediaClip:(id)clip duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
-    [self addMediaClip:clip timelineObject:clip duration:clipDuration atTimeline:timelinePos into:clipInfos];
-}
-
 - (void)addMediaClip:(id)clip timelineObject:(id)timelineObject duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
     double trimStart = 0;
     SpliceKitTranscript_CMTimeRange unclipped;
@@ -1939,16 +1935,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     }
     [self addMediaClip:clip
           timelineObject:timelineObject
-               duration:clipDuration
-              trimStart:trimStart
-             atTimeline:timelinePos
-                   into:clipInfos];
-}
-
-- (void)addMediaClip:(id)clip duration:(double)clipDuration trimStart:(double)trimStart
-          atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
-    [self addMediaClip:clip
-          timelineObject:clip
                duration:clipDuration
               trimStart:trimStart
              atTimeline:timelinePos
@@ -2281,7 +2267,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         }
 
         // Get the system language or default to en-US
-        NSString *locale = [[NSLocale currentLocale] languageCode] ?: @"en";
         NSString *localeID = [[NSLocale currentLocale] localeIdentifier] ?: @"en-US";
 
         SpliceKit_log(@"[Transcript] Calling modalTranscriptsForClips with %lu assets, locale=%@",
@@ -3102,7 +3087,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     // Read stderr asynchronously for live progress updates. Keep every byte: the
     // handler consumes the pipe, so reading it again after exit found nothing and
     // every failure came back as a bare "exit code 1" without the helper's reason.
-    NSUInteger totalClips = transcribableClips.count;
     self.totalTranscriptions = uniqueFiles.count;
     self.completedTranscriptions = 0;
     __block NSMutableData *stderrAccum = [NSMutableData data];
@@ -4347,10 +4331,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     });
 }
 
-- (void)transcribeFromURL:(NSURL *)audioURL {
-    [self transcribeFromURL:audioURL timelineStart:0 trimStart:0 trimDuration:HUGE_VAL];
-}
-
 // Start a new run: stop a helper still working on the previous one (it may be
 // stuck, e.g. waiting on a privacy prompt) and return this run's number.
 - (NSUInteger)beginRun {
@@ -4827,8 +4807,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     popover.contentViewController = vc;
 
     // Wire up the apply action
-    __weak typeof(self) weakSelf = self;
-    __weak NSPopover *weakPopover = popover;
     applyButton.target = self;
     applyButton.action = @selector(_speakerRenameApply:);
 
@@ -5393,20 +5371,6 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     });
 
     return result;
-}
-
-- (void)scheduleRetranscribe {
-    SpliceKit_log(@"[Transcript] Scheduling re-transcribe after edit...");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateStatusUI:@"Refreshing transcript..."];
-        self.spinner.hidden = NO;
-        [self.spinner startAnimation:nil];
-    });
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        [self performTimelineTranscription];
-    });
 }
 
 #pragma mark - Resync Timestamps from Timeline

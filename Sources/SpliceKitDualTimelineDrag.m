@@ -396,14 +396,12 @@ static BOOL SpliceKit_dualTimelineStartAppKitDrag(id handler,
     NSWindow *sourceWindow = [timelineView respondsToSelector:@selector(window)]
         ? ((id (*)(id, SEL))objc_msgSend)(timelineView, @selector(window))
         : nil;
-    NSPoint windowPoint = [timelineView convertPoint:currentPoint toView:nil];
     NSPoint viewPoint = currentPoint;
     if (sourceWindow && sourceView) {
         NSPoint clamped = NSMakePoint(
             MIN(MAX(viewPoint.x, 8.0), NSWidth(sourceView.bounds) - 8.0),
             MIN(MAX(viewPoint.y, 8.0), NSHeight(sourceView.bounds) - 8.0));
         viewPoint = clamped;
-        windowPoint = [timelineView convertPoint:viewPoint toView:nil];
     }
 
     NSImage *dragImage = SpliceKit_dualTimelineDragImage(dragSource.itemCount, copyOperation);

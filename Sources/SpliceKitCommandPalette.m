@@ -1091,8 +1091,6 @@ static NSString * const kAIRowID = @"FCPAIRow";
 
 typedef NS_ENUM(NSInteger, SpliceKitPalettePresentationState) {
     SpliceKitPalettePresentationStateHidden = 0,
-    SpliceKitPalettePresentationStateStarterSuggestions,
-    SpliceKitPalettePresentationStateTypingSuggestions,
     SpliceKitPalettePresentationStateLatencyPill,
     SpliceKitPalettePresentationStateResultPlatter,
 };
@@ -1365,7 +1363,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     add(@"Remove Silences", @"removeSilences", @"silence_options", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Detect and remove silent segments from timeline", @[@"silence", @"quiet", @"dead air", @"gap", @"pause", @"mute"]);
     add(@"Audio Fade In", @"addAudioFadeIn", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Add audio fade-in to selected clip", @[@"ramp up"]);
     add(@"Audio Fade Out", @"addAudioFadeOut", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Add audio fade-out to selected clip", @[@"ramp down"]);
-    add(@"Expand Audio Components", @"expandAudioComponents", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Show individual audio channels", @[@"channels"]);
     add(@"Mute Audio", @"toggleMuteAudio", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", @"Ctrl+Opt+M", @"Mute/unmute audio on selected clip or clip at playhead", @[@"mute", @"silence", @"audio off", @"toggle audio", @"unmute"]);
     add(@"Audio Enhancements", @"showAudioEnhancements", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Open audio enhancement controls", @[@"eq", @"noise removal", @"loudness"]);
     add(@"Audio Match", @"matchAudio", @"timeline", SpliceKitCommandCategoryEffects, @"Audio", nil, @"Match audio levels between clips", @[@"normalize"]);
@@ -2104,23 +2101,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     }
 }
 
-- (SpliceKitCommand *)commandNamed:(NSString *)name {
-    if (name.length == 0) return nil;
-    for (SpliceKitCommand *cmd in self.masterCommands) {
-        if ([cmd.name isEqualToString:name]) return cmd;
-    }
-    return nil;
-}
-
-- (NSArray<SpliceKitCommand *> *)starterSuggestionCommands {
-    NSMutableArray<SpliceKitCommand *> *starter = [NSMutableArray array];
-    for (NSString *name in @[@"Blade", @"Open Transcript Editor", @"Remove Silences"]) {
-        SpliceKitCommand *cmd = [self commandNamed:name];
-        if (cmd) [starter addObject:cmd];
-    }
-    return starter;
-}
-
 - (NSArray<SpliceKitCommand *> *)topDisplayCommandsWithLimit:(NSUInteger)limit {
     NSMutableArray<SpliceKitCommand *> *results = [NSMutableArray array];
     for (SpliceKitCommand *cmd in self.filteredCommands) {
@@ -2272,35 +2252,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.96];
             [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:6.0 scale:0.98];
             scrollAlpha = 1.0;
-            break;
-        }
-        case SpliceKitPalettePresentationStateStarterSuggestions: {
-            heroSuggestions = [self starterSuggestionCommands];
-            [self animatePresentationView:self.heroSuggestionStackView visible:YES animated:animated delay:0.0 yOffset:8.0 scale:0.98];
-            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.96];
-            [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.96];
-            [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:6.0 scale:0.98];
-            scrollAlpha = 1.0;
-            break;
-        }
-        case SpliceKitPalettePresentationStateTypingSuggestions: {
-            heroStageHeight = 138.0;
-            NSArray<SpliceKitCommand *> *commands = [self topDisplayCommandsWithLimit:4];
-            SpliceKitCommand *preview = commands.firstObject;
-            heroContinuer = commands.count > 1
-                ? [commands subarrayWithRange:NSMakeRange(1, MIN((NSUInteger)3, commands.count - 1))]
-                : [self starterSuggestionCommands];
-            resultTitle = preview.name ?: @"No exact command yet";
-            resultSubtitle = preview.detail ?: @"Press Tab to ask Apple Intelligence+ or keep typing.";
-            resultBadge = preview.categoryName ?: @"Suggestions";
-            resultFootnote = preview ? @"Return executes · arrows browse" : @"Tab asks AI when the command list runs out";
-            resultSymbol = preview ? FCPCommandSymbolName(preview) : @"sparkles";
-            resultAccent = preview ? FCPCommandAccentColor(preview) : FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
-            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
-            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.96];
-            [self animatePresentationView:self.heroResultPlatterView visible:YES animated:animated delay:0.0 yOffset:10.0 scale:0.97];
-            [self animatePresentationView:self.heroContinuerStackView visible:YES animated:animated delay:0.05 yOffset:8.0 scale:0.98];
-            scrollAlpha = 0.92;
             break;
         }
         case SpliceKitPalettePresentationStateLatencyPill: {
@@ -3848,7 +3799,6 @@ static NSString *FCPStripStopWords(NSString *query) {
         [v addSubview:runBtn];
 
         // Run modal
-        __block BOOL didRun = NO;
         cancelBtn.target = opts;
         cancelBtn.action = @selector(close);
 
@@ -4211,12 +4161,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     }
 }
 
-- (void)saveFavorites {
-    // favoriteKeys is the source of truth for membership; rebuild dicts from stored array + any additions
-    // We keep the full dicts in NSUserDefaults for name/category metadata
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-
 - (NSArray<NSDictionary *> *)allFavoriteDicts {
     return [[NSUserDefaults standardUserDefaults] arrayForKey:kSpliceKitFavoritesKey] ?: @[];
 }
@@ -4258,11 +4202,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     if (self.aiLoading || self.aiResults.count > 0) cmdIdx -= 1;
     if (cmdIdx < 0 || cmdIdx >= (NSInteger)self.filteredCommands.count) return nil;
     return self.filteredCommands[cmdIdx];
-}
-
-- (NSMenu *)contextMenuForRow:(NSInteger)row {
-    // Unused — context menu is now handled by menuNeedsUpdate: delegate
-    return nil;
 }
 
 #pragma mark - NSMenuDelegate (right-click context menu)

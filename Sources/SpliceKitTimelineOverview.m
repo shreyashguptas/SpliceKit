@@ -130,7 +130,6 @@ static int32_t OV_sequenceTimescale(void) {
 @interface SpliceKitTimelineOverviewView : NSView
 @property (nonatomic, strong) NSImage *cachedImage;
 @property (nonatomic) CGSize cachedImageBackingSize;
-@property (nonatomic, strong) NSDate *cachedAt;
 @property (nonatomic, assign) NSUInteger cachedCollectionHash;  // sequence handle hash
 @property (nonatomic, assign) double cachedDuration;
 
@@ -367,7 +366,6 @@ static BOOL OV_collectionIsRenderable(id collection) {
             self.cachedImageBackingSize = backing.size;
             self.cachedDuration = OV_sequenceDurationSeconds();
             self.cachedCollectionHash = (NSUInteger)collection;
-            self.cachedAt = [NSDate date];
         }
     } @catch (NSException *e) {
         SpliceKit_log(@"[Overview] render exception: %@", e.reason ?: e.description);

@@ -37,55 +37,8 @@ typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTime
   #define SK_STRET_MSG objc_msgSend_stret
 #endif
 
-#pragma mark - Meter Observer
-
-// Stores live audio levels per role UID, updated by FCP's metering timer
-// Non-static so it can be accessed from SpliceKitServer.m via extern
-NSMutableDictionary *sMeterLevels = nil; // roleUID -> @(peakLinear)
-
-static const char kMeterRoleUIDKey = 0; // associated object key
 static const NSInteger kSpliceKitMixerMaxFaders = 12;
 static const CGFloat kSpliceKitMixerFaderWidth = 92.0;
-
-@interface SpliceKitMeterObserver : NSObject
-@property (nonatomic, strong) NSString *roleUID;
-@end
-
-@implementation SpliceKitMeterObserver
-
-// Called by FCP's FFContext _updateMeters: timer for each registered role.
-// Signature: contextMeterUpdate:(uint)channels peakValues:(float*)peaks loudnessValues:(struct*)loudness
-// We use NSMethodSignature override to ensure the runtime finds this method.
-- (void)contextMeterUpdate:(NSUInteger)channels peakValues:(void *)peaks loudnessValues:(void *)loudness {
-    if (!peaks) return;
-    if (channels == 0) return;
-    float *peakArray = (float *)peaks;
-    float maxPeak = 0;
-    for (NSUInteger i = 0; i < channels && i < 32; i++) {
-        if (peakArray[i] > maxPeak) maxPeak = peakArray[i];
-    }
-    if (!sMeterLevels) sMeterLevels = [NSMutableDictionary dictionary];
-    if (self.roleUID) {
-        sMeterLevels[self.roleUID] = @(maxPeak);
-    }
-}
-
-// Handle any unrecognized selectors gracefully to prevent crashes
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
-    NSMethodSignature *sig = [super methodSignatureForSelector:sel];
-    if (!sig) {
-        // Return a void signature for any unknown selector
-        sig = [NSMethodSignature signatureWithObjCTypes:"v@:"];
-    }
-    return sig;
-}
-
-- (void)forwardInvocation:(NSInvocation *)invocation {
-    // Log the selector FCP is trying to call
-    SpliceKit_log(@"[Mixer] MeterObserver forwarded: %@", NSStringFromSelector(invocation.selector));
-}
-
-@end
 
 #pragma mark - Fader State
 
@@ -1439,20 +1392,6 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     } @catch (NSException *e) {}
     self.transportPlaying = playing;
     return playing;
-}
-
-- (BOOL)anyFaderRecordingAutomation {
-    for (SpliceKitFaderView *fv in self.faderViews) {
-        if (fv.state.isRecordingAutomation) return YES;
-    }
-    return NO;
-}
-
-- (BOOL)anyFaderArmedForAutomation {
-    for (SpliceKitFaderView *fv in self.faderViews) {
-        if (fv.state.isAutomationArmed) return YES;
-    }
-    return NO;
 }
 
 - (void)updateAutomationUI {

@@ -266,7 +266,6 @@ void SpliceKitPlugins_loadAll(void) {
     }
 
     NSMutableArray<NSDictionary *> *manifests = [NSMutableArray array];
-    NSMutableDictionary<NSString *, NSString *> *pluginDirs = [NSMutableDictionary dictionary];
 
     for (NSString *name in contents) {
         NSString *pluginDir = [pluginsDir stringByAppendingPathComponent:name];
@@ -290,7 +289,6 @@ void SpliceKitPlugins_loadAll(void) {
         NSMutableDictionary *enriched = [manifest mutableCopy];
         enriched[@"_dir"] = pluginDir;
         [manifests addObject:enriched];
-        pluginDirs[pluginId] = pluginDir;
     }
 
     if (manifests.count == 0) {
@@ -337,34 +335,4 @@ void SpliceKitPlugins_loadAll(void) {
     }
 
     SpliceKit_log(@"[Plugin] Finished loading %lu plugin(s)", (unsigned long)sorted.count);
-}
-
-NSDictionary *SpliceKitPlugins_reloadPlugin(NSString *pluginId) {
-    NSString *appSupport = [NSSearchPathForDirectoriesInDomains(
-        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *pluginsDir = [appSupport stringByAppendingPathComponent:@"SpliceKit/plugins"];
-
-    // Find the plugin directory
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *contents = [fm contentsOfDirectoryAtPath:pluginsDir error:nil];
-    for (NSString *name in contents) {
-        NSString *pluginDir = [pluginsDir stringByAppendingPathComponent:name];
-        NSDictionary *manifest = SpliceKitPlugins_readManifest(pluginDir);
-        if (!manifest || ![manifest[@"id"] isEqualToString:pluginId]) continue;
-
-        NSDictionary *entry = manifest[@"entry"];
-        BOOL loaded = NO;
-
-        if (entry[@"lua"]) {
-            loaded = SpliceKitPlugins_loadLua(manifest, pluginDir);
-        }
-
-        if (loaded) {
-            return @{@"status": @"ok", @"pluginId": pluginId, @"reloaded": @YES};
-        } else {
-            return @{@"error": [NSString stringWithFormat:@"Failed to reload %@", pluginId]};
-        }
-    }
-
-    return @{@"error": [NSString stringWithFormat:@"Plugin not found: %@", pluginId]};
 }

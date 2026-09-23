@@ -66,9 +66,6 @@ typedef NS_ENUM(NSInteger, SpliceKitCommandCategory) {
 // Get command at display row (accounting for AI row offset)
 - (SpliceKitCommand *)commandForDisplayRow:(NSInteger)row;
 
-// Context menu for right-click in browse mode
-- (NSMenu *)contextMenuForRow:(NSInteger)row;
-
 // AI engine selection
 @property (nonatomic, assign) SpliceKitAIEngine aiEngine;
 @property (nonatomic, strong) NSString *gemmaModel;

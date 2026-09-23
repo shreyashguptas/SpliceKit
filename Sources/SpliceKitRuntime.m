@@ -27,21 +27,6 @@ id SpliceKit_sendMsg(id target, SEL selector) {
     return ((id (*)(id, SEL))objc_msgSend)(target, selector);
 }
 
-id SpliceKit_sendMsg1(id target, SEL selector, id arg1) {
-    if (!target) return nil;
-    return ((id (*)(id, SEL, id))objc_msgSend)(target, selector, arg1);
-}
-
-id SpliceKit_sendMsg2(id target, SEL selector, id arg1, id arg2) {
-    if (!target) return nil;
-    return ((id (*)(id, SEL, id, id))objc_msgSend)(target, selector, arg1, arg2);
-}
-
-BOOL SpliceKit_sendMsgBool(id target, SEL selector) {
-    if (!target) return NO;
-    return ((BOOL (*)(id, SEL))objc_msgSend)(target, selector);
-}
-
 #pragma mark - Main Thread Dispatch
 //
 // Almost everything in FCP's UI layer (timeline, inspector, viewer) is main-thread-only.
@@ -278,19 +263,6 @@ BOOL SpliceKit_saveSequenceState(id sequence, NSDictionary *state, NSError **err
 // dozens of frameworks. We can enumerate them by Mach-O image (to see what
 // came from Flexo vs ProAppSupport vs TimelineKit) or grab the full list.
 //
-
-NSArray *SpliceKit_classesInImage(const char *imageName) {
-    NSMutableArray *result = [NSMutableArray array];
-    unsigned int count = 0;
-    const char **names = objc_copyClassNamesForImage(imageName, &count);
-    if (names) {
-        for (unsigned int i = 0; i < count; i++) {
-            [result addObject:@(names[i])];
-        }
-        free(names);
-    }
-    return result;
-}
 
 // Returns every method on a class: selector name, type encoding, and IMP address.
 // The IMP address is useful for setting breakpoints or cross-referencing with
