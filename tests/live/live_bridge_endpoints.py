@@ -696,6 +696,10 @@ def test_new_actions():
             # Expected when no project/clip is active — action IS registered
             print(f"  OK    {action_name} (registered, needs active target)")
             PASSED += 1
+        elif "not available in this Final Cut Pro version" in err:
+            # Kept for compatibility; this FCP build has no command for it
+            print(f"  OK    {action_name} (registered, not in this FCP version)")
+            PASSED += 1
         else:
             ok(action_name, r)
 

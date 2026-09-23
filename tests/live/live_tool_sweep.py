@@ -563,10 +563,11 @@ CASES.update({
                          expect=r"clips? queued"),
     "open_project": Case(args={"name": EXPECTED_PROJECT}, kind="write",
                          invalidates_handles=True),
-    # FCP 12.3 has no setRangeStart:/setRangeEnd: on FFAnchoredTimelineModule, so the
-    # honest result is the tool naming what it cannot find.
-    "set_timeline_range": dependency("does not implement", "setRangeStart",
-                                     start_seconds=1.0, end_seconds=2.0),
+    # Mark > Set Range Start / End (setSelectionStart: / setSelectionEnd:); a range
+    # selection is not an edit, so Mark > Clear Selected Ranges takes it back.
+    "set_timeline_range": write(start_seconds=1.0, end_seconds=2.0, expect=r"Range set",
+                                cleanup=[("timeline_edit_action",
+                                          {"action": "clearRange"})]),
 
     # ---------------------------------------------------------------- external deps
     "flexmusic_list_songs": dependency("no songs", "not installed", "empty",

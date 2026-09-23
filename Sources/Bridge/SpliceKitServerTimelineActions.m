@@ -271,7 +271,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 
         // Markers
         @"addMarker":        @"addMarker:",
-        @"addTodoMarker":    @"addTodoMarker:",
+        @"addTodoMarker":    @"addToDoMarker:",   // handled by the special case below
         @"addChapterMarker": @"addChapterMarker:",
         @"deleteMarker":     @"deleteMarker:",
         @"nextMarker":       @"nextMarker:",
@@ -326,8 +326,8 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"retimeFast20x":    @"retimeFastx20:",
         @"retimeSlow50":     @"retimeSlowHalf:",
         @"retimeSlow25":     @"retimeSlowQuarter:",
-        @"retimeSlow10":     @"retimeSlowTenth:",
-        @"retimeReverse":    @"retimeReverse:",
+        @"retimeSlow10":     @"retimeSlowTenPercent:",
+        @"retimeReverse":    @"retimeReverseClip:",
         @"retimeHold":       @"retimeHold:",
         @"freezeFrame":      @"freezeFrame:",
         @"retimeBladeSpeed": @"retimeBladeSpeed:",
@@ -342,9 +342,9 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"shareSelection":   @"shareSelection:",
 
         // Range selection (in/out points)
-        @"setRangeStart":    @"setRangeStart:",
-        @"setRangeEnd":      @"setRangeEnd:",
-        @"clearRange":       @"clearRange:",
+        @"setRangeStart":    @"setSelectionStart:",
+        @"setRangeEnd":      @"setSelectionEnd:",
+        @"clearRange":       @"clearSelection:",
 
         // Keyframes
         @"addKeyframe":      @"addKeyframe:",
@@ -353,8 +353,8 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"previousKeyframe": @"previousKeyframe:",
 
         // Solo/Disable
-        @"solo":             @"soloSelectedClips:",
-        @"disable":          @"disableSelectedClips:",
+        @"solo":             @"solo:",
+        @"disable":          @"enableOrDisableEdit:",
 
         // Compound clips
         @"createCompoundClip": @"createCompoundClip:",
@@ -368,7 +368,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"removeEffects":    @"removeEffects:",
         @"liftFromPrimaryStoryline": @"liftFromSpine:",
         @"overwriteToPrimaryStoryline": @"collapseToSpine:",
-        @"createStoryline":  @"createStoryline:",
+        @"createStoryline":  @"createAnchoredSpine:",
         @"collapseToConnectedStoryline": @"collapseToConnectedStoryline:",
 
         // Timeline view
@@ -376,7 +376,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"zoomIn":           @"zoomIn:",
         @"zoomOut":          @"zoomOut:",
         @"verticalZoomToFit": @"verticalZoomToFit:",
-        @"zoomToSamples":    @"zoomToSamples:",
+        @"zoomToSamples":    @"zoomtoSubframes:",
         @"toggleSnapping":   @"toggleSnapping:",
         @"toggleSkimming":   @"toggleSkimming:",
         @"toggleClipSkimming": @"toggleItemSkimming:",
@@ -384,14 +384,14 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"toggleInspector":  @"toggleInspector:",
         @"toggleTimeline":   @"toggleTimeline:",
         @"toggleTimelineIndex": @"toggleTimelineIndex:",
-        @"toggleInspectorHeight": @"toggleInspectorHeight:",
-        @"showPrecisionEditor": @"showPrecisionEditor:",
-        @"showAudioLanes":   @"showAudioLanes:",
-        @"expandSubroles":   @"expandSubroles:",
-        @"timelineHistoryBack": @"timelineHistoryBack:",
-        @"timelineHistoryForward": @"timelineHistoryForward:",
-        @"beatDetectionGrid": @"toggleBeatDetectionGrid:",
-        @"timelineScrolling": @"toggleTimelineScrolling:",
+        @"toggleInspectorHeight": @"toggleFullHeightInspector:",
+        @"showPrecisionEditor": @"togglePrecisionEditor:",
+        @"showAudioLanes":   @"toggleAllAudioLanes:",
+        @"expandSubroles":   @"toggleAllSubroles:",
+        @"timelineHistoryBack": @"selectPreviousTimelineItem:",
+        @"timelineHistoryForward": @"selectNextTimelineItem:",
+        @"beatDetectionGrid": @"toggleBeatGridDown:",
+        @"timelineScrolling": @"toggleScrollingTimelineDuringPlayback:",
         @"enterFullScreen":  @"toggleFullScreen:",
 
         // Render
@@ -412,14 +412,14 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 
         // Paste variants
         @"pasteAsConnected": @"pasteAnchored:",
-        @"pasteEffects":     @"pasteEffects:",
-        @"pasteAttributes":  @"pasteAttributes:",
+        @"pasteEffects":     @"pasteAllAttributes:",
+        @"pasteAttributes":  @"pasteSomeAttributes:",
         @"removeAttributes": @"removeAttributes:",
         @"copyAttributes":   @"copyAttributes:",
 
         // Replace/delete variants
         @"replaceWithGap":   @"shiftDelete:",
-        @"deleteSelection":  @"deleteSelection:",
+        @"deleteSelection":  @"delete:",
 
         // Trim operations
         @"trimStart":        @"trimStart:",
@@ -448,32 +448,31 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         // Audio operations
         @"expandAudio":      @"splitEdit:",
         @"expandAudioComponents": @"toggleAudioComponents:",
-        @"addChannelEQ":     @"addChannelEQ:",
-        @"enhanceAudio":     @"enhanceAudio:",
-        @"matchAudio":       @"matchAudio:",
+        @"enhanceAudio":     @"toggleEnhanceAudio:",
+        @"matchAudio":       @"toggleMatchAudio:",
 
         // Show/hide editors
         @"showVideoAnimation": @"showTimelineCurveEditor:",
         @"showAudioAnimation": @"showTimelineCurveEditor:",
         @"soloAnimation":    @"collapseTimelineCurveEditor:",
-        @"showTrackingEditor": @"showTrackingEditor:",
-        @"showCinematicEditor": @"showCinematicEditor:",
-        @"showMagneticMaskEditor": @"showMagneticMaskEditor:",
-        @"enableBeatDetection": @"enableBeatDetection:",
+        @"showTrackingEditor": @"toggleTrackingEditor:",
+        @"showCinematicEditor": @"toggleCinematicEditor:",
+        @"showMagneticMaskEditor": @"toggleSegmentationMaskEditor:",
+        @"enableBeatDetection": @"detectBeatsOnSelection:",
 
         // Clip operations
         @"synchronizeClips": @"mergeClips:",
         @"openClip":         @"openInTimeline:",
-        @"renameClip":       @"renameClip:",
-        @"addToSoloedClips": @"addToSoloedClips:",
-        @"referenceNewParentClip": @"referenceNewParentClip:",
+        @"renameClip":       @"startEditingTitleForItem:",
+        @"addToSoloedClips": @"modifySolo:",
+        @"referenceNewParentClip": @"makeClipsUnique:",
 
         // Color correction extras
         @"balanceColor":     @"toggleBalanceColor:",
-        @"matchColor":       @"matchColor:",
+        @"matchColor":       @"toggleMatchColor:",
         @"addMagneticMask":  @"addObjectMaskEffect:",
         @"smartConform":     @"autoReframe:",
-        @"enhanceLightAndColor": @"enhanceLightAndColor:",
+        @"enhanceLightAndColor": @"addEnhanceLightAndColorEffect:",
 
         // Adjustment clip
         @"addAdjustmentClip": @"connectAdjustmentClip:",
@@ -483,7 +482,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 
         // Window/workspace
         @"backgroundTasks":  @"goToBackgroundTaskList:",
-        @"showDuplicateRanges": @"showDuplicateRanges:",
+        @"showDuplicateRanges": @"toggleDupeDetection:",
 
         // Roles
         @"editRoles":        @"editRoles:",
@@ -493,45 +492,45 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 
         // Keywords
         @"showKeywordEditor": @"toggleKeywordEditor:",
-        @"removeAllKeywords": @"removeAllKeywords:",
-        @"removeAnalysisKeywords": @"removeAnalysisKeywords:",
+        @"removeAllKeywords": @"removeAllKeywordsFromSelection:",
+        @"removeAnalysisKeywords": @"removeAllAnalysisKeywordsFromSelection:",
 
         // Hide clip
         @"hideClip":         @"hideClip:",
 
         // Audition
-        @"createAudition":   @"createAudition:",
-        @"finalizeAudition": @"finalizeAudition:",
-        @"nextAuditionPick": @"nextAuditionPick:",
-        @"previousAuditionPick": @"previousAuditionPick:",
+        @"createAudition":   @"newVariantFromCurrentInSelection:",
+        @"finalizeAudition": @"finalizePickOfSelectedVariant:",
+        @"nextAuditionPick": @"selectNextVariantInSelection:",
+        @"previousAuditionPick": @"selectPreviousVariantInSelection:",
 
         // Captions
-        @"addCaption":       @"addCaption:",
+        @"addCaption":       @"addAndEditCaption:",
         @"splitCaption":     @"splitCaptions:",
-        @"resolveOverlaps":  @"resolveCaptionOverlaps:",
+        @"resolveOverlaps":  @"resolveOverlaps:",
 
         // Multicam
-        @"createMulticamClip": @"createMulticamClip:",
+        @"createMulticamClip": @"createMultiAngleClip:",
 
         // Source media
-        @"revealInBrowser":  @"revealSourceInBrowser:",
-        @"revealProjectInBrowser": @"revealProjectInBrowser:",
+        @"revealInBrowser":  @"revealAncestor:",
+        @"revealProjectInBrowser": @"revealProject:",
         @"revealInFinder":   @"revealInFinder:",
         @"moveToTrash":      @"moveToTrash:",
 
         // Library
         @"closeLibrary":     @"closeLibrary:",
         @"libraryProperties": @"showLibraryProperties:",
-        @"consolidateEventMedia": @"consolidateEventMedia:",
+        @"consolidateEventMedia": @"consolidateFiles:",
         @"mergeEvents":      @"mergeEvents:",
-        @"deleteGeneratedFiles": @"deleteGeneratedFiles:",
+        @"deleteGeneratedFiles": @"purgeRenderFiles:",
 
         // Find
-        @"find":             @"performFindPanelAction:",
-        @"findAndReplaceTitle": @"findAndReplaceTitleText:",
+        @"find":             @"searchAction:",
+        @"findAndReplaceTitle": @"findAndReplace:",
 
         // Project properties
-        @"projectProperties": @"showProjectProperties:",
+        @"projectProperties": @"showProviderSettings:",
 
         // Edit modes - audio/video only
         @"insertEditAudio":  @"insertWithSelectedMediaAudio:",
@@ -624,34 +623,54 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"dropMenuAddToStack":          @"actionDropMenuAddToStack:",
         @"dropMenuCancel":              @"actionDropMenuCancel:",
 
-        // --- Retiming quality (direct Flexo methods) ---
-        @"retimeTurnOnOpticalFlowHigh":    @"actionRetimeTurnOnOpticalFlowHigh:",
-        @"retimeTurnOnOpticalFlowMedium":  @"actionRetimeTurnOnOpticalFlowMedium:",
-        @"retimeTurnOnOpticalFlowFRC":     @"actionRetimeTurnOnOpticalFlowFRC:",
-        @"retimeTurnOnNearestNeighbor":    @"actionRetimeTurnOnNearestNeighbor:",
-        @"retimeRateConformOpticalFlowHigh": @"actionRateConformTurnOnOpticalFlowHigh:",
-
-        // --- Cinematic / tracking ---
-        @"resetCinematic":           @"actionResetCinematic:",
-        @"addTrackerOnSource":       @"actionAddTrackerOnSource:",
-
-        // --- Audio offset channels ---
-        @"bakeAndRemoveOffsetChannels": @"actionBakeAndRemoveOffsetChannels",
-        @"resetOffsetChannels":         @"actionResetOffsetChannels",
-
-        // --- Caption playback ---
-        @"setCaptionPlaybackEnabled":  @"actionSetCaptionPlaybackEnabled:",
-        @"setCaptionPlaybackRoleUID":  @"actionSetCaptionPlaybackRoleUID:",
+        // --- Retiming video quality (Modify > Retime > Video Quality) ---
+        // "High" has no menu item in 12.3; FFAnchoredTimelineModule still implements it.
+        @"retimeTurnOnOpticalFlowHigh":    @"retimeTurnOnOpticalFlowHigh:",
+        @"retimeTurnOnOpticalFlowMedium":  @"retimeTurnOnOpticalFlowMedium:",
+        @"retimeTurnOnOpticalFlowFRC":     @"retimeTurnOnOpticalFlowFRC:",
+        @"retimeTurnOnNearestNeighbor":    @"retimeTurnOnNearestNeighbor:",
 
         // --- Trim extras ---
         @"trimEdgeAtPlayhead":         @"actionTrimEdgeAtPlayhead:",
         @"collapseToSpine":            @"actionCollapseToSpine",
-
-        // --- Variant/audition extras ---
-        @"deleteActiveVariant":        @"actionDeleteActiveVariantMakeNextActive:",
-        @"removeCutawayEffects":       @"actionRemoveCutawayEffects:",
-        @"toggleVerifyObjectAlignment": @"actionToggleVerifyObjectAlignment:",
     };
+
+    // Names kept for compatibility (docs, Lua, the command palette) whose Final Cut Pro
+    // command is gone: no 12.3 menu item sends it and nothing in the responder chain
+    // implements it. The action* ones are FFAnchoredSequence methods that take model
+    // objects rather than a sender, so they cannot be fired as a responder-chain action.
+    // Answer with a clear error instead of "No responder handled ...".
+    NSDictionary<NSString *, NSString *> *unavailableActions = @{
+        @"retimeRateConformOpticalFlowHigh": @"actionRateConformTurnOnOpticalFlowHigh: is an FFAnchoredSequence method with no menu command",
+        @"resetCinematic":              @"actionResetCinematic: is an FFAnchoredSequence method with no menu command",
+        @"addTrackerOnSource":          @"actionAddTrackerOnSource: no longer exists",
+        @"bakeAndRemoveOffsetChannels": @"actionBakeAndRemoveOffsetChannels no longer exists",
+        @"resetOffsetChannels":         @"actionResetOffsetChannels no longer exists",
+        @"setCaptionPlaybackEnabled":   @"actionSetCaptionPlaybackEnabled: is an FFAnchoredSequence method with no menu command",
+        @"setCaptionPlaybackRoleUID":   @"actionSetCaptionPlaybackRoleUID: is an FFAnchoredSequence method with no menu command",
+        @"deleteActiveVariant":         @"actionDeleteActiveVariantMakeNextActive: no longer exists",
+        @"removeCutawayEffects":        @"actionRemoveCutawayEffects: is an FFAnchoredSequence method with no menu command",
+        @"toggleVerifyObjectAlignment": @"actionToggleVerifyObjectAlignment: no longer exists",
+    };
+    NSString *unavailableReason = unavailableActions[action];
+    if (unavailableReason) {
+        return @{
+            @"error": [NSString stringWithFormat:
+                @"%@ is not available in this Final Cut Pro version (%@).",
+                action, unavailableReason],
+            @"fcpVersion": [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"",
+        };
+    }
+
+    // Channel EQ is an audio effect in FCP 12.3, not a command: there is no addChannelEQ:
+    // anywhere. Apply the effect to the selection the way the Effects browser does.
+    if ([action isEqualToString:@"addChannelEQ"]) {
+        NSDictionary *eq = SpliceKit_handleEffectsApply(@{@"name": @"Channel EQ"});
+        if (eq[@"error"]) return eq;
+        NSMutableDictionary *out = [eq mutableCopy];
+        out[@"action"] = @"addChannelEQ";
+        return out;
+    }
 
     // Undo/redo are special — they don't go through the timeline module's responder chain.
     // Instead we need to find the document's undo manager directly. The path is:

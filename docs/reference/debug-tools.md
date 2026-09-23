@@ -1118,34 +1118,24 @@ timeline_action("retimeTurnOnOpticalFlowHigh")
 timeline_action("retimeTurnOnOpticalFlowMedium")
 timeline_action("retimeTurnOnOpticalFlowFRC")
 timeline_action("retimeTurnOnNearestNeighbor")
-timeline_action("retimeRateConformOpticalFlowHigh")
 ```
 
-### Cinematic / tracking
+### Trim
 
 ```python
-timeline_action("resetCinematic")
-timeline_action("addTrackerOnSource")
-```
-
-### Audio
-
-```python
-timeline_action("bakeAndRemoveOffsetChannels")
-timeline_action("resetOffsetChannels")
-```
-
-### Other
-
-```python
-timeline_action("setCaptionPlaybackEnabled")
-timeline_action("setCaptionPlaybackRoleUID")
 timeline_action("trimEdgeAtPlayhead")
 timeline_action("collapseToSpine")
-timeline_action("deleteActiveVariant")
-timeline_action("removeCutawayEffects")
-timeline_action("toggleVerifyObjectAlignment")
 ```
+
+### Not available in Final Cut Pro 12.3
+
+These names are still accepted, but FCP 12.3 has no command for them (no menu item
+sends one and nothing in the responder chain implements it), so each answers with a
+"not available in this Final Cut Pro version" error:
+`retimeRateConformOpticalFlowHigh`, `resetCinematic`, `addTrackerOnSource`,
+`bakeAndRemoveOffsetChannels`, `resetOffsetChannels`, `setCaptionPlaybackEnabled`,
+`setCaptionPlaybackRoleUID`, `deleteActiveVariant`, `removeCutawayEffects`,
+`toggleVerifyObjectAlignment`.
 
 ## Recipes
 

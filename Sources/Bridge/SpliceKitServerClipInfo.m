@@ -1455,23 +1455,24 @@ NSDictionary *SpliceKit_handleSetRange(NSDictionary *params) {
             CMTime startTime = SpliceKit_buildCMTime(startVal, timeline);
             CMTime endTime = SpliceKit_buildCMTime(endVal, timeline);
 
-            // Seek to start, mark in
-            BOOL inOk = SpliceKit_seekAndMark(timeline, startTime, @"setRangeStart:");
-            // Seek to end, mark out
-            BOOL outOk = SpliceKit_seekAndMark(timeline, endTime, @"setRangeEnd:");
+            // Seek to start, mark in; seek to end, mark out. These are the selectors
+            // FCP 12.3's Mark > Set Range Start / Set Range End send.
+            BOOL inOk = SpliceKit_seekAndMark(timeline, startTime, @"setSelectionStart:");
+            BOOL outOk = SpliceKit_seekAndMark(timeline, endTime, @"setSelectionEnd:");
 
             if (!inOk || !outOk) {
                 NSMutableString *detail = [NSMutableString stringWithFormat:
                     @"Failed to set timeline range %.3fs–%.3fs (mark in: %@, mark out: %@).",
                     startVal, endVal, inOk ? @"ok" : @"failed", outOk ? @"ok" : @"failed"];
                 if (!inOk && !outOk &&
-                    ![timeline respondsToSelector:NSSelectorFromString(@"setRangeStart:")] &&
-                    ![timeline respondsToSelector:NSSelectorFromString(@"setRangeEnd:")]) {
+                    ![timeline respondsToSelector:NSSelectorFromString(@"setSelectionStart:")] &&
+                    ![timeline respondsToSelector:NSSelectorFromString(@"setSelectionEnd:")]) {
                     [detail appendString:
-                        @" FFAnchoredTimelineModule does not implement setRangeStart:/setRangeEnd:."];
+                        @" FFAnchoredTimelineModule does not implement setSelectionStart:/setSelectionEnd: "
+                        @"(Mark > Set Range Start / Set Range End)."];
                 } else if (!inOk || !outOk) {
                     [detail appendString:
-                        @" Range marks use setRangeStart:/setRangeEnd: on the timeline module; "
+                        @" Range marks use setSelectionStart:/setSelectionEnd: on the timeline module; "
                         @"if playhead moved but marks did not stick, try bringing Final Cut Pro frontmost."];
                 }
                 result = @{
@@ -1898,9 +1899,9 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
                     sBatchExportClipStart = startCMTime;
                     sBatchExportClipEnd = endCMTime;
 
-                    // Set in/out range using simulated I/O key presses
-                    SpliceKit_seekAndMark(timeline, startCMTime, @"setRangeStart:");
-                    SpliceKit_seekAndMark(timeline, endCMTime, @"setRangeEnd:");
+                    // Set the range the way Mark > Set Range Start / Set Range End do
+                    SpliceKit_seekAndMark(timeline, startCMTime, @"setSelectionStart:");
+                    SpliceKit_seekAndMark(timeline, endCMTime, @"setSelectionEnd:");
 
                     // Trigger the normal share flow - our swizzle intercepts the dialog
                     if (shareHelper && [shareHelper respondsToSelector:shareSel]) {
@@ -1939,12 +1940,17 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
                 ((void (*)(id, SEL, id))objc_msgSend)(dest, setActionSel, origAction);
             }
 
-            // Clear range
-            id app = ((id (*)(id, SEL))objc_msgSend)(
-                objc_getClass("NSApplication"), @selector(sharedApplication));
-            ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
-                app, @selector(sendAction:to:from:),
-                NSSelectorFromString(@"clearRange:"), nil, nil);
+            // Clear range (Mark > Clear Selected Ranges). Straight to the timeline module:
+            // the responder chain does not reach it while FCP is not frontmost.
+            SEL clearSel = NSSelectorFromString(@"clearSelection:");
+            if ([timeline respondsToSelector:clearSel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(timeline, clearSel, nil);
+            } else {
+                id app = ((id (*)(id, SEL))objc_msgSend)(
+                    objc_getClass("NSApplication"), @selector(sharedApplication));
+                ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+                    app, @selector(sendAction:to:from:), clearSel, nil, nil);
+            }
 
             result = @{
                 @"status": @"ok",

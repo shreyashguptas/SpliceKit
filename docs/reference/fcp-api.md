@@ -44,7 +44,7 @@ The main editing interface. Most timeline_action() calls route here.
 |--------|------|-------------|
 | `addMarker:` | sender | Add standard marker at playhead |
 | `addAndEditMarker:` | sender | Add marker and open editor |
-| `addTodoMarker:` | sender | Add todo/incomplete marker |
+| `addToDoMarker:` | sender | Add todo/incomplete marker |
 | `addChapterMarker:` | sender | Add chapter marker |
 | `deleteMarker:` | sender | Delete marker at playhead |
 | `nextMarker:` | sender | Navigate to next marker |
@@ -113,8 +113,8 @@ The main editing interface. Most timeline_action() calls route here.
 | `retimeFastx20:` | sender | 20x fast |
 | `retimeSlowHalf:` | sender | 50% slow |
 | `retimeSlowQuarter:` | sender | 25% slow |
-| `retimeSlowTenth:` | sender | 10% slow |
-| `retimeReverse:` | sender | Reverse clip |
+| `retimeSlowTenPercent:` | sender | 10% slow |
+| `retimeReverseClip:` | sender | Reverse clip |
 | `retimeHoldFromSelection:` | sender | Hold frame from selection |
 | `retimeBladeSpeed:` | sender | Blade speed segment |
 | `freezeFrame:` | sender | Create freeze frame |
@@ -135,8 +135,8 @@ The main editing interface. Most timeline_action() calls route here.
 | `copy:` | sender | Copy to clipboard |
 | `paste:` | sender | Paste from clipboard |
 | `trimToPlayhead:` | sender | Trim clip edge to playhead |
-| `soloSelectedClips:` | sender | Solo selected clips |
-| `disableSelectedClips:` | sender | Disable selected clips |
+| `solo:` | sender | Solo selected clips |
+| `enableOrDisableEdit:` | sender | Disable (or enable) selected clips |
 | `createCompoundClip:` | sender | Create compound from selection |
 | `autoReframe:` | sender | Auto-reframe selected clip |
 
