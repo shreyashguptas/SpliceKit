@@ -155,7 +155,6 @@ is left.
 | --- | --- | --- |
 | JSON-RPC bridge inside Final Cut Pro | `Sources/Bridge/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
 | MCP server, `scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/splicekit_mcp/config.py` and the named files, `plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
-| Command palette helper scripts | the Swift helper that the Apple Intelligence engines spawn, and the Gemma engine's port probe | 127.0.0.1:9876 and 127.0.0.1:8080 |
 | Test suites | `tests/` | a fake bridge on 127.0.0.1 |
 
 ### Only when you start it inside Final Cut Pro
@@ -164,8 +163,7 @@ is left.
 | --- | --- | --- |
 | Transcript / caption panels, Parakeet or Whisper engine | model download on first use (table above); recognition is on-device | huggingface.co |
 | Transcript panel, Apple Speech engine | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` set on every request (`Sources/Panels/Transcript/SpliceKitTranscriptPanel.m`), so recognition stays on this Mac where macOS supports it | Apple framework, on-device |
-| Command palette, Apple Intelligence engines (the default) | Apple's FoundationModels framework (Apple's on-device model); SpliceKit adds no network call of its own beyond the loopback bridge | Apple frameworks |
-| Command palette, "Gemma 4" engine | talks to an `mlx_lm.server` on this Mac at http://localhost:8080; if `mlx-lm` is missing it runs `pip install mlx-lm`, and the server downloads the model (`unsloth/gemma-4-E4B-it-UD-MLX-4bit` unless `SpliceKitGemmaModel` says otherwise) on first start; selecting the engine and sending a query is the consent, there is no second prompt | PyPI, huggingface.co, then loopback |
+| Command palette, voice dictation | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` (`Sources/Panels/CommandPalette/SpliceKitCommandPalette+Dictation.m`); the text only fills the search field | Apple framework, on-device |
 | URL import | downloads the URL you pasted: direct media links with `NSURLSession`, YouTube/Vimeo through `yt-dlp` and `ffmpeg` found on PATH (or `SPLICEKIT_YTDLP_PATH` / `SPLICEKIT_FFMPEG_PATH`); `make url-import-tools` only symlinks binaries already on PATH and prints a `brew install` hint otherwise; it downloads nothing | the site you gave it |
 
 ### Only during installation (`make install`)

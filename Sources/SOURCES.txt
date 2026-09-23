@@ -75,9 +75,6 @@ Panels/CommandPalette/SpliceKitCommandPaletteViews.m
 Panels/CommandPalette/SpliceKitCommandPalette+Registry.m
 Panels/CommandPalette/SpliceKitCommandPalette+Dictation.m
 Panels/CommandPalette/SpliceKitCommandPalette+Panels.m
-Panels/CommandPalette/SpliceKitCommandPalette+AppleAI.m
-Panels/CommandPalette/SpliceKitCommandPalette+AIPostProcess.m
-Panels/CommandPalette/SpliceKitCommandPalette+Gemma.m
 Panels/SpliceKitDebugUI.m
 Timeline/SpliceKitStructureBlocks.m
 Timeline/SpliceKitSectionsBar.m

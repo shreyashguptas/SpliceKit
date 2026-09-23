@@ -579,14 +579,7 @@ CASES.update({
                                            cleanup=[("debug_stop_framerate_monitor", {})]),
     "debug_stop_framerate_monitor": write(),
 
-    # ---------------------------------------------------------------- AI
-    "ai_command": Case(args={"query": "how many clips are on the timeline?"},
-                       kind="write", timeout=400),
-    # Only an answer naming what is missing and how to get it counts as BLOCKED.
-    "ai_command_gemma": dependency("Local model unavailable", "Python 3 not found",
-                                   "Check the model ID", "Not enough memory",
-                                   timeout=400,
-                                   query="how many clips are on the timeline?"),
+    # ---------------------------------------------------------------- palette commands
     # The palette "blade" command cuts the timeline — this is a write, not a read.
     "execute_command": write(action="blade", type="timeline",
                              undo=("Blade", "Blade Clips", "Blade at Times")),

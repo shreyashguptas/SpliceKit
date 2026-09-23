@@ -52,7 +52,7 @@
     __weak typeof(self) weakSelf = self;
     [self requestDictationPermissions:^(BOOL granted, NSString *message) {
         if (!granted) {
-            weakSelf.aiError = message;
+            weakSelf.statusError = message;
             [weakSelf updateStatusLabel];
             return;
         }
@@ -61,7 +61,7 @@
 
         weakSelf.dictationRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale currentLocale]];
         if (!weakSelf.dictationRecognizer || !weakSelf.dictationRecognizer.isAvailable) {
-            weakSelf.aiError = @"Apple speech dictation is unavailable right now.";
+            weakSelf.statusError = @"Apple speech dictation is unavailable right now.";
             [weakSelf updateStatusLabel];
             return;
         }
@@ -79,7 +79,7 @@
         weakSelf.dictationAudioEngine = [[AVAudioEngine alloc] init];
         AVAudioInputNode *inputNode = weakSelf.dictationAudioEngine.inputNode;
         if (!inputNode) {
-            weakSelf.aiError = @"No audio input device is available for dictation.";
+            weakSelf.statusError = @"No audio input device is available for dictation.";
             [weakSelf updateStatusLabel];
             return;
         }
@@ -97,13 +97,13 @@
         [weakSelf.dictationAudioEngine prepare];
         if (![weakSelf.dictationAudioEngine startAndReturnError:&startError]) {
             [inputNode removeTapOnBus:0];
-            weakSelf.aiError = startError.localizedDescription ?: @"Could not start audio engine for dictation.";
+            weakSelf.statusError = startError.localizedDescription ?: @"Could not start audio engine for dictation.";
             [weakSelf updateStatusLabel];
             return;
         }
 
         weakSelf.dictationActive = YES;
-        weakSelf.aiError = nil;
+        weakSelf.statusError = nil;
         [weakSelf updateStatusLabel];
         [weakSelf updateHeroStageAnimated:YES];
         [weakSelf.panel makeFirstResponder:weakSelf.searchField];
@@ -116,7 +116,7 @@
                                             final:result.isFinal];
                 }
                 if (error) {
-                    weakSelf.aiError = error.localizedDescription ?: @"Voice dictation stopped unexpectedly.";
+                    weakSelf.statusError = error.localizedDescription ?: @"Voice dictation stopped unexpectedly.";
                 }
                 if (error || result.isFinal) {
                     [weakSelf stopDictation];
@@ -140,7 +140,7 @@
     [self.panel makeFirstResponder:self.searchField];
 
     if (isFinal && combined.length > 0) {
-        self.aiError = nil;
+        self.statusError = nil;
     }
 }
 

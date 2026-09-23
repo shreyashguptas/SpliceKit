@@ -298,9 +298,6 @@ NSDictionary *SpliceKit_handleDualTimelineOpenSelectedInSecondary(NSDictionary *
 NSDictionary *SpliceKit_handleDualTimelineFocus(NSDictionary *params);
 NSDictionary *SpliceKit_handleDualTimelineClose(NSDictionary *params);
 NSDictionary *SpliceKit_handleDualTimelineTogglePanel(NSDictionary *params);
-NSDictionary *SpliceKit_handleCommandAI(NSDictionary *params);
-NSDictionary *SpliceKit_handleCommandAIGemma(NSDictionary *params);
-NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params);
 
 #pragma mark - Defined in SpliceKitServerBrowser.m
 

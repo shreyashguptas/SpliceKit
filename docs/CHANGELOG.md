@@ -408,6 +408,20 @@ that this fork has removed.
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
 
 ### Removed
+- **SpliceKit runs no language model of its own any more.** It only exposes tools over MCP,
+  and the MCP client does the thinking. The Command Palette's natural-language engines are
+  gone: Apple Intelligence and Apple Intelligence+ (the FoundationModels Swift scripts the
+  palette wrote to a temp file and ran with `swift`), and Gemma 4 (the `mlx_lm.server` it
+  started on port 8080, the `pip install mlx-lm` it ran when the package was missing, and
+  the model download that followed). With them went the AI engine popup under the palette,
+  Tab-to-ask-AI and the automatic AI query after a pause with no matches, the RPCs
+  `command.ai`, `command.aiGemma` and `command.aiAppleAgentic`, the MCP tools `ai_command`
+  and `ai_command_gemma`, the `aiEngine` and `gemmaModel` bridge options (`options.get` /
+  `options.set`), and the `SpliceKitAIEngine` / `SpliceKitGemmaModel` user defaults, which
+  are no longer read. The palette's fuzzy search, command execution, favorites and voice
+  dictation (it types what you say into the search field) are unchanged, as are
+  `show_command_palette`, `hide_command_palette`, `search_commands` and `execute_command`.
+  Transcription engines (Parakeet, Whisper, Apple Speech, FCP Native) are not affected.
 - **Blackmagic RAW (BRAW) support is gone.** The prototype format reader, its probe tool
   and the `braw_probe` MCP tool have all been removed; nothing in `Sources/`, `mcp/`,
   `tests/` or `docs/` refers to BRAW any more. Entries further down this file describe it
@@ -431,9 +445,8 @@ that this fork has removed.
   NSException/signal logger writing under `~/Library/Logs/SpliceKit`. What
   still talks to the network is listed in `docs/THIRD_PARTY_DEPENDENCIES.md`:
   the loopback bridge and
-  downloads the user starts (URL import, transcriber and Gemma models, the
-  `mcp` and `mlx-lm` packages from PyPI, install-time Homebrew/Python and
-  `insert_dylib`).
+  downloads the user starts (URL import, transcriber models, the `mcp`
+  package from PyPI, install-time Homebrew/Python and `insert_dylib`).
 
 ## [3.3.9] — 2026-08-29
 

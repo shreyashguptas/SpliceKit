@@ -837,20 +837,17 @@ Guide: [dialog-automation.md](../guides/dialog-automation.md).
 show_command_palette()                         # open the palette (or Cmd+Shift+P)
 search_commands("blade")                       # find commands by name/keyword
 execute_command("blade", type="timeline")      # run a command directly
-ai_command("slow this clip to half speed")     # natural language via Apple Intelligence
 hide_command_palette()                         # close it
 ```
 
 The command palette opens as a floating window inside FCP:
 - Fuzzy search across all available actions (editing, playback, color, speed, markers, etc.)
 - Arrow keys to navigate, Return to execute, Escape to close
-- Type natural language sentences and press Tab to ask Apple Intelligence
-- Falls back to keyword matching when Apple Intelligence is unavailable
+- The microphone button dictates into the search field
 - Also accessible via toolbar button or Enhancements menu
 
-- `ai_command_gemma(query, model=...)` — the same as `ai_command(query, engine="gemma")`: Gemma 4
-  through a local `mlx_lm.server` runs a multi-turn tool-calling loop that can reach every bridge
-  method (and can run destructive edits). Guide: [command-palette.md](../guides/command-palette.md).
+SpliceKit runs no language model of its own: the MCP client decides which tools to call.
+Guide: [command-palette.md](../guides/command-palette.md).
 
 ### LiveCam
 

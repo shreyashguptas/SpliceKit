@@ -4,8 +4,7 @@
 //
 //  Fuzzy-searches across 100+ registered commands (editing, playback, color,
 //  speed, markers, effects, FlexMusic, montage, etc). Type a command name to
-//  filter, or type a full sentence and press Tab to ask Apple Intelligence
-//  to figure out which commands to run.
+//  filter, then press Return to run the selected command.
 //
 //  The palette floats above FCP as a vibrancy-backed panel with a search field
 //  and a table view. It supports favorites (right-click to star), keyboard
@@ -22,9 +21,6 @@
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <sys/socket.h>
-#import <netinet/in.h>
-#import <arpa/inet.h>
 #import "SpliceKitCommandPalette+Private.h"
 
 #pragma mark - SpliceKitCommand
@@ -89,7 +85,6 @@ CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 #pragma mark - SpliceKitCommandPalette
 
 static NSString * const kCommandRowID = @"SpliceKitCommandRow";
-static NSString * const kAIRowID = @"FCPAIRow";
 
 NSString * const kSpliceKitFavoritesKey = @"SpliceKitCommandPaletteFavorites";
 static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
@@ -109,16 +104,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         [self registerCommands];
         _filteredCommands = _allCommands;
         [self loadFavorites];
-
-        // Gemma 4 defaults
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        if ([defaults objectForKey:@"SpliceKitAIEngine"]) {
-            _aiEngine = [defaults integerForKey:@"SpliceKitAIEngine"];
-        } else {
-            _aiEngine = SpliceKitAIEngineAppleAgentic; // default to Apple Intelligence+
-        }
-        _gemmaModel = [defaults stringForKey:@"SpliceKitGemmaModel"] ?: @"unsloth/gemma-4-E4B-it-UD-MLX-4bit";
-        _gemmaMaxIterations = 100;
     }
     return self;
 }
@@ -259,7 +244,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     self.orbView = orbView;
 
     SpliceKitCommandSearchField *searchField = [[SpliceKitCommandSearchField alloc] initWithFrame:NSZeroRect];
-    searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Ask SpliceKit or type a command"
+    searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Type a command"
                                                                               attributes:@{
         NSForegroundColorAttributeName: FCPPaletteColor(0.92, 0.95, 1.0, 0.42),
         NSFontAttributeName: [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold]
@@ -379,19 +364,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     [bg addSubview:statusLabel];
     self.statusLabel = statusLabel;
 
-    NSPopUpButton *aiPopup = [[NSPopUpButton alloc] init];
-    aiPopup.translatesAutoresizingMaskIntoConstraints = NO;
-    [aiPopup addItemsWithTitles:@[@"Apple Intelligence", @"Gemma 4", @"Apple Intelligence+"]];
-    aiPopup.target = self;
-    aiPopup.action = @selector(aiEngineChanged:);
-    aiPopup.font = [NSFont systemFontOfSize:10];
-    aiPopup.controlSize = NSControlSizeMini;
-    aiPopup.bordered = NO;
-    [aiPopup setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [aiPopup selectItemAtIndex:(NSInteger)self.aiEngine];
-    [bg addSubview:aiPopup];
-    self.aiEnginePopup = aiPopup;
-
     [NSLayoutConstraint activateConstraints:@[
         [searchChrome.topAnchor constraintEqualToAnchor:bg.topAnchor constant:18.0],
         [searchChrome.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:18.0],
@@ -445,12 +417,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         [scroll.bottomAnchor constraintEqualToAnchor:statusLabel.topAnchor constant:-10.0],
 
         [statusLabel.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:22.0],
-        [statusLabel.trailingAnchor constraintEqualToAnchor:aiPopup.leadingAnchor constant:-8.0],
+        [statusLabel.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-18.0],
         [statusLabel.bottomAnchor constraintEqualToAnchor:bg.bottomAnchor constant:-14.0],
         [statusLabel.heightAnchor constraintEqualToConstant:18.0],
-
-        [aiPopup.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-18.0],
-        [aiPopup.centerYAnchor constraintEqualToAnchor:statusLabel.centerYAnchor],
     ]];
 
     self.panel = panel;
@@ -460,33 +429,14 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 
 - (void)updateStatusLabel {
     NSUInteger count = self.filteredCommands.count;
-    NSString *text = [NSString stringWithFormat:@"%lu command%@ ready  |  Return executes  |  Tab asks AI",
+    NSString *text = [NSString stringWithFormat:@"%lu command%@ ready  |  Return executes",
                       (unsigned long)count, count == 1 ? @"" : @"s"];
     if (self.dictationActive) {
-        text = @"Listening... Speak naturally to search or ask SpliceKit.";
-    } else if (self.aiLoading) {
-        if ((self.aiEngine == SpliceKitAIEngineGemma4 || self.aiEngine == SpliceKitAIEngineAppleAgentic)
-            && self.gemmaCurrentTask.length > 0) {
-            text = self.gemmaCurrentTask;
-        } else if (self.aiEngine == SpliceKitAIEngineGemma4) {
-            text = @"Asking Gemma 4...";
-        } else if (self.aiEngine == SpliceKitAIEngineAppleAgentic) {
-            text = @"Asking Apple Intelligence+...";
-        } else {
-            text = @"Asking Apple Intelligence...";
-        }
-    } else if (self.aiError) {
-        text = [NSString stringWithFormat:@"AI: %@", self.aiError];
-    } else if (self.aiResults.count > 0) {
-        // Check if this is a Gemma summary result
-        if (self.aiResults.count == 1 && [self.aiResults[0][@"type"] isEqualToString:@"gemma_summary"]) {
-            text = self.aiResults[0][@"summary"] ?: @"Done.";
-        } else {
-            text = [NSString stringWithFormat:@"AI suggested %lu action%@ | Return to execute",
-                    (unsigned long)self.aiResults.count, self.aiResults.count == 1 ? @"" : @"s"];
-        }
+        text = @"Listening... Speak a command name to search.";
+    } else if (self.statusError) {
+        text = self.statusError;
     } else if (self.searchField.stringValue.length == 0 && !self.inBrowseMode) {
-        text = @"Return executes  |  Tab asks AI  |  Mic starts dictation";
+        text = @"Return executes  |  Mic starts dictation";
     }
     self.statusLabel.stringValue = text;
     [self updatePaletteChromeAnimated:YES];
@@ -497,14 +447,14 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 
     NSColor *border = self.dictationActive
         ? FCPPaletteColor(0.58, 0.80, 1.0, 0.34)
-        : (self.aiLoading ? FCPPaletteColor(0.69, 0.73, 1.0, 0.24) : FCPPaletteColor(1.0, 1.0, 1.0, 0.18));
+        : FCPPaletteColor(1.0, 1.0, 1.0, 0.18);
     NSColor *background = self.dictationActive
         ? FCPPaletteColor(0.20, 0.25, 0.40, 0.12)
         : FCPPaletteColor(0.10, 0.12, 0.22, 0.065);
 
     self.searchChromeView.layer.borderColor = border.CGColor;
     self.searchChromeView.layer.backgroundColor = background.CGColor;
-    self.searchChromeView.layer.shadowOpacity = self.dictationActive ? 0.20 : (self.aiLoading ? 0.16 : 0.12);
+    self.searchChromeView.layer.shadowOpacity = self.dictationActive ? 0.20 : 0.12;
 
     NSArray *bodyColors = self.dictationActive
         ? @[
@@ -512,20 +462,14 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             (__bridge id)FCPPaletteColor(0.16, 0.22, 0.40, 0.075).CGColor,
             (__bridge id)FCPPaletteColor(0.10, 0.13, 0.24, 0.04).CGColor
         ]
-        : (self.aiLoading
-            ? @[
-                (__bridge id)FCPPaletteColor(0.34, 0.34, 0.60, 0.12).CGColor,
-                (__bridge id)FCPPaletteColor(0.18, 0.18, 0.34, 0.065).CGColor,
-                (__bridge id)FCPPaletteColor(0.10, 0.10, 0.18, 0.032).CGColor
-            ]
-            : @[
-                (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.10).CGColor,
-                (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.055).CGColor,
-                (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.028).CGColor
-            ]);
+        : @[
+            (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.10).CGColor,
+            (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.055).CGColor,
+            (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.028).CGColor
+        ];
     self.searchBodyLayer.colors = bodyColors;
     self.searchEdgeLayer.borderColor = border.CGColor;
-    self.searchGlossLayer.opacity = self.dictationActive ? 0.78 : (self.aiLoading ? 0.68 : 0.56);
+    self.searchGlossLayer.opacity = self.dictationActive ? 0.78 : 0.56;
     self.shellTintLayer.opacity = self.dictationActive ? 0.45 : 0.28;
 
     NSString *symbolName = self.dictationActive ? @"stop.fill" : @"mic.fill";
@@ -552,16 +496,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     } else if (!self.dictationActive) {
         [self.dictationButton.layer removeAnimationForKey:@"pulse"];
     }
-}
-
-- (NSArray<SpliceKitCommand *> *)topDisplayCommandsWithLimit:(NSUInteger)limit {
-    NSMutableArray<SpliceKitCommand *> *results = [NSMutableArray array];
-    for (SpliceKitCommand *cmd in self.filteredCommands) {
-        if (cmd.isSeparatorRow) continue;
-        [results addObject:cmd];
-        if (results.count >= limit) break;
-    }
-    return results;
 }
 
 - (NSArray<SpliceKitCommand *> *)continuerCommandsForCommand:(SpliceKitCommand *)command limit:(NSUInteger)limit {
@@ -664,35 +598,15 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     });
 }
 
-- (NSString *)aiEngineDisplayName {
-    switch (self.aiEngine) {
-        case SpliceKitAIEngineGemma4: return @"Gemma 4";
-        case SpliceKitAIEngineAppleAgentic: return @"Apple Intelligence+";
-        case SpliceKitAIEngineAppleIntelligence:
-        default: return @"Apple Intelligence";
-    }
-}
-
 - (void)updateHeroStageAnimated:(BOOL)animated {
     if (!self.heroStageView || self.commandCommitAnimating) return;
 
     NSString *query = [self.searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    SpliceKitPalettePresentationState targetState = SpliceKitPalettePresentationStateHidden;
-    NSArray<SpliceKitCommand *> *heroSuggestions = @[];
-    NSArray<SpliceKitCommand *> *heroContinuer = @[];
+    // The latency pill shows what dictation hears; otherwise the hero stage is collapsed.
+    SpliceKitPalettePresentationState targetState = self.dictationActive
+        ? SpliceKitPalettePresentationStateLatencyPill
+        : SpliceKitPalettePresentationStateHidden;
     NSString *latencyText = @"";
-    NSString *resultTitle = @"";
-    NSString *resultSubtitle = @"";
-    NSString *resultBadge = @"";
-    NSString *resultFootnote = @"";
-    NSString *resultSymbol = @"sparkles";
-    NSColor *resultAccent = FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
-
-    if (self.aiLoading || self.dictationActive) {
-        targetState = SpliceKitPalettePresentationStateLatencyPill;
-    } else if (self.aiResults.count > 0) {
-        targetState = SpliceKitPalettePresentationStateResultPlatter;
-    }
 
     self.presentationState = targetState;
 
@@ -709,7 +623,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         }
         case SpliceKitPalettePresentationStateLatencyPill: {
             heroStageHeight = 72.0;
-            latencyText = query.length > 0 ? query : (self.gemmaCurrentTask ?: @"Working...");
+            latencyText = query.length > 0 ? query : @"Listening...";
             [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
             [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.95];
             [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:8.0 scale:0.98];
@@ -717,44 +631,12 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             scrollAlpha = 0.74;
             break;
         }
-        case SpliceKitPalettePresentationStateResultPlatter: {
-            heroStageHeight = 138.0;
-            NSString *title = @"AI Result";
-            NSString *subtitle = @"Done.";
-            NSString *badge = [self aiEngineDisplayName];
-            if (self.aiResults.count == 1 && [self.aiResults[0][@"type"] isEqualToString:@"gemma_summary"]) {
-                subtitle = self.aiResults[0][@"summary"] ?: @"Done.";
-            } else if (self.aiResults.count > 0) {
-                title = [NSString stringWithFormat:@"%lu action%@ ready",
-                         (unsigned long)self.aiResults.count, self.aiResults.count == 1 ? @"" : @"s"];
-                subtitle = @"Press Return to execute the generated action chain.";
-            }
-            heroContinuer = [self topDisplayCommandsWithLimit:3];
-            resultTitle = title;
-            resultSubtitle = subtitle;
-            resultBadge = badge;
-            resultFootnote = @"Return executes · Tab refines";
-            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
-            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.92];
-            [self animatePresentationView:self.heroResultPlatterView visible:YES animated:animated delay:0.02 yOffset:10.0 scale:0.95];
-            [self animatePresentationView:self.heroContinuerStackView visible:YES animated:animated delay:0.08 yOffset:8.0 scale:0.98];
-            scrollAlpha = 0.76;
-            break;
-        }
         default:
             break;
     }
 
-    NSString *signature = [NSString stringWithFormat:@"%ld|%@|%@|%@|%@|%@|%@|%@|%.3f",
-                           (long)targetState,
-                           query,
-                           latencyText,
-                           resultTitle,
-                           resultSubtitle,
-                           FCPCommandListSignature(heroSuggestions),
-                           FCPCommandListSignature(heroContinuer),
-                           resultBadge,
-                           scrollAlpha];
+    NSString *signature = [NSString stringWithFormat:@"%ld|%@|%@|%.3f",
+                           (long)targetState, query, latencyText, scrollAlpha];
     if ([self.heroStageSignature isEqualToString:signature]) {
         if (!animated) {
             self.scrollView.alphaValue = scrollAlpha;
@@ -763,29 +645,10 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     }
     self.heroStageSignature = signature;
 
-    if (heroSuggestions.count > 0) {
-        [self populateBubbleStack:self.heroSuggestionStackView
-                     withCommands:heroSuggestions
-                         animated:animated
-                         emphasis:NO];
-    } else {
-        [self clearBubbleStack:self.heroSuggestionStackView];
-    }
-    if (heroContinuer.count > 0) {
-        [self populateBubbleStack:self.heroContinuerStackView withCommands:heroContinuer animated:animated emphasis:YES];
-    } else {
-        [self clearBubbleStack:self.heroContinuerStackView];
-    }
+    [self clearBubbleStack:self.heroSuggestionStackView];
+    [self clearBubbleStack:self.heroContinuerStackView];
     if (latencyText.length > 0) {
         [self.heroLatencyPillView configureWithText:latencyText];
-    }
-    if (resultTitle.length > 0 || resultSubtitle.length > 0) {
-        [self.heroResultPlatterView configureWithTitle:resultTitle
-                                              subtitle:resultSubtitle
-                                                 badge:resultBadge
-                                              footnote:resultFootnote
-                                            symbolName:resultSymbol
-                                                accent:resultAccent];
     }
 
     if (animated) {
@@ -893,7 +756,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 - (void)showPalette {
     [self buildPanelIfNeeded];
     self.searchField.stringValue = @"";
-    self.searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Ask SpliceKit or type a command"
+    self.searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Type a command"
                                                                                   attributes:@{
         NSForegroundColorAttributeName: FCPPaletteColor(0.92, 0.95, 1.0, 0.42),
         NSFontAttributeName: [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold]
@@ -901,12 +764,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     self.inBrowseMode = NO;
     self.allCommands = self.masterCommands;
     self.filteredCommands = self.allCommands;
-    self.aiLoading = NO;
-    self.aiQuery = nil;
-    self.aiResults = nil;
-    self.aiError = nil;
-    self.gemmaCancelled = NO;
-    self.gemmaCurrentTask = nil;
+    self.statusError = nil;
     self.commandCommitAnimating = NO;
     self.heroStageSignature = nil;
     self.presentationGeneration += 1;
@@ -944,13 +802,8 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             handler:^NSEvent *(NSEvent *event) {
                 if (!weakSelf.panel.isVisible) return event;
 
-                // Escape -> cancel Gemma if running, go back to main if in browse mode, else close
+                // Escape -> stop dictation, go back to main if in browse mode, else close
                 if (event.keyCode == 53) {
-                    if (weakSelf.aiLoading && (weakSelf.aiEngine == SpliceKitAIEngineGemma4 ||
-                                                weakSelf.aiEngine == SpliceKitAIEngineAppleAgentic)) {
-                        weakSelf.gemmaCancelled = YES;
-                        return nil;
-                    }
                     if (weakSelf.dictationActive) {
                         [weakSelf stopDictation];
                     } else if (weakSelf.inBrowseMode) {
@@ -984,14 +837,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                         SpliceKitCommand *cmd = [weakSelf commandForDisplayRow:newRow];
                         if (cmd && cmd.isSeparatorRow && newRow < max) newRow++;
                         FCPSelectSingleTableRow(weakSelf.tableView, newRow);
-                    }
-                    return nil;
-                }
-                // Tab -> trigger AI on current query
-                if (event.keyCode == 48) {
-                    NSString *query = weakSelf.searchField.stringValue;
-                    if (query.length > 0) {
-                        [weakSelf triggerAI:query];
                     }
                     return nil;
                 }
@@ -1097,7 +942,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 // weighted 1.0, keyword matches 0.8, detail matches 0.5.
 //
 
-// Strip common stop words so natural-language queries like "add the default
+// Strip common stop words so wordy queries like "add the default
 // transition to all clips" match "Add Default Transition to All Clips" even
 // though 'h' (from "the") doesn't appear in the target.
 static NSString *FCPStripStopWords(NSString *query) {
@@ -1172,16 +1017,6 @@ static NSString *FCPStripStopWords(NSString *query) {
     } else {
         self.filteredCommands = [self searchCommands:query];
     }
-    // Only clear AI state if the query actually changed from what AI answered
-    BOOL queryChanged = ![query isEqualToString:self.aiCompletedQuery ?: @""];
-    if (queryChanged) {
-        self.aiResults = nil;
-        self.aiError = nil;
-        self.aiCompletedQuery = nil;
-        [self.aiDebounceTimer invalidate];
-        self.aiDebounceTimer = nil;
-    }
-
     [self.tableView reloadData];
     [self updateStatusLabel];
     [self updateHeroStageAnimated:YES];
@@ -1192,89 +1027,19 @@ static NSString *FCPStripStopWords(NSString *query) {
         [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
                     byExtendingSelection:NO];
     }
-
-    // Debounced AI auto-trigger: only after 0.8s pause, no matches, and not already answered
-    [self.aiDebounceTimer invalidate];
-        if (query.length > 10 && [query containsString:@" "] &&
-        self.filteredCommands.count == 0 && !self.aiLoading &&
-        !self.dictationActive &&
-        ![query isEqualToString:self.aiCompletedQuery]) {
-        self.aiDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.8
-            target:self selector:@selector(aiDebounceTimerFired:)
-            userInfo:query repeats:NO];
-    }
 }
 
 - (void)controlTextDidChange:(NSNotification *)notification {
     [self refreshSearchResultsForCurrentQuery];
 }
 
-- (void)aiDebounceTimerFired:(NSTimer *)timer {
-    NSString *query = timer.userInfo;
-    if ([query isEqualToString:self.searchField.stringValue] && !self.aiLoading) {
-        [self triggerAI:query];
-    }
-}
-
 #pragma mark - NSTableView DataSource / Delegate
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    NSInteger count = (NSInteger)self.filteredCommands.count;
-    if (self.aiLoading || self.aiResults.count > 0) count += 1; // AI row
-    return count;
+    return (NSInteger)self.filteredCommands.count;
 }
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
-    // AI loading/result row at the top
-    if (self.aiLoading && row == 0) {
-        FCPAIResultRowView *cell = [tableView makeViewWithIdentifier:kAIRowID owner:nil];
-        if (!cell) {
-            cell = [[FCPAIResultRowView alloc] initWithFrame:NSMakeRect(0, 0, 500, 40)];
-            cell.identifier = kAIRowID;
-        }
-        if ((self.aiEngine == SpliceKitAIEngineGemma4 || self.aiEngine == SpliceKitAIEngineAppleAgentic)
-            && self.gemmaCurrentTask.length > 0) {
-            cell.label.stringValue = self.gemmaCurrentTask;
-        } else if (self.aiEngine == SpliceKitAIEngineGemma4) {
-            cell.label.stringValue = @"Asking Gemma 4...";
-        } else if (self.aiEngine == SpliceKitAIEngineAppleAgentic) {
-            cell.label.stringValue = @"Asking Apple Intelligence+...";
-        } else {
-            cell.label.stringValue = @"Asking Apple Intelligence...";
-        }
-        [cell.spinner startAnimation:nil];
-        cell.spinner.hidden = NO;
-        return cell;
-    }
-
-    if (self.aiResults.count > 0 && row == 0) {
-        FCPAIResultRowView *cell = [tableView makeViewWithIdentifier:kAIRowID owner:nil];
-        if (!cell) {
-            cell = [[FCPAIResultRowView alloc] initWithFrame:NSMakeRect(0, 0, 500, 40)];
-            cell.identifier = kAIRowID;
-        }
-        cell.spinner.hidden = YES;
-        NSString *desc;
-        // Gemma summary results use a single entry with type=gemma_summary
-        if (self.aiResults.count == 1 && [self.aiResults[0][@"type"] isEqualToString:@"gemma_summary"]) {
-            desc = self.aiResults[0][@"summary"] ?: @"Done.";
-        } else {
-            NSMutableString *mDesc = [NSMutableString stringWithString:@"AI: "];
-            for (NSDictionary *a in self.aiResults) {
-                NSString *label = a[@"action"] ?: a[@"name"] ?: nil;
-                if (!label && a[@"seconds"]) {
-                    label = [NSString stringWithFormat:@"%@s", a[@"seconds"]];
-                }
-                [mDesc appendFormat:@"%@ %@", a[@"type"], label ?: @"?"];
-                if (a != self.aiResults.lastObject) [mDesc appendString:@" -> "];
-            }
-            desc = mDesc;
-        }
-        cell.label.stringValue = desc;
-        cell.label.textColor = [NSColor controlAccentColor];
-        return cell;
-    }
-
     SpliceKitCommand *cmd = [self commandForDisplayRow:row];
     if (!cmd) return nil;
 
@@ -1311,21 +1076,6 @@ static NSString *FCPStripStopWords(NSString *query) {
     SpliceKitCommand *cmd = [self commandForDisplayRow:row];
     if (cmd && cmd.isSeparatorRow) return 20;
 
-    // Gemma summary result row — compute height for wrapped text
-    if (row == 0 && !self.aiLoading && self.aiResults.count == 1 &&
-        [self.aiResults[0][@"type"] isEqualToString:@"gemma_summary"]) {
-        NSString *text = self.aiResults[0][@"summary"] ?: @"Done.";
-        CGFloat availableWidth = tableView.bounds.size.width - 50; // 12+16+8 leading + 12 trailing
-        if (availableWidth < 100) availableWidth = 480;
-        NSFont *font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-        NSRect boundingRect = [text boundingRectWithSize:NSMakeSize(availableWidth, CGFLOAT_MAX)
-                                                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                              attributes:@{NSFontAttributeName: font}
-                                                 context:nil];
-        CGFloat height = ceil(boundingRect.size.height) + 20; // 8 top + 8 bottom + 4 padding
-        return MAX(height, 48);
-    }
-
     return 62;
 }
 
@@ -1336,7 +1086,7 @@ static NSString *FCPStripStopWords(NSString *query) {
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    // The hero stage is derived from query/AI state, not transient table selection.
+    // The hero stage is derived from query/dictation state, not transient table selection.
     NSRange visibleRows = [self.tableView rowsInRect:self.tableView.visibleRect];
     if (visibleRows.length > 0 && self.tableView.numberOfColumns > 0) {
         NSIndexSet *rows = [NSIndexSet indexSetWithIndexesInRange:visibleRows];
@@ -1350,15 +1100,6 @@ static NSString *FCPStripStopWords(NSString *query) {
 - (void)executeSelectedCommand:(id)sender {
     NSInteger row = self.tableView.selectedRow;
     if (row < 0) return;
-
-    // If AI result row is selected
-    if ((self.aiLoading || self.aiResults.count > 0) && row == 0) {
-        if (self.aiResults.count > 0) {
-            [self hidePalette];
-            [self executeAIResults:self.aiResults];
-        }
-        return;
-    }
 
     SpliceKitCommand *cmd = [self commandForDisplayRow:row];
     if (!cmd || cmd.isSeparatorRow) return;
@@ -1649,448 +1390,8 @@ static NSString *FCPStripStopWords(NSString *query) {
 
 - (SpliceKitCommand *)commandForDisplayRow:(NSInteger)row {
     NSInteger cmdIdx = row;
-    if (self.aiLoading || self.aiResults.count > 0) cmdIdx -= 1;
     if (cmdIdx < 0 || cmdIdx >= (NSInteger)self.filteredCommands.count) return nil;
     return self.filteredCommands[cmdIdx];
-}
-
-- (void)executeNaturalLanguage:(NSString *)query
-                    completion:(void(^)(NSArray<NSDictionary *> *actions, NSString *error))completion {
-
-    NSDate *totalStart = [NSDate date];
-    SpliceKit_log(@"[AppleAI] ═══ Starting query: \"%@\" ═══", query);
-
-    // Fetch timeline context (duration, fps, clip count) for the LLM
-    NSDate *phaseStart = [NSDate date];
-    NSDictionary *timelineCtx = [self getTimelineContext];
-    SpliceKit_log(@"[AppleAI] Timeline context: %.1fs | clips=%@ duration=%@s",
-                  -[phaseStart timeIntervalSinceNow],
-                  timelineCtx[@"clipCount"] ?: @"?",
-                  timelineCtx[@"durationSeconds"] ?: @"?");
-
-    // Build a Swift script that uses FoundationModels (Apple Intelligence)
-    phaseStart = [NSDate date];
-    NSString *swiftScript = [self buildSwiftScript:query timelineContext:timelineCtx];
-    SpliceKit_log(@"[AppleAI] Script built: %.3fs (%lu bytes)", -[phaseStart timeIntervalSinceNow], (unsigned long)swiftScript.length);
-
-    // Write script to temp file
-    NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_ai.swift"];
-    NSError *writeError = nil;
-    [swiftScript writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
-    if (writeError) {
-        SpliceKit_log(@"[AppleAI] Failed to write script: %@", writeError.localizedDescription);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(nil, [NSString stringWithFormat:@"Failed to write script: %@", writeError.localizedDescription]);
-        });
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDate *swiftStart = [NSDate date];
-        BOOL usedPluginPath = SpliceKitSwiftMacroPluginDirectory().length > 0;
-
-        SpliceKit_log(@"[AppleAI] Swift process launching (plugin-path=%@)...",
-                      usedPluginPath ? @"yes" : @"no");
-
-        SpliceKitRunSwiftScriptAtPath(scriptPath, ^(int terminationStatus, NSString *output, NSString *errorOutput) {
-        NSTimeInterval swiftElapsed = -[swiftStart timeIntervalSinceNow];
-
-        if (terminationStatus == -1) {
-            SpliceKit_log(@"[AppleAI] Failed to launch swift: %@", errorOutput);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, [NSString stringWithFormat:@"Failed to launch AI: %@", errorOutput]);
-            });
-            return;
-        }
-
-        SpliceKit_log(@"[AppleAI] Swift process exited: status=%d, elapsed=%.1fs, output=%lu bytes, stderr=%lu bytes",
-                      terminationStatus, swiftElapsed,
-                      (unsigned long)output.length, (unsigned long)errorOutput.length);
-
-        if (terminationStatus != 0) {
-            SpliceKit_log(@"[AppleAI] Script failed (status %d): %@", terminationStatus, errorOutput);
-            if (!usedPluginPath && SpliceKitStderrIndicatesMissingSwiftMacroPlugin(errorOutput)) {
-                NSString *msg = SpliceKitAppleIntelligenceMacroPluginErrorMessage();
-                NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-                SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total | FAILED (no Xcode macros) ═══", totalElapsed);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(nil, msg);
-                });
-                return;
-            }
-            NSArray *fallback = [self keywordFallback:query];
-            NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-            SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total | fallback=%lu actions | FAILED ═══",
-                          totalElapsed, (unsigned long)fallback.count);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (fallback.count > 0) {
-                    completion(fallback, nil);
-                } else {
-                    NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
-                                                                         @"Apple Intelligence failed: ");
-                    completion(nil, detail);
-                }
-            });
-            return;
-        }
-
-        NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmedOutput.length == 0 && errorOutput.length > 0) {
-            NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
-                                                                 @"Apple Intelligence failed: ");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, detail);
-            });
-            return;
-        }
-
-        // Parse JSON output
-        NSDate *parseStart = [NSDate date];
-        output = trimmedOutput;
-
-        // Extract JSON from output (may have extra text around it)
-        NSRange jsonStart = [output rangeOfString:@"["];
-        NSRange jsonEnd = [output rangeOfString:@"]" options:NSBackwardsSearch];
-        if (jsonStart.location != NSNotFound && jsonEnd.location != NSNotFound) {
-            NSRange jsonRange = NSMakeRange(jsonStart.location,
-                                            jsonEnd.location - jsonStart.location + 1);
-            output = [output substringWithRange:jsonRange];
-        }
-
-        NSError *jsonError = nil;
-        id parsed = [NSJSONSerialization JSONObjectWithData:[output dataUsingEncoding:NSUTF8StringEncoding]
-                                                    options:0 error:&jsonError];
-        NSTimeInterval parseElapsed = -[parseStart timeIntervalSinceNow];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-            if (jsonError || ![parsed isKindOfClass:[NSArray class]]) {
-                // Try keyword fallback
-                SpliceKit_log(@"[AppleAI] JSON parse failed (%.3fs): %@", parseElapsed, jsonError ?: @"not an array");
-                NSArray *fallback = [self keywordFallback:query];
-                SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total (swift=%.1fs parse=%.3fs) | fallback=%lu actions ═══",
-                              totalElapsed, swiftElapsed, parseElapsed, (unsigned long)fallback.count);
-                if (fallback.count > 0) {
-                    completion(fallback, nil);
-                } else if ([parsed isKindOfClass:[NSDictionary class]] && parsed[@"error"]) {
-                    completion(nil, parsed[@"error"]);
-                } else {
-                    completion(nil, [NSString stringWithFormat:@"Could not parse AI response: %@",
-                                    output.length > 100 ? [output substringToIndex:100] : output]);
-                }
-                return;
-            }
-            NSArray *corrected = [self postProcessActions:parsed query:query];
-            SpliceKit_log(@"[AppleAI] ═══ Done: %.1fs total (swift=%.1fs parse=%.3fs) | %lu action(s) ═══",
-                          totalElapsed, swiftElapsed, parseElapsed, (unsigned long)corrected.count);
-            completion(corrected, nil);
-        });
-        });
-    });
-}
-
-- (void)executeNaturalLanguageGemma:(NSString *)query
-                         completion:(void(^)(NSString *summary, NSString *error))completion {
-
-    // Check for repeat pattern first (faster than multi-turn LLM loop)
-    if ([self handleRepeatPatternIfNeeded:query completion:completion]) return;
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDate *totalStart = [NSDate date];
-        SpliceKit_log(@"[Gemma] ═══ Starting query: \"%@\" ═══", query);
-
-        // 1. Check MLX server availability — auto-start if not running
-        [self updateGemmaStatus:@"Connecting to MLX server..."];
-        NSDate *phaseStart = [NSDate date];
-        if (![self isMLXServerAvailable]) {
-            SpliceKit_log(@"[Gemma] MLX server not available, attempting auto-start...");
-            NSString *startErr = [self autoStartMLXServer];
-            if (startErr) {
-                SpliceKit_log(@"[Gemma] Auto-start failed (%.1fs): %@", -[phaseStart timeIntervalSinceNow], startErr);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(nil, startErr);
-                });
-                return;
-            }
-        }
-        SpliceKit_log(@"[Gemma] MLX server available (%.1fs)", -[phaseStart timeIntervalSinceNow]);
-
-        // 2. Get timeline context
-        [self updateGemmaStatus:@"Reading timeline..."];
-        phaseStart = [NSDate date];
-        NSDictionary *ctx = [self getTimelineContext];
-        SpliceKit_log(@"[Gemma] Timeline context: %.1fs | clips=%@ duration=%@s project=%@",
-                      -[phaseStart timeIntervalSinceNow],
-                      ctx[@"clipCount"] ?: @"?",
-                      ctx[@"durationSeconds"] ?: @"?",
-                      ctx[@"sequenceName"] ?: @"none");
-
-        // 3. Build system prompt with context
-        NSMutableString *systemMsg = [kGemmaSystemPrompt mutableCopy];
-        if (ctx) {
-            [systemMsg appendFormat:@"\n\nCurrent state:\n- Timeline: %.1fs, %@ fps, %@ clips\n- Playhead: %.1fs\n- Project: %@",
-                [ctx[@"durationSeconds"] doubleValue],
-                ctx[@"fps"] ?: @"24",
-                ctx[@"clipCount"] ?: @"?",
-                [ctx[@"playheadSeconds"] doubleValue],
-                ctx[@"sequenceName"] ?: @"(unknown)"];
-        }
-
-        // 4. Init conversation
-        self.gemmaMessages = [NSMutableArray arrayWithArray:@[
-            @{@"role": @"system", @"content": systemMsg},
-            @{@"role": @"user", @"content": query}
-        ]];
-        self.gemmaIterationCount = 0;
-        self.gemmaCancelled = NO;
-
-        // 5. Build tool schema
-        NSArray *tools = [self buildGemmaToolSchema];
-        SpliceKit_log(@"[Gemma] Tool schema: %lu tools", (unsigned long)tools.count);
-
-        // 6. Agent loop
-        NSString *finalSummary = nil;
-        NSString *finalError = nil;
-        NSInteger totalToolCalls = 0;
-        NSTimeInterval totalLLMTime = 0;
-        NSTimeInterval totalToolTime = 0;
-
-        while (self.gemmaIterationCount < self.gemmaMaxIterations && !self.gemmaCancelled) {
-            self.gemmaIterationCount++;
-            [self updateGemmaStatus:[NSString stringWithFormat:@"Thinking... (step %ld) — Esc to stop", (long)self.gemmaIterationCount]];
-
-            SpliceKit_log(@"[Gemma] ─── Step %ld: calling LLM (%lu messages) ───",
-                          (long)self.gemmaIterationCount, (unsigned long)self.gemmaMessages.count);
-            NSDate *llmStart = [NSDate date];
-            NSDictionary *response = [self gemmaCallMLX:self.gemmaMessages tools:tools];
-            NSTimeInterval llmElapsed = -[llmStart timeIntervalSinceNow];
-            totalLLMTime += llmElapsed;
-
-            if (response[@"error"]) {
-                SpliceKit_log(@"[Gemma] Step %ld: LLM error after %.1fs: %@",
-                              (long)self.gemmaIterationCount, llmElapsed, response[@"error"]);
-                finalError = response[@"error"];
-                break;
-            }
-
-            // Extract choices[0].message
-            NSArray *choices = response[@"choices"];
-            if (!choices || choices.count == 0) {
-                finalError = @"Empty response from model";
-                SpliceKit_log(@"[Gemma] Step %ld: empty choices array", (long)self.gemmaIterationCount);
-                break;
-            }
-            NSDictionary *message = choices[0][@"message"];
-            if (!message) {
-                finalError = @"No message in response";
-                break;
-            }
-
-            NSString *finishReason = choices[0][@"finish_reason"] ?: @"?";
-            NSArray *toolCalls = message[@"tool_calls"];
-
-            // If no tool calls, the model is done — extract text response
-            if (!toolCalls || toolCalls.count == 0) {
-                finalSummary = message[@"content"] ?: @"Done.";
-                SpliceKit_log(@"[Gemma] Step %ld: text response (finish=%@): %@",
-                              (long)self.gemmaIterationCount, finishReason,
-                              finalSummary.length > 200 ? [finalSummary substringToIndex:200] : finalSummary);
-                break;
-            }
-
-            SpliceKit_log(@"[Gemma] Step %ld: %lu tool call(s) (finish=%@, LLM=%.1fs)",
-                          (long)self.gemmaIterationCount, (unsigned long)toolCalls.count, finishReason, llmElapsed);
-
-            // Append assistant message (with tool_calls) to conversation
-            [self.gemmaMessages addObject:message];
-
-            // Execute each tool call
-            for (NSDictionary *toolCall in toolCalls) {
-                if (self.gemmaCancelled) break;
-
-                NSDictionary *function = toolCall[@"function"];
-                NSString *toolName = function[@"name"];
-                NSString *toolCallId = toolCall[@"id"] ?: [[NSUUID UUID] UUIDString];
-
-                // Parse arguments (may be string or dict)
-                NSDictionary *args = nil;
-                id argsRaw = function[@"arguments"];
-                if ([argsRaw isKindOfClass:[NSString class]]) {
-                    NSData *argsData = [(NSString *)argsRaw dataUsingEncoding:NSUTF8StringEncoding];
-                    if (argsData) {
-                        args = [NSJSONSerialization JSONObjectWithData:argsData options:0 error:nil];
-                    }
-                } else if ([argsRaw isKindOfClass:[NSDictionary class]]) {
-                    args = argsRaw;
-                }
-
-                [self updateGemmaStatus:[NSString stringWithFormat:@"Calling %@...", toolName]];
-                totalToolCalls++;
-
-                NSDate *toolStart = [NSDate date];
-                NSDictionary *toolResult = [self gemmaExecuteTool:toolName arguments:args];
-                NSTimeInterval toolElapsed = -[toolStart timeIntervalSinceNow];
-                totalToolTime += toolElapsed;
-
-                BOOL toolHadError = toolResult[@"error"] != nil;
-                SpliceKit_log(@"[Gemma]   tool[%ld] %@(%@) → %.3fs %@",
-                              (long)totalToolCalls, toolName, args ?: @{}, toolElapsed,
-                              toolHadError ? [NSString stringWithFormat:@"ERROR: %@", toolResult[@"error"]] : @"ok");
-
-                // Serialize result for the model
-                NSString *resultStr = nil;
-                NSData *resultData = [NSJSONSerialization dataWithJSONObject:toolResult options:0 error:nil];
-                if (resultData) {
-                    resultStr = [[NSString alloc] initWithData:resultData encoding:NSUTF8StringEncoding];
-                } else {
-                    resultStr = [toolResult description];
-                }
-
-                // Truncate very large results to stay within context
-                if (resultStr.length > 8000) {
-                    SpliceKit_log(@"[Gemma]   tool result truncated: %lu -> 7900 chars", (unsigned long)resultStr.length);
-                    resultStr = [[resultStr substringToIndex:7900] stringByAppendingString:@"...(truncated)"];
-                }
-
-                // Append tool result message
-                [self.gemmaMessages addObject:@{
-                    @"role": @"tool",
-                    @"tool_call_id": toolCallId,
-                    @"content": resultStr
-                }];
-            }
-        }
-
-        if (self.gemmaCancelled) {
-            finalError = @"Cancelled";
-        } else if (!finalSummary && !finalError) {
-            finalSummary = [NSString stringWithFormat:@"Completed %ld steps (max iterations reached)",
-                           (long)self.gemmaIterationCount];
-        }
-
-        NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-        SpliceKit_log(@"[Gemma] ═══ Done: %.1fs total | %ld steps | %ld tool calls | LLM=%.1fs Tool=%.1fs | %@ ═══",
-                      totalElapsed, (long)self.gemmaIterationCount, (long)totalToolCalls,
-                      totalLLMTime, totalToolTime,
-                      finalError ? [NSString stringWithFormat:@"ERROR: %@", finalError] : @"OK");
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(finalSummary, finalError);
-        });
-    });
-}
-
-- (void)executeNaturalLanguageAppleAgentic:(NSString *)query
-                                completion:(void(^)(NSString *summary, NSString *error))completion {
-
-    // Check for repeat pattern first (model can't reliably loop)
-    if ([self handleRepeatPatternIfNeeded:query completion:completion]) return;
-
-    NSDate *totalStart = [NSDate date];
-    SpliceKit_log(@"[AppleAI+] ═══ Starting query: \"%@\" ═══", query);
-
-    // Get timeline context
-    NSDate *phaseStart = [NSDate date];
-    NSDictionary *timelineCtx = [self getTimelineContext];
-    SpliceKit_log(@"[AppleAI+] Timeline context: %.1fs | clips=%@ duration=%@s",
-                  -[phaseStart timeIntervalSinceNow],
-                  timelineCtx[@"clipCount"] ?: @"?",
-                  timelineCtx[@"durationSeconds"] ?: @"?");
-
-    // Build script
-    phaseStart = [NSDate date];
-    NSString *swiftScript = [self buildAgenticSwiftScript:query timelineContext:timelineCtx];
-    SpliceKit_log(@"[AppleAI+] Script built: %.3fs (%lu bytes)", -[phaseStart timeIntervalSinceNow], (unsigned long)swiftScript.length);
-
-    // Write to temp file
-    NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_ai_agentic.swift"];
-    NSError *writeError = nil;
-    [swiftScript writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
-    if (writeError) {
-        SpliceKit_log(@"[AppleAI+] Failed to write script: %@", writeError.localizedDescription);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(nil, [NSString stringWithFormat:@"Failed to write script: %@", writeError.localizedDescription]);
-        });
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        [self updateGemmaStatus:@"Launching Apple Intelligence+..."];
-        NSDate *swiftStart = [NSDate date];
-        BOOL usedPluginPath = SpliceKitSwiftMacroPluginDirectory().length > 0;
-
-        [self updateGemmaStatus:@"Apple Intelligence+ thinking..."];
-        SpliceKitRunSwiftScriptAtPath(scriptPath, ^(int terminationStatus, NSString *output, NSString *errorOutput) {
-        NSTimeInterval swiftElapsed = -[swiftStart timeIntervalSinceNow];
-        NSTimeInterval totalElapsed = -[totalStart timeIntervalSinceNow];
-
-        if (terminationStatus == -1) {
-            SpliceKit_log(@"[AppleAI+] Failed to launch: %@", errorOutput);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, [NSString stringWithFormat:@"Failed to launch: %@", errorOutput]);
-            });
-            return;
-        }
-
-        SpliceKit_log(@"[AppleAI+] Swift exited: status=%d, elapsed=%.1fs, output=%lu bytes, stderr=%lu bytes",
-                      terminationStatus, swiftElapsed,
-                      (unsigned long)output.length, (unsigned long)errorOutput.length);
-
-        NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-        if (terminationStatus != 0 || trimmedOutput.length == 0) {
-            if (terminationStatus != 0 || errorOutput.length > 0) {
-                SpliceKit_log(@"[AppleAI+] Script failed: %@", errorOutput);
-                SpliceKit_log(@"[AppleAI+] ═══ Done: %.1fs total | FAILED ═══", totalElapsed);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSString *detail = SpliceKitFormatSwiftScriptFailure(errorOutput, usedPluginPath,
-                                                                         @"Apple Intelligence+ failed: ");
-                    completion(nil, detail);
-                });
-                return;
-            }
-        }
-
-        NSString *result = trimmedOutput;
-        // Treat "null" output as success with no text (model completed tools but didn't summarize)
-        if (result.length == 0 || [result isEqualToString:@"null"] || [result isEqualToString:@"(null)"]) {
-            result = @"Done.";
-        }
-        // Strip "Error: " prefix if present
-        if ([result hasPrefix:@"Error: "]) {
-            SpliceKit_log(@"[AppleAI+] ═══ Done: %.1fs total | ERROR: %@ ═══", totalElapsed, result);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, result);
-            });
-            return;
-        }
-
-        SpliceKit_log(@"[AppleAI+] ═══ Done: %.1fs total (swift=%.1fs) | OK: %@ ═══",
-                      totalElapsed, swiftElapsed,
-                      result.length > 200 ? [result substringToIndex:200] : result);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(result.length > 0 ? result : @"Done.", nil);
-        });
-        });
-    });
-}
-
-- (void)setAiEngine:(SpliceKitAIEngine)aiEngine {
-    _aiEngine = aiEngine;
-    // Keep the popup in sync whenever the property changes (API, init, or UI)
-    if (self.aiEnginePopup && self.aiEnginePopup.indexOfSelectedItem != (NSInteger)aiEngine) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.aiEnginePopup selectItemAtIndex:(NSInteger)aiEngine];
-        });
-    }
-}
-
-- (void)aiEngineChanged:(id)sender {
-    NSInteger idx = self.aiEnginePopup.indexOfSelectedItem;
-    self.aiEngine = (SpliceKitAIEngine)idx;
-    [[NSUserDefaults standardUserDefaults] setInteger:self.aiEngine forKey:@"SpliceKitAIEngine"];
-    [self updateStatusLabel];
 }
 
 @end

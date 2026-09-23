@@ -1,7 +1,6 @@
-# Command Palette & AI Commands Guide
+# Command Palette Guide
 
-Quick-access command palette with fuzzy search and Apple Intelligence natural
-language processing for Final Cut Pro.
+Quick-access command palette with fuzzy search for Final Cut Pro.
 
 ---
 
@@ -11,7 +10,7 @@ language processing for Final Cut Pro.
 2. [Opening the Palette](#opening-the-palette)
 3. [Fuzzy Search](#fuzzy-search)
 4. [Command Categories](#command-categories)
-5. [Apple Intelligence Integration](#apple-intelligence-integration)
+5. [Voice Dictation](#voice-dictation)
 6. [Favorites](#favorites)
 7. [Keyboard Navigation](#keyboard-navigation)
 8. [Programmatic API](#programmatic-api)
@@ -26,11 +25,11 @@ commands through a VS Code-style search interface. It opens as a floating
 window inside FCP and supports:
 
 - **Fuzzy search** — type partial matches to find commands quickly
-- **Apple Intelligence** — type natural language sentences and press Tab to
-  interpret them as editing commands using the on-device LLM
+- **Voice dictation** — the microphone button types what you say into the
+  search field
 - **Favorites** — star frequently-used commands for quick access
 - **Categories** — commands organized by Editing, Playback, Color, Speed,
-  Markers, Titles, Keyframes, Effects, Transcript, Export, AI, Music, Options
+  Markers, Titles, Keyframes, Effects, Transcript, Export, Music, Options
 - **Keyboard shortcuts** — displayed alongside each command for reference
 
 ---
@@ -97,41 +96,22 @@ Commands are organized into categories, shown as badges on each row:
 | **Effects** | Paste Effects, Remove Effects, Copy Attributes |
 | **Transcript** | Open Transcript, Delete Silences |
 | **Export** | Export XML, Share |
-| **AI** | Natural language commands via Apple Intelligence |
 | **Music** | FlexMusic, Montage |
 | **Options** | SpliceKit settings toggles |
 
 ---
 
-## Apple Intelligence Integration
+## Voice Dictation
 
-The command palette integrates with Apple's on-device FoundationModels framework
-for natural language command interpretation.
+Click the microphone button at the right of the search field to dictate. What
+you say is typed into the search field (on-device speech recognition) and
+filters the list exactly as typing would; press Return to run the selected
+command. Click the button again, or press Escape, to stop. The first use asks
+for speech recognition and microphone permission.
 
-### How to Use
-
-1. Open the palette (Cmd+Shift+P)
-2. Type a natural language sentence describing what you want to do
-3. Press **Tab** to send the query to Apple Intelligence
-4. The AI interprets your request and maps it to one or more FCP commands
-5. The result appears as an AI row in the palette — press Return to execute
-
-### Examples
-
-| Natural Language | Interpreted As |
-|-----------------|----------------|
-| "slow this clip to half speed" | `retimeSlow50` |
-| "add a cross dissolve" | `addTransition` |
-| "mark this spot" | `addMarker` |
-| "cut here" | `blade` |
-| "go back to the beginning" | `goToStart` |
-| "make it black and white" | Color correction commands |
-
-### Fallback
-
-When Apple Intelligence is unavailable (older macOS or hardware without Neural
-Engine), the system falls back to keyword matching against command names and
-their associated search terms.
+The palette has no built-in language model. To describe an edit in plain
+words, ask your MCP client (Claude or any other); it picks and runs the
+SpliceKit tools itself.
 
 ---
 
@@ -159,8 +139,7 @@ the context menu.
 | **Cmd+Shift+P** | Toggle palette |
 | **↑ / ↓** | Navigate commands (skips separator rows) |
 | **Return** | Execute selected command |
-| **Tab** | Send query to Apple Intelligence |
-| **Escape** | Close palette |
+| **Escape** | Stop dictation, leave a browse list, or close the palette |
 | Type anything | Fuzzy search |
 
 The search field stays focused while arrow keys navigate the table, so you can
@@ -190,15 +169,6 @@ execute_command("goToStart", type="playback")
 execute_command("addColorBoard", type="timeline")
 ```
 
-### AI Natural Language
-
-```python
-# Interpret natural language as FCP commands
-ai_command("slow this clip to half speed")
-ai_command("add a marker here")
-ai_command("cut at every scene change")
-```
-
 ### Complete Tool Reference
 
 | Tool | Description |
@@ -207,7 +177,6 @@ ai_command("cut at every scene change")
 | `hide_command_palette()` | Close the palette |
 | `search_commands(query)` | Search commands by name/keyword |
 | `execute_command(action, type)` | Execute a command directly |
-| `ai_command(query)` | Natural language via Apple Intelligence |
 
 ---
 
@@ -273,5 +242,4 @@ Toggle Inspector, Toggle Timeline
 
 ---
 
-*The command palette runs in-process inside FCP. AI features require Apple
-Silicon and macOS with FoundationModels framework support.*
+*The command palette runs in-process inside FCP.*

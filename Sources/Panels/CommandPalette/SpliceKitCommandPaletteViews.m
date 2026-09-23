@@ -35,19 +35,6 @@ NSView *FCPCreateGlassContainerView(NSRect frame, NSVisualEffectMaterial fallbac
     return view;
 }
 
-static NSString *FCPCommandSignature(SpliceKitCommand *cmd) {
-    if (!cmd) return @"";
-    return [NSString stringWithFormat:@"%@|%@|%@", cmd.type ?: @"", cmd.action ?: @"", cmd.name ?: @""];
-}
-
-NSString *FCPCommandListSignature(NSArray<SpliceKitCommand *> *commands) {
-    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:commands.count];
-    for (SpliceKitCommand *cmd in commands) {
-        [parts addObject:FCPCommandSignature(cmd)];
-    }
-    return [parts componentsJoinedByString:@";"];
-}
-
 static NSURL *FCPCommandPaletteSiriBlobURL(void) {
     static NSURL *blobURL = nil;
     static dispatch_once_t onceToken;
@@ -85,7 +72,6 @@ NSString *FCPCommandSymbolName(SpliceKitCommand *cmd) {
         case SpliceKitCommandCategoryExport: return @"square.and.arrow.up.fill";
         case SpliceKitCommandCategoryMusic: return @"music.note.list";
         case SpliceKitCommandCategoryOptions: return @"slider.horizontal.3";
-        case SpliceKitCommandCategoryAI: return @"sparkles";
         case SpliceKitCommandCategoryEditing:
         default: return @"scissors";
     }
@@ -104,7 +90,6 @@ NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
         case SpliceKitCommandCategoryExport: return FCPPaletteColor(0.99, 0.47, 0.47, 0.95);
         case SpliceKitCommandCategoryMusic: return FCPPaletteColor(0.47, 0.89, 0.64, 0.95);
         case SpliceKitCommandCategoryOptions: return FCPPaletteColor(0.78, 0.82, 0.92, 0.95);
-        case SpliceKitCommandCategoryAI: return FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
         case SpliceKitCommandCategoryEditing:
         default: return FCPPaletteColor(0.54, 0.67, 0.99, 0.95);
     }
@@ -438,71 +423,6 @@ void FCPSelectSingleTableRow(NSTableView *tableView, NSInteger row) {
         self.cardView.layer.shadowOpacity = 0.0;
     }
     self.needsDisplay = YES;
-}
-
-@end
-
-#pragma mark - AI Result Row
-
-@implementation FCPAIResultRowView
-
-- (instancetype)initWithFrame:(NSRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
-        _iconPlate.wantsLayer = YES;
-        _iconPlate.layer.cornerRadius = 13.0;
-        _iconPlate.layer.masksToBounds = YES;
-        _iconPlate.layer.backgroundColor = FCPPaletteColor(0.53, 0.61, 0.99, 0.18).CGColor;
-        _iconPlate.layer.borderColor = FCPPaletteColor(0.72, 0.79, 1.0, 0.22).CGColor;
-        _iconPlate.layer.borderWidth = 1.0;
-        _iconPlate.translatesAutoresizingMaskIntoConstraints = NO;
-
-        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        _iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:15 weight:NSFontWeightSemibold];
-        _iconView.image = [NSImage imageWithSystemSymbolName:@"sparkles" accessibilityDescription:@"AI"];
-        _iconView.contentTintColor = FCPPaletteColor(0.86, 0.90, 1.0, 0.92);
-        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
-
-        _spinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
-        _spinner.style = NSProgressIndicatorStyleSpinning;
-        _spinner.controlSize = NSControlSizeSmall;
-        _spinner.translatesAutoresizingMaskIntoConstraints = NO;
-
-        _label = [NSTextField wrappingLabelWithString:@""];
-        _label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
-        _label.textColor = FCPPaletteColor(0.88, 0.92, 0.99, 0.92);
-        _label.translatesAutoresizingMaskIntoConstraints = NO;
-        _label.maximumNumberOfLines = 0;
-        _label.cell.truncatesLastVisibleLine = YES;
-        [_label setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
-
-        [self addSubview:_iconPlate];
-        [_iconPlate addSubview:_iconView];
-        [_iconPlate addSubview:_spinner];
-        [self addSubview:_label];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:22.0],
-            [_iconPlate.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
-            [_iconPlate.widthAnchor constraintEqualToConstant:34.0],
-            [_iconPlate.heightAnchor constraintEqualToConstant:34.0],
-
-            [_iconView.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
-            [_iconView.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
-            [_iconView.widthAnchor constraintEqualToConstant:18.0],
-            [_iconView.heightAnchor constraintEqualToConstant:18.0],
-
-            [_spinner.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
-            [_spinner.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
-
-            [_label.leadingAnchor constraintEqualToAnchor:_iconPlate.trailingAnchor constant:12.0],
-            [_label.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-24.0],
-            [_label.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
-            [_label.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor constant:-10.0],
-        ]];
-    }
-    return self;
 }
 
 @end

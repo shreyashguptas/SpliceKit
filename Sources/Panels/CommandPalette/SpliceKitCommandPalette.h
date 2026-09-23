@@ -1,6 +1,6 @@
 //
 //  SpliceKitCommandPalette.h
-//  Command palette for quick access to FCP actions + Apple LLM natural language
+//  Command palette for quick access to FCP actions (fuzzy search + execute)
 //
 
 #ifndef SpliceKitCommandPalette_h
@@ -8,13 +8,6 @@
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
-
-// AI engine selection
-typedef NS_ENUM(NSInteger, SpliceKitAIEngine) {
-    SpliceKitAIEngineAppleIntelligence = 0,
-    SpliceKitAIEngineGemma4 = 1,
-    SpliceKitAIEngineAppleAgentic = 2,
-};
 
 // Command categories
 typedef NS_ENUM(NSInteger, SpliceKitCommandCategory) {
@@ -28,7 +21,6 @@ typedef NS_ENUM(NSInteger, SpliceKitCommandCategory) {
     SpliceKitCommandCategoryEffects,
     SpliceKitCommandCategoryTranscript,
     SpliceKitCommandCategoryExport,
-    SpliceKitCommandCategoryAI,
     SpliceKitCommandCategoryMusic,
     SpliceKitCommandCategoryOptions,
 };
@@ -63,24 +55,8 @@ typedef NS_ENUM(NSInteger, SpliceKitCommandCategory) {
 // Search commands
 - (NSArray<SpliceKitCommand *> *)searchCommands:(NSString *)query;
 
-// Get command at display row (accounting for AI row offset)
+// Get command at display row
 - (SpliceKitCommand *)commandForDisplayRow:(NSInteger)row;
-
-// AI engine selection
-@property (nonatomic, assign) SpliceKitAIEngine aiEngine;
-@property (nonatomic, strong) NSString *gemmaModel;
-@property (nonatomic, strong) NSTask *mlxServerTask;
-
-// AI natural language (async, calls completion on main thread)
-- (void)executeNaturalLanguage:(NSString *)query completion:(void(^)(NSArray<NSDictionary *> *actions, NSString *error))completion;
-
-// Gemma 4 agentic natural language (async, multi-turn tool-calling loop)
-- (void)executeNaturalLanguageGemma:(NSString *)query
-                         completion:(void(^)(NSString *summary, NSString *error))completion;
-
-// Apple Intelligence agentic (FoundationModels + Tool protocol, multi-turn)
-- (void)executeNaturalLanguageAppleAgentic:(NSString *)query
-                                completion:(void(^)(NSString *summary, NSString *error))completion;
 
 @end
 

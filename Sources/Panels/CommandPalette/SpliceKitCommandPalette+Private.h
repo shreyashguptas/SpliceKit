@@ -22,13 +22,6 @@
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <sys/socket.h>
-#import <netinet/in.h>
-#import <arpa/inet.h>
-
-typedef void (^SpliceKitSwiftScriptCompletion)(int terminationStatus,
-                                               NSString *stdoutText,
-                                               NSString *stderrText);
 
 @interface SpliceKitCenteredTextFieldCell : NSTextFieldCell
 @end
@@ -59,13 +52,6 @@ typedef void (^SpliceKitSwiftScriptCompletion)(int terminationStatus,
 @property (nonatomic, strong) NSTextField *detailLabel;
 @property (nonatomic, strong) NSTextField *categoryLabel;
 @property (nonatomic, strong) NSTextField *shortcutLabel;
-@end
-
-@interface FCPAIResultRowView : NSTableCellView
-@property (nonatomic, strong) NSView *iconPlate;
-@property (nonatomic, strong) NSImageView *iconView;
-@property (nonatomic, strong) NSTextField *label;
-@property (nonatomic, strong) NSProgressIndicator *spinner;
 @end
 
 @interface FCPSeparatorRowView : NSTableCellView
@@ -102,7 +88,6 @@ typedef void (^SpliceKitSwiftScriptCompletion)(int terminationStatus,
 typedef NS_ENUM(NSInteger, SpliceKitPalettePresentationState) {
     SpliceKitPalettePresentationStateHidden = 0,
     SpliceKitPalettePresentationStateLatencyPill,
-    SpliceKitPalettePresentationStateResultPlatter,
 };
 
 @interface SpliceKitCommandPalette () <NSTableViewDelegate, NSTableViewDataSource,
@@ -130,28 +115,14 @@ typedef NS_ENUM(NSInteger, SpliceKitPalettePresentationState) {
 @property (nonatomic, strong) NSArray<SpliceKitCommand *> *allCommands;
 @property (nonatomic, strong) NSArray<SpliceKitCommand *> *masterCommands; // original full list
 @property (nonatomic, strong) NSArray<SpliceKitCommand *> *filteredCommands;
-@property (nonatomic, assign) BOOL aiLoading;
-@property (nonatomic, strong) NSString *aiQuery;
-@property (nonatomic, strong) NSString *aiCompletedQuery; // query that already has results
-@property (nonatomic, strong) NSArray<NSDictionary *> *aiResults;
-@property (nonatomic, strong) NSString *aiError;
+@property (nonatomic, strong) NSString *statusError; // shown in the status line (dictation errors)
 @property (nonatomic, assign) BOOL inBrowseMode;
-@property (nonatomic, strong) NSTimer *aiDebounceTimer;
 
 @property (nonatomic, strong) id localEventMonitor;
 
 // Favorites
 @property (nonatomic, strong) NSMutableSet<NSString *> *favoriteKeys; // "type::action" for O(1) lookup
 @property (nonatomic, strong) NSArray<SpliceKitCommand *> *rawBrowseCommands; // pre-injection list
-
-// Gemma 4 (MLX) AI engine
-@property (nonatomic, strong) NSPopUpButton *aiEnginePopup;
-@property (nonatomic, strong) NSMutableArray *gemmaMessages;
-@property (nonatomic, assign) NSInteger gemmaIterationCount;
-@property (nonatomic, assign) NSInteger gemmaMaxIterations;
-@property (nonatomic, strong) NSArray *gemmaToolSchema;
-@property (nonatomic, assign) BOOL gemmaCancelled;
-@property (nonatomic, strong) NSString *gemmaCurrentTask;
 
 // Live voice dictation
 @property (nonatomic, strong) SFSpeechRecognizer *dictationRecognizer;
@@ -177,7 +148,6 @@ extern NSString * const kSpliceKitFavoritesKey;
 
 NSColor *FCPPaletteColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a);
 NSView *FCPCreateGlassContainerView(NSRect frame, NSVisualEffectMaterial fallbackMaterial, CGFloat cornerRadius);
-NSString *FCPCommandListSignature(NSArray<SpliceKitCommand *> *commands);
 NSString *FCPCommandSymbolName(SpliceKitCommand *cmd);
 NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd);
 void FCPSelectSingleTableRow(NSTableView *tableView, NSInteger row);
@@ -185,20 +155,6 @@ void FCPSelectSingleTableRow(NSTableView *tableView, NSInteger row);
 #pragma mark - Defined in SpliceKitCommandPalette+Registry.m
 
 NSString *FCPFavoriteKey(NSString *type, NSString *action);
-
-#pragma mark - Defined in SpliceKitCommandPalette+AppleAI.m
-
-NSString *SpliceKitSwiftMacroPluginDirectory(void);
-NSString *SpliceKitAppleIntelligenceMacroPluginErrorMessage(void);
-BOOL SpliceKitStderrIndicatesMissingSwiftMacroPlugin(NSString *stderrText);
-NSString *SpliceKitFormatSwiftScriptFailure(NSString *stderrText,
-                                            BOOL usedPluginPath,
-                                            NSString *prefix);
-void SpliceKitRunSwiftScriptAtPath(NSString *scriptPath, SpliceKitSwiftScriptCompletion completion);
-
-#pragma mark - Defined in SpliceKitCommandPalette+Gemma.m
-
-extern NSString * const kGemmaSystemPrompt;
 
 #pragma GCC visibility pop
 
@@ -218,8 +174,6 @@ extern NSString * const kGemmaSystemPrompt;
 - (void)enterTransitionBrowseMode;
 - (void)enterEffectBrowseMode:(NSString *)effectType;
 - (void)enterFavoritesBrowseMode;
-- (NSString *)extractKeywordFromQuery:(NSString *)query;
-- (void)showMatchingEffects:(NSString *)keyword type:(NSString *)effectType;
 @end
 
 // Implemented in SpliceKitCommandPalette+Dictation.m, called from another file.
@@ -233,33 +187,6 @@ extern NSString * const kGemmaSystemPrompt;
 - (void)showSilenceOptionsPanel;
 - (void)showSceneDetectionOptionsPanel;
 - (void)showBridgeOptionsPanel;
-@end
-
-// Implemented in SpliceKitCommandPalette+AppleAI.m, called from another file.
-@interface SpliceKitCommandPalette (AppleAI)
-- (void)executeAIResults:(NSArray<NSDictionary *> *)actions;
-- (void)triggerAI:(NSString *)query;
-- (NSDictionary *)getTimelineContext;
-- (NSString *)buildSwiftScript:(NSString *)query timelineContext:(NSDictionary *)ctx;
-- (NSString *)buildAgenticSwiftScript:(NSString *)query timelineContext:(NSDictionary *)ctx;
-- (BOOL)handleRepeatPatternIfNeeded:(NSString *)query
-                         completion:(void(^)(NSString *summary, NSString *error))completion;
-@end
-
-// Implemented in SpliceKitCommandPalette+AIPostProcess.m, called from another file.
-@interface SpliceKitCommandPalette (AIPostProcess)
-- (NSArray<NSDictionary *> *)postProcessActions:(NSArray *)actions query:(NSString *)query;
-- (NSArray<NSDictionary *> *)keywordFallback:(NSString *)query;
-@end
-
-// Implemented in SpliceKitCommandPalette+Gemma.m, called from another file.
-@interface SpliceKitCommandPalette (Gemma)
-- (BOOL)isMLXServerAvailable;
-- (NSString *)autoStartMLXServer;
-- (NSDictionary *)gemmaCallMLX:(NSArray *)messages tools:(NSArray *)tools;
-- (NSArray *)buildGemmaToolSchema;
-- (NSDictionary *)gemmaExecuteTool:(NSString *)toolName arguments:(NSDictionary *)args;
-- (void)updateGemmaStatus:(NSString *)status;
 @end
 
 // Implemented in SpliceKitCommandPaletteViews.m, called from another file.

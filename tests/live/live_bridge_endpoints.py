@@ -391,7 +391,7 @@ def test_dialog():
 def test_command():
     print("\n[command.*]")
     ok("search", rpc("command.search", {"query": "blade"}))
-    skip("execute/show/hide/ai", "would trigger command palette")
+    skip("execute/show/hide", "would trigger command palette")
 
 
 def test_dual_timeline():

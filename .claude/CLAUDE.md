@@ -282,7 +282,7 @@ batch_export(folder="/path/to/output")           # every clip as its own file; f
 | Song cut (beat-synced assembly) | [docs/guides/song-cut.md](../docs/guides/song-cut.md) |
 | Scene and beat detection | [docs/guides/scene-and-beat-detection.md](../docs/guides/scene-and-beat-detection.md) |
 | FlexMusic and montage | [docs/guides/flexmusic-and-montage.md](../docs/guides/flexmusic-and-montage.md) |
-| Command palette, Apple Intelligence | [docs/guides/command-palette.md](../docs/guides/command-palette.md) |
+| Command palette | [docs/guides/command-palette.md](../docs/guides/command-palette.md) |
 | Dialogs | [docs/guides/dialog-automation.md](../docs/guides/dialog-automation.md) |
 | Lua scripting (tutorial / SDK) | [docs/guides/lua-scripting.md](../docs/guides/lua-scripting.md), [docs/reference/lua-sdk.md](../docs/reference/lua-sdk.md) |
 | FCP's classes and methods | [docs/reference/fcp-api.md](../docs/reference/fcp-api.md) |

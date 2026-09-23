@@ -138,9 +138,6 @@ SK_RPC("command.show", SpliceKit_handleCommandShow, @"state_dependent", @"Opens 
 SK_RPC("command.hide", SpliceKit_handleCommandHide, @"state_dependent", @"Closes the command palette.")
 SK_RPC("command.search", SpliceKit_handleCommandSearch, @"safe", @"Fuzzy-searches available commands without executing them.")
 SK_RPC("command.execute", SpliceKit_handleCommandExecute, @"state_dependent", @"Runs a palette command by id.")
-SK_RPC("command.ai", SpliceKit_handleCommandAI, @"state_dependent", @"Sends natural language to Apple Intelligence via the palette.")
-SK_RPC("command.aiGemma", SpliceKit_handleCommandAIGemma, @"state_dependent", @"Runs a Gemma model prompt through the palette.")
-SK_RPC("command.aiAppleAgentic", SpliceKit_handleCommandAIAppleAgentic, @"state_dependent", @"Runs an agentic Apple Intelligence request via the palette.")
 
 // liveCam.* namespace
 SK_RPC("liveCam.show", SpliceKit_handleLiveCamShow, @"state_dependent", @"Opens the Live Cam floating panel.")

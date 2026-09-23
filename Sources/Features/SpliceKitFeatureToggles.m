@@ -537,8 +537,6 @@ NSDictionary *SpliceKit_handleOptionsGet(NSDictionary *params) {
         @"lLadder": SpliceKit_getLLadder(),
         @"jLadder": SpliceKit_getJLadder(),
         @"defaultSpatialConformType": SpliceKit_getDefaultSpatialConformType(),
-        @"aiEngine": @([SpliceKitCommandPalette sharedPalette].aiEngine),
-        @"gemmaModel": [SpliceKitCommandPalette sharedPalette].gemmaModel ?: @"unsloth/gemma-4-E4B-it-UD-MLX-4bit",
         @"sidebarCoalesceLiveScroll": @(SpliceKit_isSidebarCoalesceLiveScrollEnabled()),
         @"timelineOverviewBar": @(SpliceKit_isTimelineOverviewBarEnabled()),
         @"timelinePerformanceMode": @(SpliceKit_isTimelinePerformanceModeEnabled()),
@@ -610,19 +608,6 @@ NSDictionary *SpliceKit_handleOptionsSet(NSDictionary *params) {
         SpliceKit_setDefaultSpatialConformType(value);
         return @{@"status": @"ok",
                  @"defaultSpatialConformType": SpliceKit_getDefaultSpatialConformType()};
-    } else if ([option isEqualToString:@"aiEngine"]) {
-        NSNumber *value = params[@"value"];
-        if (!value) return @{@"error": @"'value' parameter required (0=Apple Intelligence, 1=Gemma 4)"};
-        SpliceKitAIEngine engine = (SpliceKitAIEngine)[value integerValue];
-        [SpliceKitCommandPalette sharedPalette].aiEngine = engine;
-        [[NSUserDefaults standardUserDefaults] setInteger:engine forKey:@"SpliceKitAIEngine"];
-        return @{@"status": @"ok", @"aiEngine": @(engine)};
-    } else if ([option isEqualToString:@"gemmaModel"]) {
-        NSString *value = params[@"value"];
-        if (!value) return @{@"error": @"'value' parameter required (HuggingFace model ID)"};
-        [SpliceKitCommandPalette sharedPalette].gemmaModel = value;
-        [[NSUserDefaults standardUserDefaults] setObject:value forKey:@"SpliceKitGemmaModel"];
-        return @{@"status": @"ok", @"gemmaModel": value};
     } else if ([option isEqualToString:@"sidebarCoalesceLiveScroll"]) {
         NSNumber *enabled = params[@"enabled"];
         if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
