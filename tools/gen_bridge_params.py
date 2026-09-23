@@ -4,10 +4,13 @@
 bridge.describe used to give a method's safety tag and a one-line summary only, so
 a parameter such as fcpxml.import's `xml` (and the absence of `path`) was found by
 trial and error. The handlers are the only complete record of what each method
-reads, so this script reads them: for every method dispatched in
-SpliceKit_handleRequest to `result = SpliceKit_handleX(params)`, it collects the
+reads, so this script reads them: for every row of Sources/Bridge/SpliceKitRPCTable.def
+with a `SpliceKit_*` handler (`SK_RPC("x.y", SpliceKit_handleX, ...)`), it collects the
 keys the handler reads from `params` (`params[@"key"]`, `helper(params, @"key")`),
-following calls that pass `params` on, two levels deep.
+following calls that pass `params` on, two levels deep. Rows with a NULL handler
+(dispatched explicitly in SpliceKit_handleRequest because they wrap their handler's
+result) and handlers outside the SpliceKit_ prefix (SpliceKitURLImport_*) are not
+scanned, as before the table existed; DESCRIBED can still document them.
 
 A few methods carry hand-written descriptions (DESCRIBED below); those win over the
 inferred list for the keys they name.
@@ -26,9 +29,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SOURCES = REPO / "Sources"
 OUTPUT = SOURCES / "Bridge" / "SpliceKitBridgeParams.m"
+RPC_TABLE = SOURCES / "Bridge" / "SpliceKitRPCTable.def"
 
-DISPATCH_RE = re.compile(
-    r'\[method isEqualToString:@"([^"]+)"\]\)\s*\{\s*result\s*=\s*(SpliceKit_\w+)\(params\)')
+RPC_ROW_RE = re.compile(r'^SK_RPC\("([^"]+)",\s*(SpliceKit_\w+)\s*,', re.M)
 FUNC_RE_TMPL = r'^(?:static\s+)?NSDictionary\s*\*\s*{name}\s*\(\s*NSDictionary\s*\*\s*params\s*\)\s*\{{'
 KEY_RES = [
     re.compile(r'params\[@"([A-Za-z_][A-Za-z0-9_]*)"\]'),
@@ -116,10 +119,7 @@ def objc_string(text: str) -> str:
 
 def generate() -> str:
     sources = {p: p.read_text(encoding="utf-8") for p in sorted(SOURCES.rglob("*.m"))}
-    server = sources[SOURCES / "Bridge" / "SpliceKitServer.m"]
-    start = server.index("NSDictionary *SpliceKit_handleRequest")
-    end = server.index("#pragma mark - Client Handler", start)
-    dispatch = DISPATCH_RE.findall(server[start:end])
+    dispatch = RPC_ROW_RE.findall(RPC_TABLE.read_text(encoding="utf-8"))
 
     table: dict[str, dict[str, str]] = {}
     for method, handler in dispatch:

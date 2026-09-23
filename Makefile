@@ -16,8 +16,9 @@ DSYM = $(OUTPUT).dSYM
 # Read canonical source list from Sources/SOURCES.txt
 SOURCES = $(addprefix Sources/, $(shell grep -v '^\#' Sources/SOURCES.txt | grep -v '^$$'))
 # Every object depends on every header: they are small, and a changed struct or
-# prototype in any of them must rebuild its users.
-HEADERS = $(shell find Sources -name '*.h')
+# prototype in any of them must rebuild its users. .def files are included X-macro
+# tables (SpliceKitRPCTable.def), so a changed row must rebuild too.
+HEADERS = $(shell find Sources -name '*.h' -o -name '*.def')
 INCLUDES = $(addprefix -I ,$(sort $(dir $(HEADERS))))
 OBJC_SOURCES = $(filter %.m,$(SOURCES))
 OBJCXX_SOURCES = $(filter %.mm,$(SOURCES))

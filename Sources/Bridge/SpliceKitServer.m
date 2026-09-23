@@ -302,6 +302,30 @@ static BOOL SpliceKit_methodIsAllowedWhileBusy(NSString *method) {
     return [meta[@"safety"] isEqualToString:@"safe"];
 }
 
+// Built-in RPC handlers, name -> function, from SpliceKitRPCTable.def. Rows with a NULL
+// handler are dispatched explicitly in SpliceKit_handleRequest and are left out here.
+typedef NSDictionary *(*SpliceKitRPCHandler)(NSDictionary *params);
+
+static SpliceKitRPCHandler SpliceKit_builtinRPCHandler(NSString *method) {
+    static NSDictionary<NSString *, NSValue *> *handlers = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        static const struct { const char *name; SpliceKitRPCHandler handler; } rows[] = {
+#define SK_RPC(name, handler, safety, summary) { name, handler },
+#include "SpliceKitRPCTable.def"
+#undef SK_RPC
+        };
+        NSMutableDictionary<NSString *, NSValue *> *table =
+            [NSMutableDictionary dictionaryWithCapacity:sizeof(rows) / sizeof(rows[0])];
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            if (!rows[i].handler) continue;
+            table[@(rows[i].name)] = [NSValue valueWithPointer:(const void *)rows[i].handler];
+        }
+        handlers = [table copy];
+    });
+    return (SpliceKitRPCHandler)[handlers[method] pointerValue];
+}
+
 NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     NSString *method = request[@"method"];
     id rawParams = request[@"params"];
@@ -400,486 +424,31 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     unsigned timeoutsBefore = SpliceKit_mainThreadDispatchTimeoutCount();
     SpliceKit_resetMainThreadTimeoutState();
 
-    // system.* namespace
-    if ([method isEqualToString:@"system.version"]) {
-        result = SpliceKit_handleSystemVersion(params);
-    } else if ([method isEqualToString:@"system.getClasses"]) {
-        result = SpliceKit_handleSystemGetClasses(params);
-    } else if ([method isEqualToString:@"system.getMethods"]) {
-        result = SpliceKit_handleSystemGetMethods(params);
-    } else if ([method isEqualToString:@"system.callMethod"]) {
-        result = SpliceKit_handleSystemCallMethod(params);
-    } else if ([method isEqualToString:@"system.swizzle"]) {
-        result = SpliceKit_handleSystemSwizzle(params);
-    } else if ([method isEqualToString:@"system.getProperties"]) {
-        result = SpliceKit_handleSystemGetProperties(params);
-    } else if ([method isEqualToString:@"system.getProtocols"]) {
-        result = SpliceKit_handleSystemGetProtocols(params);
-    } else if ([method isEqualToString:@"system.getSuperchain"]) {
-        result = SpliceKit_handleSystemGetSuperchain(params);
-    } else if ([method isEqualToString:@"system.getIvars"]) {
-        result = SpliceKit_handleSystemGetIvars(params);
-    } else if ([method isEqualToString:@"system.callMethodWithArgs"]) {
-        result = SpliceKit_handleCallMethodWithArgs(params);
-    }
-    // object.* namespace
-    else if ([method isEqualToString:@"object.get"]) {
-        result = SpliceKit_handleObjectGet(params);
-    } else if ([method isEqualToString:@"object.release"]) {
-        result = SpliceKit_handleObjectRelease(params);
-    } else if ([method isEqualToString:@"object.list"]) {
-        result = SpliceKit_handleObjectList(params);
-    } else if ([method isEqualToString:@"object.getProperty"]) {
-        result = SpliceKit_handleGetProperty(params);
-    } else if ([method isEqualToString:@"object.setProperty"]) {
-        result = SpliceKit_handleSetProperty(params);
-    }
-    // timeline.* namespace
-    else if ([method isEqualToString:@"timeline.action"]) {
+    // Built-in methods: the rows of SpliceKitRPCTable.def. The ones below do more than
+    // `result = handler(params)` and are dispatched here; their rows carry a NULL handler
+    // and only supply metadata. Method names are unique, so the order of these checks
+    // does not change which branch a name takes.
+    SpliceKitRPCHandler builtinHandler = NULL;
+    if ([method isEqualToString:@"timeline.action"]) {
         result = SpliceKit_annotatePendingDialog(SpliceKit_handleTimelineAction(params),
-                                                 [params[@"action"] isKindOfClass:[NSString class]] ? params[@"action"] : @"");
-    } else if ([method isEqualToString:@"timeline.directAction"]) {
-        result = SpliceKit_handleDirectTimelineAction(params);
-    } else if ([method isEqualToString:@"timeline.getState"]) {
-        result = SpliceKit_handleTimelineGetState(params);
-    } else if ([method isEqualToString:@"timeline.getDetailedState"]) {
-        result = SpliceKit_handleTimelineGetDetailedState(params);
-    } else if ([method isEqualToString:@"timeline.getMarkers"]) {
-        result = SpliceKit_handleTimelineGetMarkers(params);
-    } else if ([method isEqualToString:@"timeline.setRange"]) {
-        result = SpliceKit_handleSetRange(params);
-    } else if ([method isEqualToString:@"timeline.addMarkers"]) {
-        result = SpliceKit_handleBatchAddMarkers(params);
-    } else if ([method isEqualToString:@"timeline.bladeAtTimes"]) {
-        result = SpliceKit_handleBladeAtTimes(params);
-    } else if ([method isEqualToString:@"timeline.trimClipsToBeats"]) {
-        result = SpliceKit_handleTrimClipsToBeats(params);
-    } else if ([method isEqualToString:@"timeline.assembleRandomClipsToBeats"]) {
-        result = SpliceKit_handleAssembleRandomClipsToBeats(params);
-    } else if ([method isEqualToString:@"timeline.batchActions"]) {
-        result = SpliceKit_handleBatchActions(params);
-    } else if ([method isEqualToString:@"timeline.batchExport"]) {
-        result = SpliceKit_handleBatchExport(params);
-    } else if ([method isEqualToString:@"timeline.selectItems"]) {
-        result = SpliceKit_handleTimelineSelectItems(params);
-    } else if ([method isEqualToString:@"timeline.trimClip"]) {
-        result = SpliceKit_handleTimelineTrimClip(params);
-    } else if ([method isEqualToString:@"timeline.getClipInfo"]) {
-        result = SpliceKit_handleTimelineGetClipInfo(params);
-    } else if ([method isEqualToString:@"timeline.getAudioLevels"]) {
-        result = SpliceKit_handleTimelineGetAudioLevels(params);
-    } else if ([method isEqualToString:@"timeline.captureClipFrame"]) {
-        result = SpliceKit_handleTimelineCaptureClipFrame(params);
-    } else if ([method isEqualToString:@"timeline.beginEdit"]) {
-        result = SpliceKit_handleTimelineBeginEdit(params);
-    } else if ([method isEqualToString:@"timeline.endEdit"]) {
-        result = SpliceKit_handleTimelineEndEdit(params);
-    }
-    // spine.* namespace
-    else if ([method isEqualToString:@"spine.getItems"]) {
-        result = SpliceKit_handleSpineGetItems(params);
-    } else if ([method isEqualToString:@"spine.reorder"]) {
-        result = SpliceKit_handleSpineReorder(params);
-    }
-    // playback.* namespace
-    else if ([method isEqualToString:@"playback.action"]) {
-        result = SpliceKit_handlePlayback(params);
-    } else if ([method isEqualToString:@"playback.seekToTime"]) {
-        result = SpliceKit_handlePlaybackSeek(params);
-    } else if ([method isEqualToString:@"playback.getPosition"]) {
-        result = SpliceKit_handlePlaybackGetPosition(params);
-    } else if ([method isEqualToString:@"playback.setRate"]) {
-        result = SpliceKit_handlePlaybackSetRate(params);
-    } else if ([method isEqualToString:@"playback.shuttle"]) {
-        result = SpliceKit_handlePlaybackShuttle(params);
-    }
-    // fcpxml.* namespace
-    else if ([method isEqualToString:@"fcpxml.importStatus"]) {
-        result = SpliceKit_handleFCPXMLImportStatus(params);
-    }
-    else if ([method isEqualToString:@"fcpxml.import"]) {
-        result = SpliceKit_handleFCPXMLImport(params);
-    } else if ([method isEqualToString:@"fcpxml.pasteImport"]) {
-        result = SpliceKit_handlePasteboardImportXML(params);
-    } else if ([method isEqualToString:@"otio.toFCPXML"]) {
-        result = SpliceKit_handleOTIOToFCPXML(params);
-    }
-    // effects.* namespace
-    else if ([method isEqualToString:@"effects.list"]) {
-        result = SpliceKit_handleEffectList(params);
-    } else if ([method isEqualToString:@"effects.getClipEffects"]) {
-        result = SpliceKit_handleGetClipEffects(params);
-    }
-    // transcript.* namespace
-    else if ([method isEqualToString:@"transcript.open"]) {
-        result = SpliceKit_handleTranscriptOpen(params);
-    } else if ([method isEqualToString:@"transcript.close"]) {
-        result = SpliceKit_handleTranscriptClose(params);
-    } else if ([method isEqualToString:@"transcript.getState"]) {
-        result = SpliceKit_handleTranscriptGetState(params);
-    } else if ([method isEqualToString:@"transcript.deleteWords"]) {
-        result = SpliceKit_handleTranscriptDeleteWords(params);
-    } else if ([method isEqualToString:@"transcript.moveWords"]) {
-        result = SpliceKit_handleTranscriptMoveWords(params);
-    } else if ([method isEqualToString:@"transcript.search"]) {
-        result = SpliceKit_handleTranscriptSearch(params);
-    } else if ([method isEqualToString:@"transcript.deleteSilences"]) {
-        result = SpliceKit_handleTranscriptDeleteSilences(params);
+            [params[@"action"] isKindOfClass:[NSString class]] ? params[@"action"] : @"");
     } else if ([method isEqualToString:@"transcript.clear"]) {
         SpliceKit_executeOnMainThread(^{
             [[SpliceKitTranscriptPanel sharedPanel] clearTranscript];
         });
         result = @{@"status": @"ok", @"message": @"Transcript cleared from memory and disk cache."};
-    } else if ([method isEqualToString:@"transcript.setSilenceThreshold"]) {
-        result = SpliceKit_handleTranscriptSetSilenceThreshold(params);
-    } else if ([method isEqualToString:@"transcript.setSpeaker"]) {
-        result = SpliceKit_handleTranscriptSetSpeaker(params);
-    } else if ([method isEqualToString:@"transcript.setEngine"]) {
-        result = SpliceKit_handleTranscriptSetEngine(params);
-    }
-    // captions.* namespace
-    else if ([method isEqualToString:@"captions.open"]) {
-        result = SpliceKit_handleCaptionsOpen(params);
-    } else if ([method isEqualToString:@"captions.close"]) {
-        result = SpliceKit_handleCaptionsClose(params);
-    } else if ([method isEqualToString:@"captions.getState"]) {
-        result = SpliceKit_handleCaptionsGetState(params);
-    } else if ([method isEqualToString:@"captions.getStyles"]) {
-        result = SpliceKit_handleCaptionsGetStyles(params);
-    } else if ([method isEqualToString:@"captions.setStyle"]) {
-        result = SpliceKit_handleCaptionsSetStyle(params);
-    } else if ([method isEqualToString:@"captions.setGrouping"]) {
-        result = SpliceKit_handleCaptionsSetGrouping(params);
-    } else if ([method isEqualToString:@"captions.generate"]) {
-        result = SpliceKit_handleCaptionsGenerate(params);
-    } else if ([method isEqualToString:@"captions.exportSRT"]) {
-        result = SpliceKit_handleCaptionsExportSRT(params);
-    } else if ([method isEqualToString:@"captions.exportTXT"]) {
-        result = SpliceKit_handleCaptionsExportTXT(params);
-    } else if ([method isEqualToString:@"captions.setWords"]) {
-        result = SpliceKit_handleCaptionsSetWords(params);
-    } else if ([method isEqualToString:@"captions.verify"]) {
-        result = SpliceKit_handleCaptionsVerify(params);
-    } else if ([method isEqualToString:@"captions.cleanup"]) {
-        result = SpliceKit_handleCaptionsCleanup(params);
-    }
-    // native captions (FFAnchoredCaption objects in caption lane)
-    else if ([method isEqualToString:@"nativeCaptions.generate"]) {
-        result = SpliceKit_handleNativeCaptionsGenerate(params);
-    } else if ([method isEqualToString:@"nativeCaptions.verify"]) {
-        result = SpliceKit_handleNativeCaptionsVerify(params);
-    } else if ([method isEqualToString:@"nativeCaptions.remove"]) {
-        result = SpliceKit_handleNativeCaptionsRemove(params);
-    }
-    // scene detection
-    else if ([method isEqualToString:@"scene.detect"]) {
-        result = SpliceKit_handleDetectSceneChanges(params);
-    }
-    // effects browse/apply
-    else if ([method isEqualToString:@"effects.listAvailable"]) {
-        result = SpliceKit_handleEffectsListAvailable(params);
-    } else if ([method isEqualToString:@"effects.apply"]) {
-        result = SpliceKit_handleEffectsApply(params);
-    } else if ([method isEqualToString:@"titles.insert"]) {
-        result = SpliceKit_handleTitleInsert(params);
-    } else if ([method isEqualToString:@"stabilize.subject"]) {
-        result = SpliceKit_handleSubjectStabilize(params);
-    }
-    // transitions.* namespace
-    else if ([method isEqualToString:@"transitions.list"]) {
-        result = SpliceKit_handleTransitionsList(params);
-    } else if ([method isEqualToString:@"transitions.apply"]) {
-        result = SpliceKit_handleTransitionsApply(params);
-    }
-    // command.* namespace (command palette)
-    else if ([method isEqualToString:@"command.show"]) {
-        result = SpliceKit_handleCommandShow(params);
-    } else if ([method isEqualToString:@"command.hide"]) {
-        result = SpliceKit_handleCommandHide(params);
-    } else if ([method isEqualToString:@"command.search"]) {
-        result = SpliceKit_handleCommandSearch(params);
-    } else if ([method isEqualToString:@"command.execute"]) {
-        result = SpliceKit_handleCommandExecute(params);
-    } else if ([method isEqualToString:@"command.ai"]) {
-        result = SpliceKit_handleCommandAI(params);
-    } else if ([method isEqualToString:@"command.aiGemma"]) {
-        result = SpliceKit_handleCommandAIGemma(params);
-    } else if ([method isEqualToString:@"command.aiAppleAgentic"]) {
-        result = SpliceKit_handleCommandAIAppleAgentic(params);
-    }
-    // liveCam.* namespace
-    else if ([method isEqualToString:@"liveCam.show"]) {
-        result = SpliceKit_handleLiveCamShow(params);
-    } else if ([method isEqualToString:@"liveCam.hide"]) {
-        result = SpliceKit_handleLiveCamHide(params);
-    } else if ([method isEqualToString:@"liveCam.status"]) {
-        result = SpliceKit_handleLiveCamStatus(params);
-    }
-    // dualTimeline.* namespace
-    else if ([method isEqualToString:@"dualTimeline.status"]) {
-        result = SpliceKit_handleDualTimelineStatus(params);
-    } else if ([method isEqualToString:@"dualTimeline.open"]) {
-        result = SpliceKit_handleDualTimelineOpen(params);
-    } else if ([method isEqualToString:@"dualTimeline.syncRoot"]) {
-        result = SpliceKit_handleDualTimelineSyncRoot(params);
-    } else if ([method isEqualToString:@"dualTimeline.openSelectedInSecondary"]) {
-        result = SpliceKit_handleDualTimelineOpenSelectedInSecondary(params);
-    } else if ([method isEqualToString:@"dualTimeline.focus"]) {
-        result = SpliceKit_handleDualTimelineFocus(params);
-    } else if ([method isEqualToString:@"dualTimeline.close"]) {
-        result = SpliceKit_handleDualTimelineClose(params);
-    } else if ([method isEqualToString:@"dualTimeline.togglePanel"]) {
-        result = SpliceKit_handleDualTimelineTogglePanel(params);
-    }
-    // browser.* namespace
-    else if ([method isEqualToString:@"browser.listClips"]) {
-        result = SpliceKit_handleBrowserListClips(params);
-    } else if ([method isEqualToString:@"browser.appendClip"]) {
-        result = SpliceKit_handleBrowserAppendClip(params);
-    } else if ([method isEqualToString:@"browser.insertClip"]) {
-        result = SpliceKit_handleBrowserInsertClip(params);
-    } else if ([method isEqualToString:@"browser.connectClip"]) {
-        result = SpliceKit_handleBrowserConnectClip(params);
-    } else if ([method isEqualToString:@"browser.placeClip"]) {
-        result = SpliceKit_handleBrowserPlaceClipEdit(params);
-    } else if ([method isEqualToString:@"media.importFile"]) {
-        result = SpliceKit_handleMediaImportFile(params);
-    } else if ([method isEqualToString:@"media.removeClip"]) {
-        result = SpliceKit_handleMediaRemoveClip(params);
-    }
-    // menu.* namespace
-    else if ([method isEqualToString:@"menu.execute"]) {
-        result = SpliceKit_handleMenuExecute(params);
-    } else if ([method isEqualToString:@"menu.list"]) {
-        result = SpliceKit_handleMenuList(params);
-    }
-    // inspector.* namespace
-    else if ([method isEqualToString:@"inspector.get"]) {
-        result = SpliceKit_handleInspectorGet(params);
-    } else if ([method isEqualToString:@"inspector.set"]) {
-        result = SpliceKit_handleInspectorSet(params);
-    } else if ([method isEqualToString:@"inspector.getTitle"]) {
-        result = SpliceKit_handleInspectorGetTitle(params);
-    }
-    // view.* namespace
-    else if ([method isEqualToString:@"view.toggle"]) {
-        result = SpliceKit_handleViewToggle(params);
-    } else if ([method isEqualToString:@"view.workspace"]) {
-        result = SpliceKit_handleWorkspace(params);
-    }
-    // roles.* namespace
-    else if ([method isEqualToString:@"roles.assign"]) {
-        result = SpliceKit_handleRolesAssign(params);
-    }
-    // mixer.* namespace
-    else if ([method isEqualToString:@"mixer.getState"]) {
-        result = SpliceKit_handleMixerGetState(params);
-    } else if ([method isEqualToString:@"mixer.setVolume"]) {
-        result = SpliceKit_handleMixerSetVolume(params);
-    } else if ([method isEqualToString:@"mixer.setSolo"]) {
-        result = SpliceKit_handleMixerSetSolo(params);
-    } else if ([method isEqualToString:@"mixer.setMute"]) {
-        result = SpliceKit_handleMixerSetMute(params);
-    } else if ([method isEqualToString:@"mixer.applyBusEffect"]) {
-        result = SpliceKit_handleMixerApplyBusEffect(params);
-    } else if ([method isEqualToString:@"mixer.openBusEffect"]) {
-        result = SpliceKit_handleMixerOpenBusEffect(params);
-    } else if ([method isEqualToString:@"mixer.setBusEffectEnabled"]) {
-        result = SpliceKit_handleMixerSetBusEffectEnabled(params);
-    } else if ([method isEqualToString:@"mixer.removeBusEffect"]) {
-        result = SpliceKit_handleMixerRemoveBusEffect(params);
-    } else if ([method isEqualToString:@"mixer.volumeBegin"]) {
-        result = SpliceKit_handleMixerVolumeBegin(params);
-    } else if ([method isEqualToString:@"mixer.volumeEnd"]) {
-        result = SpliceKit_handleMixerVolumeEnd(params);
-    } else if ([method isEqualToString:@"mixer.setAllVolumes"]) {
-        result = SpliceKit_handleMixerSetAllVolumes(params);
-    }
-    // audioBusDiagnostics.* namespace
-    else if ([method hasPrefix:@"audioBusDiagnostics."]) {
-        result = SpliceKit_handleAudioBusDiagnostics(method, params);
-    }
-    // share.* namespace
-    else if ([method isEqualToString:@"share.export"]) {
-        result = SpliceKit_handleShareExport(params);
-    }
-    // project.* namespace
-    else if ([method isEqualToString:@"project.create"]) {
+    } else if ([method isEqualToString:@"project.create"]) {
         result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleProjectCreate(params), @"createProject");
     } else if ([method isEqualToString:@"project.createEvent"]) {
         result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleEventCreate(params), @"createEvent");
     } else if ([method isEqualToString:@"project.createLibrary"]) {
         result = SpliceKit_annotateCreateActionFilePanelPending(SpliceKit_handleLibraryCreate(params), @"createLibrary");
-    } else if ([method isEqualToString:@"project.open"]) {
-        result = SpliceKit_handleProjectOpen(params);
+    } else if ((builtinHandler = SpliceKit_builtinRPCHandler(method))) {
+        result = builtinHandler(params);
     }
-    // urlImport.* namespace
-    else if ([method isEqualToString:@"urlImport.start"]) {
-        result = SpliceKitURLImport_start(params);
-    } else if ([method isEqualToString:@"urlImport.import"]) {
-        result = SpliceKitURLImport_importSync(params);
-    } else if ([method isEqualToString:@"urlImport.status"]) {
-        result = SpliceKitURLImport_status(params);
-    } else if ([method isEqualToString:@"urlImport.cancel"]) {
-        result = SpliceKitURLImport_cancel(params);
-    }
-    // timeline lane selection
-    else if ([method isEqualToString:@"timeline.selectClipInLane"]) {
-        result = SpliceKit_handleSelectClipAtPlayheadLane(params);
-    }
-    // viewer capture
-    else if ([method isEqualToString:@"viewer.capture"]) {
-        result = SpliceKit_handleCaptureViewer(params);
-    }
-    // timeline capture
-    else if ([method isEqualToString:@"timeline.capture"]) {
-        result = SpliceKit_handleCaptureTimeline(params);
-    }
-    // inspector capture
-    else if ([method isEqualToString:@"inspector.capture"]) {
-        result = SpliceKit_handleCaptureInspector(params);
-    }
-    // fcpxml export (programmatic, no dialog)
-    else if ([method isEqualToString:@"fcpxml.export"]) {
-        result = SpliceKit_handleFCPXMLExport(params);
-    }
-    // tool.* namespace
-    else if ([method isEqualToString:@"tool.select"]) {
-        result = SpliceKit_handleToolSelect(params);
-    }
-    // dialog.* namespace
-    else if ([method isEqualToString:@"dialog.detect"]) {
-        result = SpliceKit_handleDialogDetect(params);
-    } else if ([method isEqualToString:@"dialog.click"]) {
-        result = SpliceKit_handleDialogClick(params);
-    } else if ([method isEqualToString:@"dialog.fill"]) {
-        result = SpliceKit_handleDialogFill(params);
-    } else if ([method isEqualToString:@"dialog.checkbox"]) {
-        result = SpliceKit_handleDialogCheckbox(params);
-    } else if ([method isEqualToString:@"dialog.popup"]) {
-        result = SpliceKit_handleDialogPopup(params);
-    } else if ([method isEqualToString:@"dialog.dismiss"]) {
-        result = SpliceKit_handleDialogDismiss(params);
-    }
-    // viewer.* namespace
-    else if ([method isEqualToString:@"viewer.getZoom"]) {
-        result = SpliceKit_handleViewerGetZoom(params);
-    } else if ([method isEqualToString:@"viewer.setZoom"]) {
-        result = SpliceKit_handleViewerSetZoom(params);
-    }
-    // backgroundRender.* namespace
-    else if ([method isEqualToString:@"backgroundRender.status"]) {
-        result = SpliceKit_handleBackgroundRenderStatus(params);
-    } else if ([method isEqualToString:@"backgroundRender.control"]) {
-        result = SpliceKit_handleBackgroundRenderControl(params);
-    }
-    // options.* namespace
-    else if ([method isEqualToString:@"options.get"]) {
-        result = SpliceKit_handleOptionsGet(params);
-    } else if ([method isEqualToString:@"options.set"]) {
-        result = SpliceKit_handleOptionsSet(params);
-    }
-    // beats.* namespace
-    else if ([method isEqualToString:@"beats.detect"]) {
-        result = SpliceKit_handleBeatsDetect(params);
-    }
-    // flexmusic.* namespace
-    else if ([method isEqualToString:@"flexmusic.listSongs"]) {
-        result = SpliceKit_handleFlexMusicListSongs(params);
-    } else if ([method isEqualToString:@"flexmusic.getSong"]) {
-        result = SpliceKit_handleFlexMusicGetSong(params);
-    } else if ([method isEqualToString:@"flexmusic.getTiming"]) {
-        result = SpliceKit_handleFlexMusicGetTiming(params);
-    } else if ([method isEqualToString:@"flexmusic.renderToFile"]) {
-        result = SpliceKit_handleFlexMusicRender(params);
-    } else if ([method isEqualToString:@"flexmusic.addToTimeline"]) {
-        result = SpliceKit_handleFlexMusicAddToTimeline(params);
-    }
-    // montage.* namespace
-    else if ([method isEqualToString:@"montage.analyzeClips"]) {
-        result = SpliceKit_handleMontageAnalyze(params);
-    } else if ([method isEqualToString:@"montage.planEdit"]) {
-        result = SpliceKit_handleMontagePlan(params);
-    } else if ([method isEqualToString:@"montage.assemble"]) {
-        result = SpliceKit_handleMontageAssemble(params);
-    } else if ([method isEqualToString:@"montage.auto"]) {
-        result = SpliceKit_handleMontageAuto(params);
-    }
-    // sections.* namespace (custom timeline bar)
-    else if ([method isEqualToString:@"sections.show"]) {
-        result = SpliceKit_handleSectionsShow(params);
-    } else if ([method isEqualToString:@"sections.hide"]) {
-        result = SpliceKit_handleSectionsHide(params);
-    } else if ([method isEqualToString:@"sections.get"]) {
-        result = SpliceKit_handleSectionsGet(params);
-    }
-    // structure.* namespace
-    else if ([method isEqualToString:@"structure.generateCaptions"]) {
-        result = SpliceKit_serverStructureGenerateCaptions(params);
-    } else if ([method isEqualToString:@"structure.remove"]) {
-        result = SpliceKit_serverStructureRemove(params);
-    } else if ([method isEqualToString:@"structure.toggle"]) {
-        result = SpliceKit_handleStructureToggle(params);
-    }
-    // debug.* namespace
-    else if ([method isEqualToString:@"debug.getConfig"]) {
-        result = SpliceKit_handleDebugGetConfig(params);
-    } else if ([method isEqualToString:@"debug.setConfig"]) {
-        result = SpliceKit_handleDebugSetConfig(params);
-    } else if ([method isEqualToString:@"debug.resetConfig"]) {
-        result = SpliceKit_handleDebugResetConfig(params);
-    } else if ([method isEqualToString:@"debug.enablePreset"]) {
-        result = SpliceKit_handleDebugEnablePreset(params);
-    } else if ([method isEqualToString:@"debug.startFramerateMonitor"]) {
-        result = SpliceKit_handleDebugStartFramerateMonitor(params);
-    } else if ([method isEqualToString:@"debug.stopFramerateMonitor"]) {
-        result = SpliceKit_handleDebugStopFramerateMonitor(params);
-    } else if ([method isEqualToString:@"debug.dumpRuntimeMetadata"]) {
-        result = SpliceKit_handleDumpRuntimeMetadata(params);
-    } else if ([method isEqualToString:@"debug.listLoadedImages"]) {
-        result = SpliceKit_handleListLoadedImages(params);
-    } else if ([method isEqualToString:@"debug.getImageSections"]) {
-        result = SpliceKit_handleGetImageSections(params);
-    } else if ([method isEqualToString:@"debug.getImageSymbols"]) {
-        result = SpliceKit_handleGetImageSymbols(params);
-    } else if ([method isEqualToString:@"debug.getNotificationNames"]) {
-        result = SpliceKit_handleGetNotificationNames(params);
-    }
-    // debug tools: tracing, watching, crash handling, threads, eval, plugins, notifications
-    else if ([method isEqualToString:@"debug.traceMethod"]) {
-        result = SpliceKit_handleDebugTraceMethod(params);
-    } else if ([method isEqualToString:@"debug.watch"]) {
-        result = SpliceKit_handleDebugWatch(params);
-    } else if ([method isEqualToString:@"debug.crashHandler"]) {
-        result = SpliceKit_handleDebugCrashHandler(params);
-    } else if ([method isEqualToString:@"debug.threads"]) {
-        result = SpliceKit_handleDebugThreads(params);
-    } else if ([method isEqualToString:@"debug.eval"]) {
-        result = SpliceKit_handleDebugEval(params);
-    } else if ([method isEqualToString:@"debug.loadPlugin"]) {
-        result = SpliceKit_handleDebugLoadPlugin(params);
-    } else if ([method isEqualToString:@"debug.observeNotification"]) {
-        result = SpliceKit_handleDebugObserveNotification(params);
-    } else if ([method isEqualToString:@"debug.breakpoint"]) {
-        result = SpliceKit_handleDebugBreakpoint(params);
-    }
-    // lua.* namespace — embedded Lua scripting engine
-    else if ([method isEqualToString:@"lua.execute"]) {
-        result = SpliceKit_handleLuaExecute(params);
-    } else if ([method isEqualToString:@"lua.executeFile"]) {
-        result = SpliceKit_handleLuaExecuteFile(params);
-    } else if ([method isEqualToString:@"lua.reset"]) {
-        result = SpliceKit_handleLuaReset(params);
-    } else if ([method isEqualToString:@"lua.getState"]) {
-        result = SpliceKit_handleLuaGetState(params);
-    } else if ([method isEqualToString:@"lua.watch"]) {
-        result = SpliceKit_handleLuaWatch(params);
-    }
-    // plugin.* namespace — plugin introspection
-    else if ([method isEqualToString:@"plugin.listMethods"]) {
-        result = SpliceKit_handlePluginListMethods(params);
-    } else if ([method isEqualToString:@"plugin.list"]) {
-        result = SpliceKit_handlePluginList(params);
+    // audioBusDiagnostics.* namespace (prefix route; no table row)
+    else if ([method hasPrefix:@"audioBusDiagnostics."]) {
+        result = SpliceKit_handleAudioBusDiagnostics(method, params);
     }
     // Fallthrough: check plugin handler registry before returning "method not found"
     else {
