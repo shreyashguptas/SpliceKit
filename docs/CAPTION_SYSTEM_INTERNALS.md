@@ -94,11 +94,11 @@ caption system doesn't support.
 
 | File | Role |
 |------|------|
-| `Sources/SpliceKitCaptionPanel.h` | Interface, enums, model classes |
-| `Sources/SpliceKitCaptionPanel.m` | Full implementation (~1800 lines) |
-| `Sources/SpliceKitTranscriptPanel.h` | Transcript word model, engine enum |
-| `Sources/SpliceKitTranscriptPanel.m` | Transcription engine, word extraction |
-| `Sources/SpliceKitServer.m` | RPC handlers (lines 4107-4242, dispatch 15594-15614) |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.h` | Interface, enums, model classes |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.m` | Full implementation (~1800 lines) |
+| `Sources/Panels/Transcript/SpliceKitTranscriptPanel.h` | Transcript word model, engine enum |
+| `Sources/Panels/Transcript/SpliceKitTranscriptPanel.m` | Transcription engine, word extraction |
+| `Sources/Bridge/SpliceKitServer.m` | RPC handlers (lines 4107-4242, dispatch 15594-15614) |
 | `mcp/server.py` | MCP tool definitions (lines 3362-3625) |
 
 ---
@@ -1581,12 +1581,12 @@ static NSString *SpliceKitCaption_escapeXML(NSString *str) {
 
 | File | Lines | Content |
 |------|-------|---------|
-| `Sources/SpliceKitCaptionPanel.h` | 155 | Interface, enums, SpliceKitCaptionStyle, SpliceKitCaptionSegment, SpliceKitCaptionPanel |
-| `Sources/SpliceKitCaptionPanel.m` | 1798 | Full implementation: UI, style presets, segmentation, FCPXML generation, import, export |
-| `Sources/SpliceKitTranscriptPanel.h` | 102 | SpliceKitTranscriptWord model, engine enum, panel interface |
-| `Sources/SpliceKitTranscriptPanel.m` | ~4000 | Transcription engines, word extraction, silence detection |
-| `Sources/SpliceKitServer.m:4107-4242` | 136 | RPC handlers for `captions.*` namespace |
-| `Sources/SpliceKitServer.m:15594-15614` | 21 | RPC dispatch table for `captions.*` |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.h` | 155 | Interface, enums, SpliceKitCaptionStyle, SpliceKitCaptionSegment, SpliceKitCaptionPanel |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.m` | 1798 | Full implementation: UI, style presets, segmentation, FCPXML generation, import, export |
+| `Sources/Panels/Transcript/SpliceKitTranscriptPanel.h` | 102 | SpliceKitTranscriptWord model, engine enum, panel interface |
+| `Sources/Panels/Transcript/SpliceKitTranscriptPanel.m` | ~4000 | Transcription engines, word extraction, silence detection |
+| `Sources/Bridge/SpliceKitServer.m:4107-4242` | 136 | RPC handlers for `captions.*` namespace |
+| `Sources/Bridge/SpliceKitServer.m:15594-15614` | 21 | RPC dispatch table for `captions.*` |
 | `mcp/server.py:3362-3625` | 264 | MCP tool definitions for external API |
 
 ### Line-level index of key functions in SpliceKitCaptionPanel.m
@@ -3169,9 +3169,9 @@ or exceeds legacy caption extension.
 
 | File | Action | Purpose |
 |------|--------|---------|
-| `Sources/SpliceKitCaptionPanel.m` | Modify | Default changes, pasteboard import, animation generation, background box, template support |
-| `Sources/SpliceKitCaptionPanel.h` | Modify | New properties (showBackground, templatePath), new enum values |
-| `Sources/SpliceKitServer.m` | Modify | New RPC methods for template management |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.m` | Modify | Default changes, pasteboard import, animation generation, background box, template support |
+| `Sources/Panels/Captions/SpliceKitCaptionPanel.h` | Modify | New properties (showBackground, templatePath), new enum values |
+| `Sources/Bridge/SpliceKitServer.m` | Modify | New RPC methods for template management |
 | `mcp/server.py` | Modify | New MCP tools, updated defaults |
 | `templates/Bold Pop.motn` | Create | Motion project for Bold Pop template |
 | `templates/Neon Glow.motn` | Create | Motion project for Neon Glow template |

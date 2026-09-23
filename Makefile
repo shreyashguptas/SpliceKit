@@ -17,7 +17,8 @@ DSYM = $(OUTPUT).dSYM
 SOURCES = $(addprefix Sources/, $(shell grep -v '^\#' Sources/SOURCES.txt | grep -v '^$$'))
 # Every object depends on every header: they are small, and a changed struct or
 # prototype in any of them must rebuild its users.
-HEADERS = $(wildcard Sources/*.h)
+HEADERS = $(shell find Sources -name '*.h')
+INCLUDES = $(addprefix -I ,$(sort $(dir $(HEADERS))))
 OBJC_SOURCES = $(filter %.m,$(SOURCES))
 OBJCXX_SOURCES = $(filter %.mm,$(SOURCES))
 OBJS = $(patsubst Sources/%.m,$(BUILD_DIR)/obj/%.o,$(OBJC_SOURCES)) \
@@ -287,12 +288,14 @@ $(LUA_LIB): $(LUA_OBJS) | $(BUILD_DIR)
 	@echo "Built: $(LUA_LIB)"
 
 $(BUILD_DIR)/obj/%.o: Sources/%.m $(HEADERS) | $(BUILD_DIR)/obj
+	@mkdir -p $(@D)
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
-		-I Sources -I $(LUA_DIR) -c $< -o $@
+		$(INCLUDES) -I $(LUA_DIR) -c $< -o $@
 
 $(BUILD_DIR)/obj/%.o: Sources/%.mm $(HEADERS) | $(BUILD_DIR)/obj
+	@mkdir -p $(@D)
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
-		-I Sources -I $(LUA_DIR) -c $< -o $@
+		$(INCLUDES) -I $(LUA_DIR) -c $< -o $@
 
 $(OUTPUT): $(OBJS) $(LUA_LIB) | $(BUILD_DIR)
 	$(CC) $(ARCHS) $(MIN_VERSION) $(FRAMEWORKS) $(LINKER_FLAGS) \

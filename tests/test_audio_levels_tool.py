@@ -3,7 +3,7 @@
 parameters sent to the bridge, the text rendering (summary, neighbours, cuts, skipped,
 sparklines, full detail) and the pure-Python waveform PNG. Runs without the mcp package
 through the shared fake loader, so the image is checked by decoding the PNG bytes, not by
-the SDK. The fixtures mirror the shapes Sources/SpliceKitAudioLevels.m emits."""
+the SDK. The fixtures mirror the shapes Sources/Audio/SpliceKitAudioLevels.m emits."""
 import json
 import struct
 import sys

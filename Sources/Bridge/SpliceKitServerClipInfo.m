@@ -102,7 +102,7 @@ static NSURL *SpliceKit_clipInfoFirstURL(id value) {
 }
 
 // Source media file for a clip, mirroring -[SpliceKitTranscriptPanel getMediaURLForClip:]
-// (Sources/SpliceKitTranscriptPanel.m, not exported in its header).
+// (Sources/Panels/Transcript/SpliceKitTranscriptPanel.m, not exported in its header).
 // *outRepresentation is the media representation in FCP's words:
 //   "original"  -- media.originalMediaURL / media.originalMediaRep / clipRef.assets.originalMediaURL
 //   "optimized" / "proxy" / "original" -- media.currentRep (whichever FCP is using), classified

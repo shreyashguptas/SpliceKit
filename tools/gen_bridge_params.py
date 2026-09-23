@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Sources/SpliceKitBridgeParams.m: the parameters each bridge RPC reads.
+"""Generate Sources/Bridge/SpliceKitBridgeParams.m: the parameters each bridge RPC reads.
 
 bridge.describe used to give a method's safety tag and a one-line summary only, so
 a parameter such as fcpxml.import's `xml` (and the absence of `path`) was found by
@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCES = REPO / "Sources"
-OUTPUT = SOURCES / "SpliceKitBridgeParams.m"
+OUTPUT = SOURCES / "Bridge" / "SpliceKitBridgeParams.m"
 
 DISPATCH_RE = re.compile(
     r'\[method isEqualToString:@"([^"]+)"\]\)\s*\{\s*result\s*=\s*(SpliceKit_\w+)\(params\)')
@@ -116,7 +116,7 @@ def objc_string(text: str) -> str:
 
 def generate() -> str:
     sources = {p: p.read_text(encoding="utf-8") for p in sorted(SOURCES.rglob("*.m"))}
-    server = sources[SOURCES / "SpliceKitServer.m"]
+    server = sources[SOURCES / "Bridge" / "SpliceKitServer.m"]
     start = server.index("NSDictionary *SpliceKit_handleRequest")
     end = server.index("#pragma mark - Client Handler", start)
     dispatch = DISPATCH_RE.findall(server[start:end])

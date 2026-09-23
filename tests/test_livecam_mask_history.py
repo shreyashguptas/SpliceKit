@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # SpliceKitLiveCam.m and the files split out of it (SpliceKitLiveCam*.m).
-SOURCES = sorted((ROOT / "Sources").glob("SpliceKitLiveCam*.m"))
+SOURCES = sorted((ROOT / "Sources").rglob("SpliceKitLiveCam*.m"))
 SOAK_SOURCE = ROOT / "tests" / "livecam_mask_history_soak.m"
 
 

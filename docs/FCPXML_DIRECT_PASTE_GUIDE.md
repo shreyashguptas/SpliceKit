@@ -230,9 +230,9 @@ Version-specific UTI alone (without generic) does NOT enable paste.
 
 | File | What |
 |------|------|
-| `Sources/SpliceKitServer.m` | Swizzle implementation (`SpliceKit_swizzled_pasteAnchored`) |
-| `Sources/SpliceKit.h` | Function declaration (`SpliceKit_installFCPXMLPasteSwizzle`) |
-| `Sources/SpliceKit.m` | Install call in `SpliceKit_appDidLaunch()` |
+| `Sources/Bridge/SpliceKitServer.m` | Swizzle implementation (`SpliceKit_swizzled_pasteAnchored`) |
+| `Sources/Core/SpliceKit.h` | Function declaration (`SpliceKit_installFCPXMLPasteSwizzle`) |
+| `Sources/Core/SpliceKit.m` | Install call in `SpliceKit_appDidLaunch()` |
 
 ## Tested Approaches (What Didn't Work)
 

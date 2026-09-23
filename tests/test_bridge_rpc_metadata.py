@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SERVER = REPO_ROOT / "Sources" / "SpliceKitServer.m"
-METADATA = REPO_ROOT / "Sources" / "SpliceKitBridgeMetadata.m"
+SERVER = REPO_ROOT / "Sources" / "Bridge" / "SpliceKitServer.m"
+METADATA = REPO_ROOT / "Sources" / "Bridge" / "SpliceKitBridgeMetadata.m"
 
 METHOD_DISPATCH_RE = re.compile(r'\[method isEqualToString:@"([^"]+)"\]')
 METADATA_KEY_RE = re.compile(r'@"([^"]+)":\s*meta\(')

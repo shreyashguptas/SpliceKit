@@ -6,7 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCES = REPO_ROOT / "Sources"
-MIXER_PANEL = SOURCES / "SpliceKitMixerPanel.m"
+MIXER_PANEL = SOURCES / "Panels" / "SpliceKitMixerPanel.m"
 
 
 def source(path):

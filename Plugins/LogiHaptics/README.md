@@ -17,7 +17,7 @@ onto the **Logitech MX Master 4** mouse.
                                                               └──────────────┘
 ```
 
-- **SpliceKit** (in `Sources/SpliceKitHapticBridge.m`) swizzles
+- **SpliceKit** (in `Sources/Haptics/SpliceKitHapticBridge.m`) swizzles
   `-[NSHapticFeedbackPerformer performFeedbackPattern:performanceTime:]`,
   walks the call stack with `backtrace(3)` to identify which FCP function
   triggered the haptic, and broadcasts a typed event:
@@ -63,7 +63,7 @@ then `open loupedeck:plugin/FCPHaptics/reload`s the running service so the
 plugin shows up live without restarting Logi Options+.
 
 The matching SpliceKit changes ship in the main `make deploy` build (the
-swizzle module is `Sources/SpliceKitHapticBridge.m`, registered through
+swizzle module is `Sources/Haptics/SpliceKitHapticBridge.m`, registered through
 `SOURCES.txt` and installed from `appDidLaunch` in `SpliceKit.m`).
 
 ## Testing

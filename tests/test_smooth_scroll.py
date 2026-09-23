@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLAYHEAD_SOURCE = ROOT / "Sources" / "SpliceKitTimelinePlayheadOverlay.m"
-INTERACTION_SOURCE = ROOT / "Sources" / "SpliceKitTimelineInteractionSuspend.m"
+PLAYHEAD_SOURCE = ROOT / "Sources" / "Timeline" / "SpliceKitTimelinePlayheadOverlay.m"
+INTERACTION_SOURCE = ROOT / "Sources" / "Timeline" / "SpliceKitTimelineInteractionSuspend.m"
 
 
 class SmoothScrollRegressionTests(unittest.TestCase):
