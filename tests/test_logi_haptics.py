@@ -17,11 +17,15 @@ class LogiHapticsIntegrationTests(unittest.TestCase):
 
     def test_native_sources_are_built_and_installed(self):
         sources = self.read("Sources/SOURCES.txt")
-        initializer = self.read("Sources/SpliceKit.m")
+        # The install calls live in the launch sequence; search every source file so
+        # the test does not depend on which file that code sits in.
+        initializer = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted((ROOT / "Sources").rglob("*.m"))
+        )
         for filename in ("SpliceKitHapticBridge.m", "SpliceKitHapticSnapEmitters.m"):
             self.assertIn(filename, sources)
-        self.assertIn("SpliceKit_installHapticBridge", initializer)
-        self.assertIn("SpliceKit_installHapticSnapEmitters", initializer)
+        self.assertIn("SpliceKit_installHapticBridge();", initializer)
+        self.assertIn("SpliceKit_installHapticSnapEmitters();", initializer)
 
     def test_event_contract_matches_plugin_and_mappings(self):
         plugin = self.read(

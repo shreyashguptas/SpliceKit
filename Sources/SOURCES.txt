@@ -3,6 +3,8 @@
 # One filename per line (relative to Sources/). Blank lines and # comments ignored.
 
 SpliceKit.m
+SpliceKitOTIO.m
+SpliceKitMenus.m
 SpliceKitDualTimeline.m
 SpliceKitDualTimelineDrag.m
 SpliceKitRuntime.m
@@ -55,6 +57,13 @@ SpliceKitTranscriptPanel.m
 SpliceKitTranscriptDiagnostics.m
 SpliceKitCaptionPanel.m
 SpliceKitCommandPalette.m
+SpliceKitCommandPaletteViews.m
+SpliceKitCommandPalette+Registry.m
+SpliceKitCommandPalette+Dictation.m
+SpliceKitCommandPalette+Panels.m
+SpliceKitCommandPalette+AppleAI.m
+SpliceKitCommandPalette+AIPostProcess.m
+SpliceKitCommandPalette+Gemma.m
 SpliceKitDebugUI.m
 SpliceKitStructureBlocks.m
 SpliceKitSectionsBar.m
@@ -68,6 +77,12 @@ SpliceKitTimelineInteractionSuspend.m
 SpliceKitTimelinePlayheadOverlay.m
 SpliceKitTimelinePerfMode.m
 SpliceKitURLImport.m
+SpliceKitURLImportMedia.m
+SpliceKitURLImportProviders.m
+SpliceKitURLImport+FinalCut.m
+SpliceKitURLImport+Normalize.m
+SpliceKitURLImportRemux.m
+SpliceKitURLImportHooks.m
 SpliceKitLiveCam.m
 SpliceKitHapticBridge.m
 SpliceKitHapticSnapEmitters.m
