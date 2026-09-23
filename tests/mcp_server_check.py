@@ -240,8 +240,12 @@ class FakeBridge(threading.Thread):
                     "progress": {"completed": 1, "total": 1}, "results": [], "matches": [],
                     "deleted": 0, "moved": 0}
         if method.startswith("captions."):
-            return {"status": "complete", "state": "complete", "segments": [], "words": [], "styles": [],
-                    "presets": [], "count": 0, "progress": 1.0, "titles": [], "verified": 0}
+            r = {"status": "complete", "state": "complete", "segments": [], "words": [], "styles": [],
+                 "presets": [], "count": 0, "progress": 1.0, "titles": [], "verified": 0}
+            if method == "captions.getState":
+                # generate_captions waits for the run's outcome here.
+                r["lastGenerateResult"] = {"status": "ok", "captionCount": 0}
+            return r
         if method.startswith("debug."):
             return {"status": "ok", "config": {}, "threads": [], "log": [], "entries": [], "count": 0,
                     "result": None, "images": [], "symbols": [], "sections": {}, "classes": {}, "notifications": []}

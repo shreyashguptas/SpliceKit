@@ -16,8 +16,22 @@
 //
 
 NSDictionary *SpliceKit_handleCaptionsOpen(NSDictionary *params) {
-    NSString *fileURL = params[@"fileURL"];
+    // The caption panel transcribes the timeline only: its words carry timeline times and
+    // the clips they came from, which is what generate places the titles by. A bare file has
+    // neither, so fileURL is refused instead of being ignored (it used to start a timeline
+    // transcription). A file's words: transcript.open with fileURL.
+    id fileURL = params[@"fileURL"];
+    if (fileURL && fileURL != [NSNull null]
+        && !([fileURL isKindOfClass:[NSString class]] && [(NSString *)fileURL length] == 0)) {
+        return @{@"error": @"captions.open does not transcribe a file: the caption panel only "
+                            @"transcribes the clips on the open timeline. Leave fileURL out, or "
+                            @"transcribe the file with transcript.open (fileURL) instead."};
+    }
     NSString *presetID = params[@"style"];
+    // Discard the persisted captions and transcribe the timeline again (the timeline may
+    // have changed since they were made); the counterpart of transcript.open's flag.
+    BOOL forceRetranscribe = [params[@"forceRetranscribe"] respondsToSelector:@selector(boolValue)]
+        && [params[@"forceRetranscribe"] boolValue];
     __block BOOL startedTranscription = NO;
     __block BOOL restoredCaptions = NO;
     __block BOOL alreadyTranscribing = NO;
@@ -29,7 +43,9 @@ NSDictionary *SpliceKit_handleCaptionsOpen(NSDictionary *params) {
             if (style) [panel setStyle:style];
         }
         [panel showPanel];
-        if (fileURL) {
+        if (panel.status == SpliceKitCaptionStatusTranscribing) {
+            alreadyTranscribing = YES;
+        } else if (forceRetranscribe) {
             [panel transcribeTimeline];
             startedTranscription = YES;
         } else if (panel.status == SpliceKitCaptionStatusReady && panel.words.count > 0) {
@@ -156,11 +172,15 @@ NSDictionary *SpliceKit_handleCaptionsGenerate(NSDictionary *params) {
 
     // Run on background thread — generateCaptions touches FCP on the main thread
     // as needed, then stores the final result on the caption panel for getState.
+    // The previous run's result goes first: getState shows lastGenerateResult again only
+    // when this run has finished, which is what the MCP tool waits for.
+    [panel clearLastGenerateResult];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *genResult = [panel generateCaptions];
         SpliceKit_log(@"[Captions] Generate result: %@", genResult);
     });
-    return @{@"status": @"ok", @"message": @"Caption generation started. Check captions.getState for results."};
+    return @{@"status": @"ok", @"async": @YES,
+             @"message": @"Caption generation started. captions.getState reports lastGenerateResult when it has finished."};
 }
 
 NSDictionary *SpliceKit_handleCaptionsExportSRT(NSDictionary *params) {
@@ -526,8 +546,38 @@ static id SpliceKit_libraryForSequence(id sequence, id libraryItem) {
 // Move one library item (a project record, or an event record we created ourselves) to
 // the library trash. FCP 12.3's FFLibrary answers all three of these; they are tried in
 // order because the action variant is the one that shows up in Edit > Undo.
+// `undoable` NO tries the action variant last: a pipeline that removes its own scratch
+// project straight after pasting from it (native captions, paste_fcpxml, structure
+// blocks) must leave its paste as the top undo step. With the undoable trash on top,
+// Edit > Undo first brought the scratch project back ("Undo SpliceKit Cleanup") and the
+// pasted captions stayed on the timeline.
+static BOOL SpliceKit_trashLibraryItemWithUndo(id library, id libraryItem, NSString *label, BOOL undoable);
+
 static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *label) {
+    return SpliceKit_trashLibraryItemWithUndo(library, libraryItem, label, YES);
+}
+
+static BOOL SpliceKit_trashLibraryItemQuietly(id library, id libraryItem, NSString *label) {
     if (!library || !libraryItem) return NO;
+    SEL trashSel = NSSelectorFromString(@"trashLibraryItem:immediately:error:");
+    if ([library respondsToSelector:trashSel]) {
+        NSError *error = nil;
+        BOOL ok = NO;
+        @try {
+            ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
+                library, trashSel, libraryItem, NO, &error);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[SpliceKit] trashLibraryItem raised for '%@': %@", label ?: @"?", e.reason);
+            ok = NO;
+        }
+        if (ok) return YES;
+    }
+    return SpliceKit_trashLibraryItemWithUndo(library, libraryItem, label, YES);
+}
+
+static BOOL SpliceKit_trashLibraryItemWithUndo(id library, id libraryItem, NSString *label, BOOL undoable) {
+    if (!library || !libraryItem) return NO;
+    if (!undoable) return SpliceKit_trashLibraryItemQuietly(library, libraryItem, label);
 
     // Each of the three is wrapped on its own. They are dynamic calls into Flexo, and a
     // raise from one used to unwind past the caller's loop over looseProjects/eventsToRemove,
@@ -595,7 +645,16 @@ static BOOL SpliceKit_trashLibraryItem(id library, id libraryItem, NSString *lab
     return NO;
 }
 
+// Trash a scratch project a pipeline has just pasted from, without an undo step of its
+// own (see SpliceKit_trashLibraryItemWithUndo). cleanup_temp_projects, which is an edit a
+// person asked for, uses the undoable path instead.
+static BOOL SpliceKit_deleteSequenceLibraryItemWithUndo(id sequence, BOOL undoable);
+
 BOOL SpliceKit_deleteSequenceLibraryItem(id sequence) {
+    return SpliceKit_deleteSequenceLibraryItemWithUndo(sequence, NO);
+}
+
+static BOOL SpliceKit_deleteSequenceLibraryItemWithUndo(id sequence, BOOL undoable) {
     if (!sequence) return NO;
 
     NSString *projectName = nil;
@@ -618,7 +677,7 @@ BOOL SpliceKit_deleteSequenceLibraryItem(id sequence) {
         return NO;
     }
 
-    return SpliceKit_trashLibraryItem(library, libraryItem, projectName);
+    return SpliceKit_trashLibraryItemWithUndo(library, libraryItem, projectName, undoable);
 }
 
 // Clean up stale scratch import projects (caption + song-structure FCPXML temps) and the
@@ -728,7 +787,7 @@ NSDictionary *SpliceKit_handleCaptionsCleanup(NSDictionary *params) {
             NSMutableArray *failedNames = [NSMutableArray array];
             if (!dryRun) {
                 for (NSArray *pair in looseProjects) {
-                    if (SpliceKit_deleteSequenceLibraryItem(pair[1])) {
+                    if (SpliceKit_deleteSequenceLibraryItemWithUndo(pair[1], YES)) {
                         [removedNames addObject:pair[0]];
                     } else {
                         [failedNames addObject:pair[0]];

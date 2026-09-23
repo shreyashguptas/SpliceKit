@@ -1,9 +1,10 @@
 """Tools: social media captions and native captions."""
 
 import json
+import time
 
 from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
-from ..bridge import _call_or_error, _err, bridge
+from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
 # ============================================================
@@ -16,7 +17,7 @@ from ..bridge import _call_or_error, _err, bridge
 
 
 @splicekit_tool("open_captions", LOCAL, title="Open Captions Panel")
-def open_captions(file_url: str = "", style: str = "") -> str:
+def open_captions(file_url: str = "", style: str = "", force_retranscribe: bool = False) -> str:
     """Open the social captions panel and start transcribing the timeline.
 
     Transcribes timeline audio using Parakeet (word-level timing), then lets
@@ -24,10 +25,15 @@ def open_captions(file_url: str = "", style: str = "") -> str:
     (word-by-word highlighted, animated) as FCPXML title clips.
 
     Args:
-        file_url: Optional path to a specific media file to transcribe.
-                  If empty, transcribes all clips on the current timeline.
+        file_url: Not supported. The caption panel only transcribes the clips on the
+                  open timeline (its words carry timeline times, which generate_captions
+                  places the titles by); a path here is refused with an error. To
+                  transcribe a file, use open_transcript(file_url=...).
         style: Optional preset ID to apply (e.g. "bold_pop", "neon_glow").
                Use get_caption_styles() to see all available presets.
+        force_retranscribe: Discard the captions the panel kept from its last run and
+               transcribe the timeline again (otherwise they are restored as they are,
+               even when the timeline has changed since).
 
     Transcription is async — use get_caption_state() to check progress.
     """
@@ -36,6 +42,8 @@ def open_captions(file_url: str = "", style: str = "") -> str:
         params["fileURL"] = file_url
     if style:
         params["style"] = style
+    if force_retranscribe:
+        params["forceRetranscribe"] = True
     return _call_or_error("captions.open", **params)
 
 
@@ -217,7 +225,24 @@ def generate_captions(style: str = "", position: str = "center",
     params["maxWords"] = max_words
     params["allCaps"] = all_caps
 
-    return _call_or_error("captions.generate", **params)
+    r = bridge.call("captions.generate", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    # The bridge generates in the background and records the outcome on the caption
+    # panel (lastGenerateResult, cleared when the run starts). Wait for it, so the answer
+    # is the result and not "started" (the edit used to land after the caller moved on).
+    deadline = time.monotonic() + 300
+    state = {}
+    while time.monotonic() < deadline:
+        state = bridge.call("captions.getState")
+        if isinstance(state, dict) and state.get("lastGenerateResult") is not None:
+            result = state["lastGenerateResult"]
+            if isinstance(result, dict) and (result.get("error") or result.get("status") == "error"):
+                return f"Error: caption generation failed: {result.get('error', result)}"
+            return _fmt(result)
+        time.sleep(1.0)
+    return ("Error: caption generation did not finish within 300 s; captions.getState shows "
+            f"status {state.get('status') if isinstance(state, dict) else '?'}")
 
 
 @splicekit_tool("export_captions_srt", DESTRUCTIVE)
@@ -304,7 +329,9 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
         format: Caption format - "ITT" (default), "SRT", or "CEA608"
 
     Returns the number of native captions created and their placement status.
-    Remove them later with remove_captions(native=True).
+    Remove them later with remove_captions(native=True), or take them back with one
+    history_action("undo") (Edit > Undo Paste); Final Cut Pro records the import of the
+    scratch project they are copied from as a separate "Import XML" step under it.
     """
     params = {
         "grouping": grouping,

@@ -1144,7 +1144,9 @@ else if ([method isEqualToString:@"captions.setWords"])
 
 **`captions.open`**: Opens the panel on the main thread (with
 a 0.5s delay for FCP UI readiness), applies an optional preset, and starts
-transcription if no words are loaded yet.
+transcription if no words are loaded yet (or always, with `forceRetranscribe`). It
+transcribes the timeline only and refuses `fileURL` with an error: caption words carry
+timeline times and their clips, which a bare file does not have.
 
 **`captions.generate`**: The most complex handler. Supports
 "one-shot" usage where style + grouping + generation happen in a single call:
@@ -1207,7 +1209,7 @@ Each tool maps to a `captions.*` JSON-RPC call.
 
 | MCP Tool | RPC Method | Purpose |
 |----------|-----------|---------|
-| `open_captions(file_url, style)` | `captions.open` | Open panel, start transcription |
+| `open_captions(style, force_retranscribe)` | `captions.open` | Open panel, transcribe the timeline (`fileURL` is refused) |
 | `close_captions()` | `captions.close` | Close the panel |
 | `get_caption_state()` | `captions.getState` | Status, words, segments, style |
 | `get_caption_styles()` | `captions.getStyles` | List all 12 presets |

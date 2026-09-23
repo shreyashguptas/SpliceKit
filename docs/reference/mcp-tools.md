@@ -567,8 +567,9 @@ Moving words performs: blade + cut at source -> move playhead -> paste at destin
 Guide: [captions.md](../guides/captions.md). Styled social captions are Motion titles;
 native captions are FCP's own caption objects.
 
-- `open_captions(file_url="", style="")` / `close_captions()` — open (and start
-  transcribing) or close the social captions panel.
+- `open_captions(style="", force_retranscribe=False)` / `close_captions()` — open (and start
+  transcribing the timeline) or close the social captions panel. `file_url` is refused: the
+  panel transcribes only the open timeline; a file goes through `open_transcript(file_url=...)`.
 - `get_caption_state()`, `get_caption_styles()` — panel state and the style presets.
 - `set_caption_style(preset_id=..., font_size=..., position=...)`,
   `set_caption_grouping(mode="social", max_words=3)` — style and word grouping.

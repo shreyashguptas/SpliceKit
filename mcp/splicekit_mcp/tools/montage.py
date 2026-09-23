@@ -3,7 +3,8 @@
 import json
 
 from ..registry import DESTRUCTIVE, READ, splicekit_tool
-from ..bridge import _call_or_error
+from ..bridge import _call_or_error, _err, _fmt, bridge
+from .music import _flexmusic_song_error
 
 
 # ============================================================
@@ -113,5 +114,8 @@ def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", p
         style: Cut rhythm - "beat", "bar" (default), or "section".
         project_name: Name for the new project.
     """
-    return _call_or_error("montage.auto", songUID=song_uid, eventName=event_name, style=style,
-                          projectName=project_name)
+    r = bridge.call("montage.auto", songUID=song_uid, eventName=event_name, style=style,
+                    projectName=project_name)
+    if _err(r):
+        return _flexmusic_song_error(r)
+    return _fmt(r)

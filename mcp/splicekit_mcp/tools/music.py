@@ -610,6 +610,38 @@ def sections_hide() -> str:
 # FCP's built-in AI music engine. Songs can stretch/shrink to
 # any duration by rearranging their musical sections dynamically.
 
+# Said when FlexMusicKit's song library lists nothing: what is missing, whose content it
+# is, and what would make the flexmusic_* / montage tools work.
+FLEXMUSIC_NONE_INSTALLED = (
+    "no FlexMusic songs are installed on this Mac: FlexMusicKit's song library (FMSongLibrary) "
+    "lists none. FlexMusic songs are Apple's soundtrack content for Final Cut Pro; SpliceKit cannot "
+    "create or download them. Once Final Cut Pro has soundtrack songs available, flexmusic_list_songs "
+    "lists them with the song_uid these tools take.")
+
+
+def _flexmusic_song_error(r) -> str:
+    """Error text for a bridge answer that could not find a song: when the library is
+    empty that is the reason, not the uid."""
+    message = str(r.get("error", r)) if isinstance(r, dict) else str(r)
+    if "Song not found" not in message:
+        return f"Error: {message}"
+    listed = bridge.call("flexmusic.listSongs", filter="")
+    count = None if _err(listed) else int(listed.get("count", 0) or 0)
+    if count == 0:
+        return f"Error: {message}: {FLEXMUSIC_NONE_INSTALLED}"
+    if count:
+        return (f"Error: {message}: no installed FlexMusic song has that song_uid "
+                f"({count} installed; flexmusic_list_songs lists them)")
+    return f"Error: {message}"
+
+
+def _flexmusic_call(method: str, **params) -> str:
+    r = bridge.call(method, **params)
+    if _err(r):
+        return _flexmusic_song_error(r)
+    return _fmt(r)
+
+
 @splicekit_tool("flexmusic_list_songs", READ, title="List FlexMusic Songs")
 def flexmusic_list_songs(filter: str = "") -> str:
     """List available FlexMusic songs that can dynamically fit any project duration.
@@ -628,7 +660,8 @@ def flexmusic_list_songs(filter: str = "") -> str:
         return f"Error: {r.get('error', r)}"
     count = int(r.get("count", 0))
     if count == 0:
-        return "No FlexMusic songs are available."
+        return ("No FlexMusic songs are available" + (f" matching '{filter}'" if filter else "")
+                + ("." if filter else f": {FLEXMUSIC_NONE_INSTALLED}"))
     return _fmt(r)
 
 
@@ -642,7 +675,7 @@ def flexmusic_get_song(song_uid: str) -> str:
     Returns metadata (mood, pace, genres, arousal, valence),
     natural duration, minimum duration, and ideal durations.
     """
-    return _call_or_error("flexmusic.getSong", songUID=song_uid)
+    return _flexmusic_call("flexmusic.getSong", songUID=song_uid)
 
 
 @splicekit_tool("flexmusic_get_timing", READ, title="Get FlexMusic Timing")
@@ -660,7 +693,7 @@ def flexmusic_get_timing(song_uid: str, duration_seconds: float) -> str:
     Returns arrays of beat timestamps, bar timestamps, section timestamps,
     and the actual fitted duration.
     """
-    return _call_or_error("flexmusic.getTiming", songUID=song_uid, durationSeconds=duration_seconds)
+    return _flexmusic_call("flexmusic.getTiming", songUID=song_uid, durationSeconds=duration_seconds)
 
 
 @splicekit_tool("flexmusic_render_to_file", DESTRUCTIVE, title="Render FlexMusic To File")
@@ -676,7 +709,7 @@ def flexmusic_render_to_file(song_uid: str, duration_seconds: float, output_path
         output_path: Where to save the rendered audio file.
         format: Audio format - "m4a" (AAC, default) or "wav".
     """
-    return _call_or_error("flexmusic.renderToFile", songUID=song_uid,
+    return _flexmusic_call("flexmusic.renderToFile", songUID=song_uid,
                           durationSeconds=duration_seconds, outputPath=output_path, format=format)
 
 
@@ -691,5 +724,5 @@ def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str
         song_uid: The unique identifier of the song.
         duration_seconds: Target duration (0 = use current timeline duration).
     """
-    return _call_or_error("flexmusic.addToTimeline", songUID=song_uid,
+    return _flexmusic_call("flexmusic.addToTimeline", songUID=song_uid,
                           durationSeconds=duration_seconds)

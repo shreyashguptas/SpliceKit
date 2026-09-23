@@ -81,7 +81,10 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
 
             // Build a list of clips with their timeline start/end times so we can
             // target the correct clip for each marker (not just the longest one).
-            // Spine items are sequential, so we compute positions by summing durations.
+            // Each item's placement is read from the sequence (-effectiveRangeOfObject:, the
+            // times get_timeline_clips and seek_to_time use). Summing durations from 0 put
+            // every marker one start-timecode late on a timeline that does not start at
+            // 00:00:00:00 (43 s landed at 73.03 s on a timeline starting at 00:00:30:00).
             id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
@@ -91,13 +94,24 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
 
             if ([containedItems isKindOfClass:[NSArray class]]) {
                 double cumulativeStart = 0;
+                CMTimeRange spineRange = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                if (SpliceKit_tryReadCMTimeRangeSelector(primaryObj, @"clippedRange", &spineRange) &&
+                    spineRange.start.timescale > 0) {
+                    cumulativeStart = SpliceKit_secondsFromTime(spineRange.start);
+                }
                 for (id item in (NSArray *)containedItems) {
                     if (![item respondsToSelector:@selector(duration)]) continue;
                     CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
                     double dur = SpliceKit_secondsFromTime(d);
+                    double start = cumulativeStart;
+                    CMTimeRange placed = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                    if (SpliceKit_tryReadTimelineRange(primaryObj, item, &placed)) {
+                        start = SpliceKit_secondsFromTime(placed.start);
+                        dur = SpliceKit_secondsFromTime(placed.duration);
+                    }
 
-                    [clipInfos addObject:@{@"clip": item, @"start": @(cumulativeStart), @"end": @(cumulativeStart + dur)}];
-                    cumulativeStart += dur;
+                    [clipInfos addObject:@{@"clip": item, @"start": @(start), @"end": @(start + dur)}];
+                    cumulativeStart = start + dur;
                 }
             }
             if (clipInfos.count == 0) { result = @{@"error": @"No clips found in timeline"}; return; }
@@ -130,7 +144,7 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                 BOOL isChapter = [kind isEqualToString:@"chapter"];
 
                 // Find the clip that contains this time (content-relative start/end).
-                // ci[@"start"] is cumulativeStart from the spine walk (timeline start, not source timecode).
+                // ci[@"start"] is the item's timeline start (sequence time, not source timecode).
                 id targetClip = nil;
                 double clipTimelineStart = 0;
                 double clipTimelineEnd = 0;

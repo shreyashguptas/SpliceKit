@@ -482,6 +482,10 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
 
 // Poll a condition on the main thread. Blocks the calling (background) thread.
 // Returns YES if condition became true before timeout, NO on timeout.
+- (void)clearLastGenerateResult {
+    self.lastGenerateResult = nil;
+}
+
 - (NSDictionary *)generateCaptions {
     [self ensurePersistedStateLoaded];
 

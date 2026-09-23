@@ -22,6 +22,16 @@ Usage
     --list            print the plan and exit without calling anything
     --json PATH       write a machine-readable report
     --allow-project N run against project N instead of the QA project (be careful)
+    --library NAME    the library that must be the only one open (default "testing")
+
+Every timeline time the cases use is derived from the open project (its clips and edit
+points), so the sweep works on a project whose timeline starts at a timecode other
+than zero. Before each case the playhead is put inside the connected clip and that clip
+is selected; cases that need more (an edit point, a transcript, a bus effect) say so in
+`setup`. The run starts and ends with a snapshot of the library, the browser, the
+timeline, every clip's effects and roles and the mixer; the two must match, and a last
+persisted edit (a marker added and deleted) makes the saved library match what was
+checked.
 
 Exit code is 0 only when nothing FAILED. A tool that reports a missing external
 dependency clearly is BLOCKED, not failed — see `dependency` below.
@@ -56,6 +66,26 @@ EXPECTED_PROJECT = "QA Timeline"
 EXPECTED_LIBRARY = "testing"
 
 PASS, FAIL, BLOCKED, SKIPPED = "PASS", "FAIL", "BLOCKED", "SKIPPED"
+
+
+def browser_rows(text: str) -> list[dict]:
+    """The rows of a browser_list_clips answer."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    rows = data.get("clips", []) if isinstance(data, dict) else []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+# Arguments that take a number of seconds: a timeline-time placeholder given alone there
+# is passed as a number. Everywhere else it stays text ("43.043, 44.043").
+NUMERIC_ARGS = {"seconds", "at_seconds", "start_seconds", "end_seconds", "time",
+                "frame_time"}
+
+
+class SetupError(Exception):
+    """A case's fixture could not be put in place; the case fails without running."""
 
 
 # --------------------------------------------------------------------------- specs
@@ -95,6 +125,23 @@ class Case:
     # A handle to select before the call, for tools that act on the selection and need
     # a particular kind of clip (the second timeline pane only takes a compound clip).
     select_before: str = ""
+    # Steps run before the case, after the playhead / selection prelude and before the
+    # timeline snapshot the case is judged against: (tool, args) pairs, or the name of a
+    # built-in fixture: "deselect", "edit_point", "speech_fixture", "transcript",
+    # "captions", "bus_effect". Fixtures that add to the timeline are taken away again
+    # after the case (see Sweep.teardown_fixtures), and the timeline must then match
+    # what it was before the setup ran.
+    setup: list = field(default_factory=list)
+    # The edit must land: the undo stack has to name one of `undo` afterwards. Without
+    # this, a tool that quietly did nothing passed, because nothing needed undoing.
+    require_undo: bool = False
+    # Needs the Parakeet v3 model on disk (the transcript and caption panels); BLOCKED,
+    # never a download, when it is not there.
+    needs_parakeet: bool = False
+    # Undo steps Final Cut Pro records under the case's own step and that belong to the
+    # same call (generate_native_captions: the scratch project's "Import XML" sits under
+    # its "Paste"). Undone after the case's step when they are next on the stack.
+    extra_undo: tuple = ()
 
 
 # The names SpliceKit's own pipelines generate, matched whole, the same shapes
@@ -108,9 +155,11 @@ def read(expect: str | None = None, timeout: float = 60.0, **args) -> Case:
     return Case(args=args, kind="read", expect=expect, timeout=timeout)
 
 
-def write(undo=None, cleanup=None, expect=None, timeout=60.0, **args) -> Case:
+def write(undo=None, cleanup=None, expect=None, timeout=60.0, setup=None,
+          require_undo=False, **args) -> Case:
     return Case(args=args, kind="write", undo=undo, cleanup=cleanup or [],
-                expect=expect, timeout=timeout)
+                expect=expect, timeout=timeout, setup=setup or [],
+                require_undo=require_undo)
 
 
 def dependency(*markers, timeout=60.0, **args) -> Case:
@@ -241,7 +290,7 @@ CASES: dict[str, Case] = {
 
 CASES.update({
     # ---------------------------------------------------------------- playhead, view
-    "seek_to_time": write(seconds=5.0, cleanup=[("seek_to_time", {"seconds": 11.979})]),
+    "seek_to_time": write(seconds="$T_B", cleanup=[("seek_to_time", {"seconds": "$T_HOME"})]),
     "playback_action": write(action="stopPlaying"),
     "set_playback_speed": write(rate=1.0),
     "set_viewer_zoom": write(zoom=1.0, cleanup=[("set_viewer_zoom", {"zoom": 0})]),
@@ -260,58 +309,80 @@ CASES.update({
     "set_transcript_engine": write(engine="parakeetV3"),
 
     # ---------------------------------------------------------------- timeline writes
-    "add_markers_at_times": write(markers="5.0, 10.0", undo="Add Markers"),
-    "blade_at_times": write(times="5.0", undo=("Blade at Times", "Blade", "Blade Clips")),
-    "timeline_edit_action": write(action="addMarker", undo=("Add Marker", "Marker")),
-    "timeline_action": write(action="addMarker", undo=("Add Marker", "Marker")),
-    "timeline_destructive_action": write(action="blade", undo=("Blade", "Blade Clips")),
+    "add_markers_at_times": write(markers="$T_A, $T_B", undo="Add Markers",
+                                  require_undo=True),
+    "blade_at_times": write(times="$T_A", undo=("Blade at Times", "Blade", "Blade Clips"),
+                            require_undo=True),
+    "timeline_edit_action": write(action="addMarker", undo=("Add Marker", "Marker"),
+                                  require_undo=True),
+    "timeline_action": write(action="addMarker", undo=("Add Marker", "Marker"),
+                             require_undo=True),
+    "timeline_destructive_action": write(action="blade", undo=("Blade", "Blade Clips"),
+                                         require_undo=True),
     # Many direct actions are build-dependent; this one is the marker path the
     # handler is built around and is the one worth proving works.
     "direct_timeline_action": Case(args={"action": "changeMarkerName", "name": "sweep"},
                                    kind="read",
                                    expect=r"[Nn]o marker|marker"),
     "batch_timeline_actions": write(actions='[{"action":"addMarker"}]',
-                                    undo_name="Sweep Batch", undo="Sweep Batch"),
+                                    undo_name="Sweep Batch", undo="Sweep Batch",
+                                    require_undo=True),
     "history_action": Case(args={"action": "undo"}, kind="skip",
                            reason="driven by the sweep itself to undo other steps"),
     "begin_edit": write(name="Sweep Group", cleanup=[("end_edit", {"name": "Sweep Group"})]),
     "end_edit": skip("closes the group begin_edit opens; exercised as its cleanup"),
     "trim_clip": Case(args={"handle": "$CONNECTED_CLIP", "edge": "end",
                             "delta_seconds": -0.5},
-                      kind="write", undo=("Trim", "Trim Clip", "Trim End")),
-    "apply_effect": write(name="Black & White",
+                      kind="write", undo=("Trim", "Trim Clip", "Trim End"),
+                      require_undo=True),
+    # The prelude selects the connected clip, so the effect lands on it.
+    "apply_effect": write(name="Black & White", require_undo=True,
                           undo=("Add Effect", "Black & White", "Add Video Effect")),
-    "apply_transition": write(name="Cross Dissolve",
+    # At the edit point between two primary-storyline clips, nothing selected (with a
+    # clip selected FCP puts the transition on that clip's edges instead).
+    "apply_transition": write(name="Cross Dissolve", setup=["edit_point"],
+                              require_undo=True,
                               undo=("Add Transition", "Cross Dissolve")),
     "apply_transition_to_all_clips": write(
-        undo=("Add Transition", "Cross Dissolve", "Add Transitions"), timeout=120),
-    "batch_apply_effect": write(name="Black & White", clip_count=2,
+        undo=("Add Transition", "Cross Dissolve", "Add Transitions"), timeout=120,
+        require_undo=True),
+    "batch_apply_effect": write(name="Black & White", clip_count=2, require_undo=True,
                                 undo=("Batch Apply Effect", "Add Effect")),
     "batch_color_correct": write(correction="addColorBoard", clip_count=2,
+                                 require_undo=True,
                                  undo=("Batch Color Correct", "Add Color Board Effect")),
-    "insert_title": write(name="Basic Title",
+    "insert_title": write(name="Basic Title", require_undo=True,
                           undo=("Connect to Primary Storyline", "Insert Title",
                                 "Connect Title", "Add Basic Title")),
-    "set_inspector_property": write(property="positionX", value=25,
+    "set_inspector_property": write(property="positionX", value=25, require_undo=True,
                                     undo="Set positionX"),
     # A no-op write of the value already there: proves the KVC path works without
     # changing anything.
     "set_object_property": Case(args={"handle": "$CONNECTED_CLIP", "key": "displayName",
                                       "value": "$CLIP_NAME"}, kind="write"),
-    # Final Cut Pro only populates its Assign Roles submenus while it is frontmost,
-    # so from a background sweep this can only report that limitation.
-    "assign_role": Case(args={"type": "video", "role": "Video"},
-                        kind="dependency", select_before="$CONNECTED_CLIP",
-                        dependency_markers=("frontmost", "enumerated no items")),
-    "stabilize_subject": Case(args={}, kind="write", undo="Stabilize Subject", timeout=600),
+    # The connected clip's video role is Video; Titles is a different role FCP offers
+    # for it, so the change is real and the answer's `verified` reads it back.
+    "assign_role": Case(args={"type": "video", "role": "Titles"}, kind="write",
+                        select_before="$CONNECTED_CLIP", undo="Set Role",
+                        require_undo=True, expect=r'"verified": true'),
+    # The prelude selects the connected clip and puts the playhead over it.
+    "stabilize_subject": Case(args={}, kind="write", undo="Stabilize Subject", timeout=600,
+                              require_undo=True, expect=r'"status": "ok"'),
     "import_srt_as_markers": write(
-        srt_content="1\n00:00:05,000 --> 00:00:06,000\nsweep\n",
-        undo=("Add Marker", "Add Markers", "Marker")),
-    "add_clip_to_timeline": Case(args={"handle": "$BROWSER_CLIP", "edit": "append",
-                                       "dry_run": True}, kind="read"),
-    "browser_append_clip": Case(args={"handle": "$BROWSER_CLIP"}, kind="write",
+        srt_content="1\n$SRT_A --> $SRT_B\nsweep\n", require_undo=True,
+        undo=("Add Marker", "Add Markers", "Marker", "Import SRT as Markers")),
+    # $SOURCE_CLIP is a source clip the sweep imports for the run ($SPEECH_MEDIA) and
+    # removes at the end: the test event holds only projects, which these tools rightly
+    # refuse.
+    "add_clip_to_timeline": Case(args={"handle": "$SOURCE_CLIP", "edit": "connect",
+                                       "start_seconds": 0.5, "end_seconds": 1.5,
+                                       "at_seconds": "$T_HOME"},
+                                 kind="write", undo=("Paste", "Paste as Connected Clip"),
+                                 require_undo=True, expect=r"verified"),
+    "browser_append_clip": Case(args={"handle": "$SOURCE_CLIP"}, kind="write",
                                 undo=("Append", "Paste", "Append to Storyline",
-                                      "Connect to Primary Storyline")),
+                                      "Connect to Primary Storyline"),
+                                require_undo=True, expect=r"verified"),
 
     # ---------------------------------------------------------------- panels / UI
     "toggle_panel": write(panel="inspector",
@@ -363,8 +434,12 @@ CASES.update({
                                   {"name": "$OTIO_PROJECT", "include_projects": True})],
                         invalidates_handles=True),
     "generate_fcpxml": read(items="[]"),
-    "export_captions_srt": Case(args={"path": "$TMP/sweep.srt"}, kind="write"),
-    "export_captions_txt": Case(args={"path": "$TMP/sweep.txt"}, kind="write"),
+    "export_captions_srt": Case(args={"path": "$TMP/sweep.srt"}, kind="write",
+                                setup=["speech_fixture", "captions"], needs_parakeet=True,
+                                timeout=120),
+    "export_captions_txt": Case(args={"path": "$TMP/sweep.txt"}, kind="write",
+                                setup=["speech_fixture", "captions"], needs_parakeet=True,
+                                timeout=120),
 })
 
 CASES.update({
@@ -372,13 +447,28 @@ CASES.update({
     "open_transcript": Case(args={}, kind="write", timeout=300,
                             cleanup=[("close_transcript", {})]),
     "close_transcript": write(),
-    "get_transcript": read(),
-    "search_transcript": read(query="the"),
-    "delete_transcript_words": write(start_index=0, count=1,
-                                     undo=("Delete", "Delete Words", "Ripple Delete")),
-    "move_transcript_words": write(start_index=0, count=1, dest_index=3,
-                                   undo=("Move", "Move Words", "Ripple Delete", "Paste")),
-    "set_transcript_speaker": write(start_index=0, count=1, speaker="Sweep"),
+    # The words come from $SPEECH_MEDIA (spoken text made with `say`), appended to the
+    # primary storyline for the case and taken off again afterwards: the project's own
+    # clips carry no speech a transcript can place.
+    "get_transcript": Case(args={}, kind="read", expect=r"fox",
+                           setup=["speech_fixture", "transcript"], needs_parakeet=True,
+                           timeout=120),
+    "search_transcript": Case(args={"query": "fox"}, kind="read", expect=r"fox",
+                              setup=["speech_fixture", "transcript"], needs_parakeet=True,
+                              timeout=120),
+    "delete_transcript_words": Case(args={"start_index": 0, "count": 1}, kind="write",
+                                    undo=("Delete", "Delete Words", "Ripple Delete"),
+                                    require_undo=True,
+                                    setup=["speech_fixture", "transcript"],
+                                    needs_parakeet=True, timeout=120),
+    "move_transcript_words": Case(args={"start_index": 0, "count": 1, "dest_index": 3},
+                                  kind="write", require_undo=True,
+                                  undo=("Move", "Move Words", "Ripple Delete", "Paste"),
+                                  setup=["speech_fixture", "transcript"],
+                                  needs_parakeet=True, timeout=120),
+    "set_transcript_speaker": Case(args={"start_index": 0, "count": 1, "speaker": "Sweep"},
+                                   kind="write", setup=["speech_fixture", "transcript"],
+                                   needs_parakeet=True, timeout=120),
     "delete_transcript_silences": write(min_duration=30.0,
                                         undo=("Delete", "Ripple Delete", "Delete Silences")),
 
@@ -390,28 +480,37 @@ CASES.update({
     "set_caption_words": write(words='[{"index": 0, "text": "sweep"}]'),
     "generate_captions": Case(args={}, kind="write", timeout=300,
                               undo=("Paste", "Insert Captions", "Connect to Primary Storyline"),
+                              require_undo=True, setup=["speech_fixture", "captions"],
+                              needs_parakeet=True,
                               cleanup=[("cleanup_temp_projects", {})]),
     "generate_native_captions": Case(args={}, kind="write", timeout=300,
                                      undo=("Paste", "Insert Captions"),
-                                     cleanup=[("remove_captions", {"native": True}),
-                                              ("cleanup_temp_projects", {})]),
+                                     extra_undo=("Import XML",),
+                                     require_undo=True,
+                                     setup=["speech_fixture", "transcript"],
+                                     needs_parakeet=True,
+                                     cleanup=[("cleanup_temp_projects", {})]),
     "cleanup_temp_projects": read(dry_run=True),
-    # The counterpart to generate_native_captions. A dry run is enough here:
-    # the real deletion is exercised as generate_native_captions's cleanup.
-    "remove_captions": read(dry_run=True),
+    # The counterpart to generate_native_captions, on captions it has just made.
+    "remove_captions": Case(args={"native": True}, kind="write",
+                            undo="Remove Captions", require_undo=True,
+                            setup=["speech_fixture", "transcript",
+                                   ("generate_native_captions", {},
+                                    ("Paste", "Import XML"))],
+                            needs_parakeet=True, timeout=300),
 
     # ---------------------------------------------------------------- beats / music
-    "detect_beats": Case(args={"file_path": "$MEDIA_FILE", "limit": 8},
+    "detect_beats": Case(args={"file_path": "$AUDIO_FILE", "limit": 8},
                          kind="read", timeout=180),
-    "analyze_song_structure": Case(args={"file_path": "$MEDIA_FILE"},
+    "analyze_song_structure": Case(args={"file_path": "$AUDIO_FILE"},
                                    kind="read", timeout=180),
-    "song_structure_sections": Case(args={"file_path": "$MEDIA_FILE"},
+    "song_structure_sections": Case(args={"file_path": "$AUDIO_FILE"},
                                     kind="read", timeout=180),
-    "beat_sync_blade": Case(args={"file_path": "$MEDIA_FILE", "dry_run": True},
+    "beat_sync_blade": Case(args={"file_path": "$AUDIO_FILE", "dry_run": True},
                             kind="read", timeout=180),
     # toggle_structure_blocks does the removal here, which is the only way its real
     # path gets run: on its own it can only ever meet a timeline with no blocks on it.
-    "song_structure_blocks": Case(args={"file_path": "$MEDIA_FILE"}, kind="write",
+    "song_structure_blocks": Case(args={"file_path": "$AUDIO_FILE"}, kind="write",
                                   timeout=180,
                                   cleanup=[("toggle_structure_blocks", {}),
                                            ("remove_structure_blocks", {}),
@@ -438,8 +537,8 @@ CASES.update({
                               clips="$MONTAGE_CLIPS"),
     "montage_assemble": Case(args={"edit_plan": "[]"}, kind="read",
                              expect=r"[Ee]mpty|required|[Nn]o (segments|clips)|[Ff]ail"),
-    "montage_auto": dependency("Song not found", "no song", "FlexMusic", "music library",
-                               timeout=300, song_uid="none"),
+    "montage_auto": dependency("no FlexMusic songs are installed", timeout=300,
+                               song_uid="none"),
 
     # ---------------------------------------------------------------- mixer
     "mixer_set_volume": Case(args={"handle": "$MIXER_VOLUME", "volume_db": 0.0},
@@ -453,16 +552,18 @@ CASES.update({
                                cleanup=[("mixer_volume_end",
                                          {"effect_stack_handle": "$MIXER_STACK"})]),
     "mixer_volume_end": skip("closes the scope mixer_volume_begin opens"),
-    "mixer_apply_bus_effect": dependency("role-bearing collection",
-                                        "No collection-backed bus",
-                                        name="Channel EQ", index=0, dry_run=True),
+    # Fader 0 is the primary-storyline clip under the playhead (the prelude puts it
+    # there), whose collection is its audio bus.
+    "mixer_apply_bus_effect": Case(args={"name": "Channel EQ", "index": 0}, kind="write",
+                                   expect=r"^Applied",
+                                   cleanup=[("mixer_remove_bus_effect",
+                                             {"effect_index": 0, "index": 0})]),
     "mixer_open_bus_effect": skip("opens a plugin window a person has to close"),
-    "mixer_set_bus_effect_enabled": dependency("bus effect", "No collection-backed",
-                                               "not found", "no effect",
-                                               effect_index=0, index=1, enabled=True),
-    "mixer_remove_bus_effect": dependency("bus effect", "No collection-backed",
-                                          "not found", "no effect",
-                                          effect_index=0, index=1),
+    "mixer_set_bus_effect_enabled": Case(args={"effect_index": 0, "index": 0,
+                                               "enabled": False},
+                                         kind="write", setup=["bus_effect"]),
+    "mixer_remove_bus_effect": Case(args={"effect_index": 0, "index": 0}, kind="write",
+                                    setup=["bus_effect"]),
 
     # ---------------------------------------------------------------- lua / plugins
     "lua_execute": read(code="return 1 + 1"),
@@ -481,7 +582,9 @@ CASES.update({
     # ---------------------------------------------------------------- AI
     "ai_command": Case(args={"query": "how many clips are on the timeline?"},
                        kind="write", timeout=400),
-    "ai_command_gemma": dependency("MLX", "mlx", "model", "server", "not running",
+    # Only an answer naming what is missing and how to get it counts as BLOCKED.
+    "ai_command_gemma": dependency("Local model unavailable", "Python 3 not found",
+                                   "Check the model ID", "Not enough memory",
                                    timeout=400,
                                    query="how many clips are on the timeline?"),
     # The palette "blade" command cuts the timeline — this is a write, not a read.
@@ -565,21 +668,20 @@ CASES.update({
                          invalidates_handles=True),
     # Mark > Set Range Start / End (setSelectionStart: / setSelectionEnd:); a range
     # selection is not an edit, so Mark > Clear Selected Ranges takes it back.
-    "set_timeline_range": write(start_seconds=1.0, end_seconds=2.0, expect=r"Range set",
+    "set_timeline_range": write(start_seconds="$T_A", end_seconds="$T_B", expect=r"Range set",
                                 cleanup=[("timeline_edit_action",
                                           {"action": "clearRange"})]),
 
     # ---------------------------------------------------------------- external deps
-    "flexmusic_list_songs": dependency("no songs", "not installed", "empty",
-                                       "FlexMusic", "0 song"),
-    "flexmusic_get_song": dependency("not found", "no song", "FlexMusic",
-                                     song_uid="none"),
-    "flexmusic_get_timing": dependency("not found", "no song", "FlexMusic",
+    # FlexMusic songs are Apple content; with none installed each tool has to say so.
+    "flexmusic_list_songs": dependency("no FlexMusic songs are installed"),
+    "flexmusic_get_song": dependency("no FlexMusic songs are installed", song_uid="none"),
+    "flexmusic_get_timing": dependency("no FlexMusic songs are installed",
                                        song_uid="none", duration_seconds=10.0),
-    "flexmusic_render_to_file": dependency("not found", "no song", "FlexMusic",
+    "flexmusic_render_to_file": dependency("no FlexMusic songs are installed",
                                            song_uid="none", duration_seconds=10.0,
-                                           output_path="/tmp/sweep-flexmusic.m4a"),
-    "flexmusic_add_to_timeline": dependency("not found", "no song", "FlexMusic",
+                                           output_path="$TMP/sweep-flexmusic.m4a"),
+    "flexmusic_add_to_timeline": dependency("no FlexMusic songs are installed",
                                             song_uid="none"),
 
     # ---------------------------------------------------------------- not sweepable
@@ -607,6 +709,20 @@ class Sweep:
         self.tmp.mkdir(parents=True, exist_ok=True)
         self._server = None
         self._server_url = ""
+        self.times: dict[str, float] = {}
+        # A clip of spoken text for the transcript, caption and place/append cases. Made
+        # with `say` for the run, imported into the project's event, removed at the end.
+        token = f"{os.getpid()}"
+        self.speech_name = f"splicekit-sweep-speech-{token}"
+        self.speech_path = self.tmp / f"{self.speech_name}.mov"
+        self.speech_imported = False
+        # Parakeet v3 must already be on disk: the sweep never starts a model download.
+        models = Path.home() / "Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3"
+        self.parakeet_ok = models.is_dir() and any(models.glob("*.mlmodelc"))
+        self.parakeet_reason = ("" if self.parakeet_ok else
+                                f"the Parakeet v3 model is not on disk ({models}); the transcript "
+                                "would download it (about 600 MB) first, which the sweep never does. "
+                                "Run open_transcript() once by hand to fetch it.")
 
     # -- plumbing ----------------------------------------------------------
 
@@ -653,19 +769,83 @@ class Sweep:
         return self._server_url
 
 
+    async def timeline_state(self) -> dict:
+        """timeline.getDetailedState as JSON: exact seconds, which the text table rounds."""
+        text = await self.call("raw_call", {"method": "timeline.getDetailedState",
+                                            "params": "{}"})
+        try:
+            return json.loads(text)
+        except ValueError:
+            return {}
+
     async def resolve_placeholders(self) -> None:
-        clips = await self.call("get_timeline_clips", {})
-        spine = re.findall(r"^\d+\s+\S+\s+.*?(obj_\d+)", clips, re.M)
-        connected = re.findall(r"^\s+\d+\s+\S+\s+.*?(obj_\d+)", clips, re.M)
-        self.placeholders["$SPINE_CLIP"] = spine[0] if spine else ""
-        self.placeholders["$CONNECTED_CLIP"] = (connected[0] if connected
-                                                else self.placeholders["$SPINE_CLIP"])
+        state = await self.timeline_state()
+
+        def secs(entry, key):
+            value = entry.get(key)
+            return float(value.get("seconds", 0.0)) if isinstance(value, dict) else None
+
+        spine = [i for i in state.get("items", []) if isinstance(i, dict)]
+        media = [i for i in spine
+                 if "Gap" not in str(i.get("class", "")) and "Transition" not in str(i.get("class", ""))]
+        connected = [i for i in state.get("connectedItems", []) if isinstance(i, dict)]
+        # A clip with footage, never the gap the primary storyline starts with: batch_export
+        # and the dual timeline need something to act on.
+        self.placeholders["$SPINE_CLIP"] = (media or spine or [{}])[0].get("handle", "")
+        lane1 = [c for c in connected if c.get("lane") == 1] or connected
+        self.placeholders["$CONNECTED_CLIP"] = ((lane1[0].get("handle") if lane1 else "")
+                                                or self.placeholders["$SPINE_CLIP"])
+
+        # Timeline times. Taken from the project, never hard-coded: a project's timeline
+        # starts at its start timecode (00:00:30:00 for the test project), so a fixed 5.0
+        # was before the first frame and every playhead edit there silently did nothing.
+        anchor = lane1[0] if lane1 else (media[0] if media else {})
+        a_start, a_end = secs(anchor, "startTime") or 0.0, secs(anchor, "endTime") or 0.0
+        home = round((a_start + a_end) / 2.0, 3)
+        self.times = {"$T_HOME": home, "$T_A": home, "$T_B": round(home + 1.0, 3)}
+        edit = None
+        for left, right in zip(spine, spine[1:]):
+            if left in media and right in media:
+                edit = secs(right, "startTime")
+                break
+        self.times["$T_EDIT"] = edit if edit is not None else home
+        for key, value in self.times.items():
+            self.placeholders[key] = f"{value:.3f}"
+        # SRT times count from the timeline's first frame, whatever its start timecode.
+        t_start = secs(spine[0], "startTime") if spine else 0.0
+        for key, value in (("$SRT_A", home - (t_start or 0.0)),
+                           ("$SRT_B", home - (t_start or 0.0) + 1.0)):
+            ms = int(round(value * 1000))
+            self.placeholders[key] = (f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:"
+                                      f"{ms // 1000 % 60:02d},{ms % 1000:03d}")
 
         info = await self.call("get_clip_info",
                                {"handle": self.placeholders["$CONNECTED_CLIP"],
                                 "include_frame": False})
         m = re.search(r"^\s+path: (.+)$", info, re.M)
         self.placeholders["$MEDIA_FILE"] = m.group(1).strip() if m else ""
+
+        # A media file with sound for the audio analysers (detect_beats and the song
+        # structure tools): the first clip whose source file has an audio track. The
+        # connected clip is a screen recording without one.
+        audio_file = ""
+        for item in media + connected:
+            handle = item.get("handle")
+            if not handle:
+                continue
+            clip_info = await self.call("get_clip_info", {"handle": handle,
+                                                          "include_frame": False})
+            path = re.search(r"^\s+path: (.+)$", clip_info, re.M)
+            if not path or not re.search(r"^\s+(video\+audio|audio)", clip_info, re.M):
+                continue
+            candidate = path.group(1).strip()
+            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a",
+                                    "-show_entries", "stream=index", "-of", "csv=p=0",
+                                    candidate], capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout.strip():
+                audio_file = candidate
+                break
+        self.placeholders["$AUDIO_FILE"] = audio_file
 
         await self.call("select_clips", {"handles": self.placeholders["$CONNECTED_CLIP"]})
         props = await self.call("get_inspector_properties", {})
@@ -684,22 +864,20 @@ class Sweep:
         # A source clip, not a project: browser_list_clips marks projects with
         # isProject true, and the place/append tools rightly refuse one. Scratch names are
         # skipped by name as well, for the empty-project case FCP cannot label correctly.
-        browser = await self.call("browser_list_clips", {})
+        # Parsed as JSON: each row nests a "duration" object, so a regex for a flat
+        # {...} block only ever matched the durations and never saw a row's name.
+        rows = browser_rows(await self.call("browser_list_clips", {}))
         source = ""
-        for block in re.findall(r"\{[^{}]*\}", browser, re.S):
-            if '"isProject": false' not in block:
-                continue
-            name = re.search(r'"name":\s*"([^"]*)"', block)
-            if name and SCRATCH_NAME.match(name.group(1)):
-                continue
-            h = re.search(r'"handle":\s*"(obj_\d+)"', block)
-            if h:
-                source = h.group(1)
+        for row in rows:
+            if row.get("isProject") is False and not SCRATCH_NAME.match(row.get("name", "")):
+                source = row.get("handle", "")
                 break
-        if not source:
-            m = re.search(r"(obj_\d+)", browser)
-            source = m.group(1) if m else ""
-        self.placeholders["$BROWSER_CLIP"] = source
+        self.placeholders["$BROWSER_CLIP"] = source or (rows[0].get("handle", "") if rows else "")
+
+        # The source clip the sweep imported for this run (prepare_fixtures), found again
+        # by name: handles do not survive release_all_handles or reopening the project.
+        self.placeholders["$SOURCE_CLIP"] = next(
+            (row.get("handle", "") for row in rows if row.get("name") == self.speech_name), "")
 
         # The mixer hands out its own handles: a volume channel and an effect stack
         # per fader. A clip's effect-stack handle from get_inspector_properties is not
@@ -821,7 +999,8 @@ class Sweep:
             for c in clips[:4]
         ])
 
-        optional = {"$BRIDGE_VALUE_OPTION", "$BRIDGE_VALUE_CURRENT", "$MONTAGE_CLIPS"}
+        optional = {"$BRIDGE_VALUE_OPTION", "$BRIDGE_VALUE_CURRENT", "$MONTAGE_CLIPS",
+                    "$SOURCE_CLIP", "$AUDIO_FILE"}
         missing = [k for k, v in self.placeholders.items() if not v and k not in optional]
         if missing:
             raise SystemExit(f"could not resolve {missing} from the live timeline; "
@@ -831,11 +1010,14 @@ class Sweep:
         """Substitute placeholders anywhere in an argument, including inside lists
         and dicts — mixer_set_all_volumes takes a list of {handle, volumeDB}."""
         if isinstance(value, str):
-            for name, resolved in self.placeholders.items():
-                value = value.replace(name, resolved)
+            # Longest names first, so $T_AB would never be read as $T_A + "B".
+            for name in sorted(self.placeholders, key=len, reverse=True):
+                value = value.replace(name, self.placeholders[name])
             return value
         if isinstance(value, dict):
-            return {k: self.fill(v) for k, v in value.items()}
+            return {k: (self.times[v] if k in NUMERIC_ARGS and isinstance(v, str)
+                        and v in self.times else self.fill(v))
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [self.fill(v) for v in value]
         return value
@@ -846,11 +1028,33 @@ class Sweep:
         started = time.monotonic()
         if case.kind == "skip":
             return Result(tool, SKIPPED, case.reason)
+        if case.needs_parakeet and not self.parakeet_ok:
+            return Result(tool, BLOCKED, self.parakeet_reason)
 
-        if case.select_before:
-            await self.call("select_clips",
-                            {"handles": self.fill(case.select_before)})
+        # The same starting point for every case: the playhead over the connected clip
+        # (and the primary-storyline clip under it), that clip selected.
+        await self.call("seek_to_time", {"seconds": self.times.get("$T_HOME", 0.0)})
+        await self.call("select_clips",
+                        {"handles": self.fill(case.select_before or "$CONNECTED_CLIP")})
 
+        pre_setup = await self.shape()
+        teardown: list[str] = []
+        try:
+            for step in case.setup:
+                await self.setup_step(step, teardown)
+        except SetupError as exc:
+            await self.teardown_fixtures(teardown, pre_setup)
+            return Result(tool, FAIL, f"setup: {exc}", time.monotonic() - started)
+
+        try:
+            return await self.run_case_body(tool, case, started)
+        finally:
+            problem = await self.teardown_fixtures(teardown, pre_setup)
+            if problem:
+                self.results.append(Result(f"{tool} (fixture)", FAIL, problem))
+                print(f"  {'FAIL':8s} {tool} (fixture): {problem}")
+
+    async def run_case_body(self, tool: str, case: Case, started: float) -> Result:
         args = self.fill(case.args)
         before = await self.shape()
 
@@ -886,11 +1090,18 @@ class Sweep:
                                   elapsed)
                 return Result(tool, PASS, snippet, elapsed)
 
+            failure = ""
             if errored and not (case.expect and re.search(case.expect, out)):
-                return Result(tool, FAIL, snippet, elapsed)
-            if case.expect and not re.search(case.expect, out):
-                return Result(tool, FAIL,
-                              f"answer did not match /{case.expect}/: {snippet}", elapsed)
+                failure = snippet
+            elif case.expect and not re.search(case.expect, out):
+                failure = f"answer did not match /{case.expect}/: {snippet}"
+            if failure:
+                # A tool can edit and still answer wrongly (assign_role once left a role
+                # changed because its answer failed the check): put the project back anyway.
+                cleaned = True
+                restored = await self.restore(case, before, lenient=True)
+                return Result(tool, FAIL, f"{failure} | {restored}" if restored else failure,
+                              elapsed)
 
             # Put the project back. restore() runs case.cleanup itself, first.
             cleaned = True
@@ -901,6 +1112,98 @@ class Sweep:
         finally:
             if not cleaned:
                 await self.cleanup_only(case)
+
+    # -- fixtures ----------------------------------------------------------
+
+    async def wait_for(self, tool: str, args: dict, pattern: str, seconds: float,
+                       fail_pattern: str | None = None) -> str:
+        """Poll a read tool until its answer matches `pattern`."""
+        deadline = time.monotonic() + seconds
+        out = ""
+        while time.monotonic() < deadline:
+            out = await self.call(tool, args)
+            if re.search(pattern, out):
+                return out
+            if fail_pattern and re.search(fail_pattern, out):
+                break
+            await asyncio.sleep(2.0)
+        raise SetupError(f"{tool} never showed /{pattern}/: {' '.join(out.split())[:200]}")
+
+    async def setup_step(self, step, teardown: list[str]) -> None:
+        if isinstance(step, tuple):
+            # (tool, args) or (tool, args, undo name): the latter is an edit the teardown
+            # takes back with one undo of that name.
+            tool, args = step[0], step[1]
+            out = await self.call(tool, self.fill(args), 300)
+            if out.lstrip().lower().startswith("error"):
+                raise SetupError(f"{tool}: {' '.join(out.split())[:200]}")
+            if len(step) > 2:
+                names = (step[2],) if isinstance(step[2], str) else tuple(step[2])
+                teardown.append(("undo",) + names)
+            return
+        if step == "deselect":
+            await self.call("select_clips", {"handles": ""})
+        elif step == "edit_point":
+            await self.call("select_clips", {"handles": ""})
+            await self.call("seek_to_time", {"seconds": self.times["$T_EDIT"]})
+        elif step == "speech_fixture":
+            if not self.placeholders.get("$SOURCE_CLIP"):
+                raise SetupError("the sweep's speech clip is not in the browser")
+            out = await self.call("add_clip_to_timeline",
+                                  {"handle": self.placeholders["$SOURCE_CLIP"],
+                                   "edit": "append"}, 120)
+            if "verified" not in out or out.lower().startswith("error"):
+                raise SetupError(f"appending the speech clip: {' '.join(out.split())[:200]}")
+            teardown.append("speech_fixture")
+        elif step == "transcript":
+            await self.call("set_transcript_engine", {"engine": "parakeetV3"})
+            out = await self.call("open_transcript", {"force_retranscribe": True}, 120)
+            if out.lower().startswith("error"):
+                raise SetupError(f"open_transcript: {' '.join(out.split())[:200]}")
+            await self.wait_for("get_transcript", {}, r"(?i)\bfox\b", 180,
+                                fail_pattern=r"Status: (error|failed)")
+        elif step == "captions":
+            out = await self.call("open_captions", {"force_retranscribe": True}, 120)
+            if out.lower().startswith("error"):
+                raise SetupError(f"open_captions: {' '.join(out.split())[:200]}")
+            await self.wait_for("get_caption_state", {}, r"(?i)\bfox\b", 180,
+                                fail_pattern=r"Status: (error|failed)")
+        elif step == "bus_effect":
+            out = await self.call("mixer_apply_bus_effect", {"name": "Channel EQ", "index": 0})
+            if not out.startswith("Applied"):
+                raise SetupError(f"mixer_apply_bus_effect: {' '.join(out.split())[:200]}")
+            teardown.append("bus_effect")
+        else:
+            raise SetupError(f"unknown setup step {step!r}")
+
+    async def teardown_fixtures(self, teardown: list[str], pre_setup: tuple) -> str:
+        """Take the fixtures back off, newest first. Returns "" when the timeline is as it
+        was before the setup ran."""
+        for step in reversed(teardown):
+            if isinstance(step, tuple) and step[0] == "undo":
+                for expected in step[1:]:
+                    name = await self.undo_name()
+                    if name != expected:
+                        return (f"a setup edit could not be taken off: the undo stack says "
+                                f"{name!r}, expected {expected!r}")
+                    await self.call("history_action", {"action": "undo"})
+            elif step == "speech_fixture":
+                name = await self.undo_name()
+                if name != "Paste":
+                    return (f"the speech clip could not be taken off: the undo stack says "
+                            f"{name!r}, expected 'Paste'")
+                await self.call("history_action", {"action": "undo"})
+            elif step == "bus_effect":
+                await self.call("seek_to_time", {"seconds": self.times.get("$T_HOME", 0.0)})
+                state = await self.call("mixer_get_state", {})
+                fader0 = state.split("Fader 1:")[0]
+                m = re.search(r"(\d+) effect\(s\)", fader0)
+                if m and int(m.group(1)) > 0:
+                    await self.call("mixer_remove_bus_effect", {"effect_index": 0, "index": 0})
+        after = await self.shape()
+        if teardown and after != pre_setup:
+            return f"fixture not removed: {pre_setup} -> {after}"
+        return ""
 
     async def cleanup_only(self, case: Case) -> None:
         """Run just case.cleanup, for a case that failed before restore() was reached.
@@ -916,34 +1219,161 @@ class Sweep:
                 print(f"    ! cleanup {tool} after failure raised "
                       f"{type(exc).__name__}: {exc}", flush=True)
 
-    async def restore(self, case: Case, before: tuple) -> str:
-        """Undo or clean up after a case. Returns "" when the timeline is back."""
-        for tool, args in case.cleanup:
-            try:
-                await self.call(tool, self.fill(args), case.timeout)
-            except Exception as exc:
-                return f"cleanup {tool} raised {type(exc).__name__}: {exc}"[:200]
+    async def restore(self, case: Case, before: tuple, lenient: bool = False) -> str:
+        """Undo or clean up after a case. Returns "" when the timeline is back.
 
+        The undo comes first: a cleanup step can itself be an edit (remove_captions is),
+        and it would then sit on top of the step the case made."""
         if case.undo:
             wanted = (case.undo,) if isinstance(case.undo, str) else tuple(case.undo)
             name = await self.undo_name()
             if name in wanted:
                 await self.call("history_action", {"action": "undo"})
+                for extra in case.extra_undo:
+                    if await self.undo_name() == extra:
+                        await self.call("history_action", {"action": "undo"})
+            elif case.require_undo and not lenient:
+                problem = (f"made no edit: the undo stack says {name!r}, expected one of "
+                           f"{wanted}")
+                await self.cleanup_only(case)
+                return problem
             elif await self.shape() != before:
+                await self.cleanup_only(case)
                 return (f"the timeline changed but the undo stack says {name!r}, "
                         f"expected one of {wanted} — the change cannot be taken back")
             # Otherwise the tool decided there was nothing to do (no scene changes
             # found, no clip matched) and correctly made no edit. That is a pass, not
             # a missing undo step.
 
+        for tool, args in case.cleanup:
+            try:
+                await self.call(tool, self.fill(args), case.timeout)
+            except Exception as exc:
+                return f"cleanup {tool} raised {type(exc).__name__}: {exc}"[:200]
+
         after = await self.shape()
         if after != before:
             return f"timeline not restored: {before} -> {after}"
         return ""
 
+    # -- run-level fixtures and the before/after check ------------------------
+
+    async def prepare_fixtures(self) -> None:
+        """Make the speech clip and import it into the project's event."""
+        if not self.speech_path.exists():
+            aiff = self.speech_path.with_suffix(".aiff")
+            said = subprocess.run(["say", "-o", str(aiff),
+                                   "The quick brown fox jumps over the lazy dog. Final Cut Pro "
+                                   "edits this sentence for the sweep."],
+                                  capture_output=True).returncode == 0
+            made = said and subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "color=c=navy:size=320x180:rate=30",
+                 "-i", str(aiff), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-ar", "48000", "-shortest", str(self.speech_path)],
+                capture_output=True).returncode == 0
+            if not made:
+                print("  could not make the speech clip (say / ffmpeg); the transcript, "
+                      "caption and place cases will fail setup", flush=True)
+                return
+        browser = await self.call("browser_list_clips", {})
+        event = ""
+        for candidate in re.findall(r'"event":\s*"([^"]+)"', browser):
+            if not SCRATCH_NAME.match(candidate):
+                event = candidate
+                break
+        out = await self.call("import_media", {"path": str(self.speech_path), "event": event}, 180)
+        self.speech_imported = '"imported"' in out and self.speech_name in out
+        if not self.speech_imported:
+            print(f"  importing the speech clip failed: {' '.join(out.split())[:200]}", flush=True)
+
+    async def remove_fixtures(self) -> None:
+        for tool, args in (("close_transcript", {}), ("close_captions", {})):
+            try:
+                await self.call(tool, args)
+            except Exception:
+                pass
+        if self.speech_imported:
+            out = await self.call("remove_browser_clip", {"name": self.speech_name})
+            if "removed" not in out:
+                print(f"  ! removing the speech clip: {' '.join(out.split())[:200]}", flush=True)
+            self.speech_imported = False
+
+    async def snapshot(self) -> dict:
+        """Everything the sweep promises to leave as it found it, with SpliceKit's
+        per-session handles and timings taken out."""
+        def scrub(text: str) -> str:
+            text = re.sub(r"obj_\d+", "obj", text)
+            text = text.replace(", selected", "")      # the selection is not project content
+            lines = [line for line in text.splitlines()
+                     if not re.search(r"timings:|transcript|playhead", line, re.I)]
+            return "\n".join(lines)
+
+        snap: dict[str, Any] = {}
+        snap["libraries"] = await self.call("get_active_libraries", {})
+        browser = await self.call("browser_list_clips", {})
+        rows = [(r.get("name", ""), r.get("event", ""), r.get("isProject"))
+                for r in browser_rows(browser)]
+        snap["browser"] = sorted(rows, key=str)
+        state = await self.timeline_state()
+        def item(e):
+            return {k: (e.get(k, {}).get("seconds") if isinstance(e.get(k), dict) else e.get(k))
+                    for k in ("name", "class", "lane", "startTime", "endTime", "time", "kind")
+                    if k in e}
+        snap["sequence"] = state.get("sequenceName")
+        snap["duration"] = (state.get("duration") or {}).get("seconds")
+        for key in ("items", "connectedItems", "markers"):
+            snap[key] = [item(e) for e in state.get(key, []) if isinstance(e, dict)]
+        clips = {}
+        for e in state.get("items", []) + state.get("connectedItems", []):
+            if isinstance(e, dict) and e.get("handle"):
+                info = await self.call("get_clip_info", {"handle": e["handle"],
+                                                         "include_frame": False})
+                clips[f"{e.get('name')}@{item(e).get('startTime')}"] = scrub(info)
+        snap["clips"] = clips
+        await self.call("seek_to_time", {"seconds": self.times.get("$T_HOME", 0.0)})
+        snap["mixer"] = scrub(await self.call("mixer_get_state", {}))
+        return snap
+
+    async def persist(self) -> str:
+        """One real edit and its reverse, not an undo: Final Cut Pro saves the library on
+        an edit, and a sweep that ends on undo leaves the file on disk one step behind
+        what was checked (undo is not saved before a quit)."""
+        before = await self.shape()
+        home = self.times.get("$T_HOME", 0.0)
+        await self.call("add_markers_at_times", {"markers": f"{home:.3f}"})
+        listed = await self.call("list_markers", {})
+        # Only the marker just added: the one at `home`, never a marker of the project's.
+        handles = []
+        for line in listed.splitlines():
+            h = re.search(r"(obj_\d+)", line)
+            times = [float(x) for x in re.findall(r"(?<![\w.])(\d+\.\d+)", line)]
+            if h and any(abs(t - home) < 0.05 for t in times):
+                handles.append(h.group(1))
+        removed = False
+        for handle in handles:
+            out = await self.call("direct_timeline_action",
+                                  {"action": "removeMarker", "marker": handle})
+            if not out.lower().startswith("error"):
+                removed = True
+                break
+        if not removed:
+            await self.call("seek_to_time", {"seconds": home})
+            await self.call("timeline_action", {"action": "deleteMarker"})
+        after = await self.shape()
+        if after != before:
+            return f"the closing marker add + delete left the timeline changed: {before} -> {after}"
+        return ""
+
     # -- the whole run -----------------------------------------------------
 
     async def run(self, tool_names: list[str]) -> int:
+        start_playhead = await self.call("get_playhead_position", {})
+        m = re.search(r'"seconds":\s*([\d.]+)', start_playhead) or re.search(r"([\d.]+)", start_playhead)
+        self.start_playhead = float(m.group(1)) if m else self.times.get("$T_HOME", 0.0)
+        start_snapshot = await self.snapshot()
+        await self.prepare_fixtures()
+        await self.resolve_placeholders()
         baseline = await self.shape()
         print(f"baseline timeline: items={baseline[0]} duration={baseline[1]}s "
               f"markers={baseline[2]} connected={baseline[3]}\n")
@@ -972,6 +1402,30 @@ class Sweep:
                     break
 
         final = await self.shape()
+        await self.remove_fixtures()
+        problem = await self.persist()
+        if problem:
+            self.results.append(Result("<sweep persist>", FAIL, problem))
+            print(f"  FAIL     <sweep persist>: {problem}")
+        end_snapshot = await self.snapshot()
+        await self.call("seek_to_time", {"seconds": self.start_playhead})
+        for label, snap in (("start", start_snapshot), ("end", end_snapshot)):
+            (self.tmp / f"snapshot-{label}.json").write_text(
+                json.dumps(snap, indent=2, default=str, sort_keys=True))
+        diffs = [k for k in start_snapshot if start_snapshot.get(k) != end_snapshot.get(k)]
+        if diffs:
+            import difflib
+            a = json.dumps({k: start_snapshot.get(k) for k in diffs}, indent=1,
+                           default=str, sort_keys=True).splitlines()
+            b = json.dumps({k: end_snapshot.get(k) for k in diffs}, indent=1,
+                           default=str, sort_keys=True).splitlines()
+            changed = [line for line in difflib.unified_diff(a, b, lineterm="", n=0)
+                       if line[:1] in "+-" and line[:3] not in ("+++", "---")]
+            detail = f"{', '.join(diffs)} differ: " + " | ".join(changed[:20])
+            print(f"\nLIBRARY / PROJECT NOT AS THEY STARTED: {detail}")
+            self.results.append(Result("<sweep snapshot>", FAIL, detail))
+        else:
+            print("\nlibrary, browser, timeline, clips and mixer match the start snapshot")
         print()
         if final != baseline:
             print(f"TIMELINE NOT BACK TO BASELINE: {baseline} -> {final}")
@@ -1028,6 +1482,12 @@ async def main_async(args) -> int:
                   file=sys.stderr)
             return 2
 
+        # The two cases that name the fixture itself follow the command line.
+        CASES["get_active_libraries"] = read(expect=rf":\s*{re.escape(args.library)} —")
+        CASES["open_project"] = Case(args={"name": args.allow_project or EXPECTED_PROJECT},
+                                     kind="write", invalidates_handles=True,
+                                     expect=r"(?i)opened|loaded|project")
+
         names = sorted(registered)
         if args.only:
             names = [n for n in names if any(n.startswith(p) for p in args.only)]
@@ -1052,6 +1512,14 @@ async def main_async(args) -> int:
             print(f"refusing to run: the open project is {opened!r}, not {expected!r}. "
                   f"This sweep edits the timeline.", file=sys.stderr)
             return 2
+        # ... and only with the throwaway library open, alone.
+        libraries = await sweep.call("get_active_libraries", {})
+        count = re.search(r"Open libraries \((\d+)\)", libraries)
+        if not count or count.group(1) != "1" or \
+                not re.search(rf":\s*{re.escape(args.library)} —", libraries):
+            print(f"refusing to run: the open libraries are not just {args.library!r}: "
+                  f"{' '.join(libraries.split())[:300]}", file=sys.stderr)
+            return 2
 
         await sweep.resolve_placeholders()
         code = await sweep.run(names)
@@ -1072,6 +1540,8 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--json")
     ap.add_argument("--allow-project")
+    ap.add_argument("--library", default=EXPECTED_LIBRARY,
+                    help="the only library that may be open (default %(default)r)")
     args = ap.parse_args()
     return asyncio.run(main_async(args))
 

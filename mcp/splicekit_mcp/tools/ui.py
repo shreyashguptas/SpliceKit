@@ -197,10 +197,15 @@ def select_tool(tool: str) -> str:
 
 @splicekit_tool("assign_role", LOCAL_IDEMPOTENT)
 def assign_role(type: str, role: str) -> str:
-    """Assign a role to the selected clip.
+    """Assign a role to the selected clip (Modify > Assign Video / Audio / Caption Roles).
+
+    Works with Final Cut Pro in the background: SpliceKit has FCP fill the submenu from
+    the current selection, then chooses the role. The answer reports the role FCP now
+    checks for the selection (`verified`); an unknown name lists the roles FCP offers.
+    One undo step ("Set Role").
 
     Args:
         type: "audio", "video", or "caption"
-        role: Role name (e.g. "Dialogue", "Music", "Effects", "Titles", "Video")
+        role: Role name as FCP lists it (e.g. "Dialogue", "Music", "Effects", "Titles", "Video")
     """
     return _call_or_error("roles.assign", type=type, role=role)

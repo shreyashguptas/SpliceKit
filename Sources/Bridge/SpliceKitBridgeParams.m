@@ -23,7 +23,7 @@ NSDictionary<NSString *, NSString *> *SpliceKit_bridgeParamsForMethod(NSString *
             @"captions.generate": @{@"maxWords": @"read by the handler", @"presetID": @"read by the handler", @"style": @"read by the handler"},
             @"captions.getState": @{},
             @"captions.getStyles": @{},
-            @"captions.open": @{@"fileURL": @"read by the handler", @"style": @"read by the handler"},
+            @"captions.open": @{@"fileURL": @"read by the handler", @"forceRetranscribe": @"read by the handler", @"style": @"read by the handler"},
             @"captions.setGrouping": @{@"maxChars": @"read by the handler", @"maxSeconds": @"read by the handler", @"maxWords": @"read by the handler", @"mode": @"read by the handler"},
             @"captions.setStyle": @{@"presetID": @"read by the handler"},
             @"captions.setWords": @{@"words": @"read by the handler"},

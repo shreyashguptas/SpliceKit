@@ -1,5 +1,7 @@
 """Tools: browser clips, placing source clips, import, titles."""
 
+import json
+
 from ..registry import DESTRUCTIVE, LOCAL_IDEMPOTENT, READ, splicekit_tool
 from ..bridge import _call_or_error, _err, bridge
 from .timeline_reads import _s3
@@ -63,7 +65,18 @@ def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> st
         params["index"] = index
     if name:
         params["name"] = name
-    return _call_or_error("browser.appendClip", **params)
+    r = bridge.call("browser.appendClip", **params)
+    # The bridge carries a placementDebug dump (every timeline read it made, ~20 KB);
+    # the answer is the same report add_clip_to_timeline gives.
+    if _err(r):
+        return f"Error: {r.get('error', str(r))}"
+    if isinstance(r, dict) and r.get("placed") is not None:
+        r = dict(r)
+        r.setdefault("edit", "append")
+        return _render_place_clip(r)
+    if isinstance(r, dict):
+        r = {k: v for k, v in r.items() if k != "placementDebug"}
+    return json.dumps(r, indent=2, default=str)
 
 
 def _yes_no(value) -> str:
@@ -330,7 +343,12 @@ def stabilize_subject() -> str:
     stays fixed on screen while the background moves.
 
     Requirements: a clip must be selected and the playhead should be on a frame
-    where the subject is clearly visible.
+    where the subject is clearly visible. The clip's source media file and the part
+    of it the clip plays are read the way get_clip_info reads them. When the playhead
+    is not over the selected clip, its first frame is the reference frame. When
+    Vision finds no person in the reference frame, the centre 40% of the frame is
+    tracked instead; the answer's `subject` says which ("person" / "center region").
+    One undo step ("Stabilize Subject").
     """
     return _call_or_error("stabilize.subject")
 

@@ -132,6 +132,11 @@ extern NSNotificationName const SpliceKitCaptionDidGenerateNotification;
 - (void)transcribeTimeline;
 - (void)setWordsManually:(NSArray<NSDictionary *> *)wordDicts;
 
+// Generation. captions.generate runs generateCaptions off the main thread; it clears the
+// last result first so a caller polling getState can tell when this run has finished
+// (getState reports lastGenerateResult again once it has).
+- (void)clearLastGenerateResult;
+
 // Style
 - (void)setStyle:(SpliceKitCaptionStyle *)style;
 - (SpliceKitCaptionStyle *)currentStyle;

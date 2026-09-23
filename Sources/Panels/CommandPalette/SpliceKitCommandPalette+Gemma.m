@@ -279,6 +279,26 @@ static NSString *SpliceKit_tailLogFile(NSString *path, NSUInteger maxBytes) {
                 return @"Port 8080 already in use. Kill the existing process: pkill -f mlx_lm.server";
             } else if ([tail containsString:@"out of memory"] || [tail containsString:@"MemoryError"]) {
                 return @"Not enough memory to load model. Close other apps and try again.";
+            } else if ([tail rangeOfString:@"Model type .* not supported" options:NSRegularExpressionSearch].location != NSNotFound) {
+                // The model is on disk but this mlx-lm cannot run its architecture (seen with
+                // mlx-lm 0.29 on Python 3.9 and the gemma4 model): name both, and what unlocks it.
+                NSRange r = [tail rangeOfString:@"Model type [^ ]+ not supported" options:NSRegularExpressionSearch];
+                NSString *what = r.location != NSNotFound ? [tail substringWithRange:r] : @"model type not supported";
+                NSString *mlxVersion = @"unknown";
+                {
+                    int st = -1; NSData *out = nil;
+                    if (SpliceKit_runProcess(python, @[@"-c", @"import mlx_lm; print(mlx_lm.__version__)"], nil,
+                                             SpliceKitProcessOptionsNone, 0, &st, &out, NULL, NULL) == SpliceKitProcessExited && st == 0) {
+                        mlxVersion = [[[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding]
+                                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    }
+                }
+                return [NSString stringWithFormat:
+                    @"Local model unavailable: the installed mlx-lm (%@, for %@) cannot load '%@' (%@). "
+                    @"The model files are present; what is missing is an mlx-lm new enough for this model. "
+                    @"To enable it: install a current mlx-lm on a Python 3.10+ (e.g. brew install python@3.12, then "
+                    @"python3.12 -m pip install -U mlx-lm) so SpliceKit finds that python first.",
+                    mlxVersion, python, model, what];
             } else if ([tail containsString:@"FileNotFoundError"] || [tail containsString:@"does not appear to have"]) {
                 return [NSString stringWithFormat:@"Model '%@' not found. Check the model ID.", model];
             }

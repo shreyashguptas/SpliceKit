@@ -32,7 +32,10 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     __block double playheadTime = 0;
     __block double clipStart = 0;
     __block double clipDuration = 0;
-    __block double trimStart = 0;
+    __block double localStart = 0;      // the clip's clippedRange start (effect keyframe time)
+    __block double fileStart = 0;       // seconds into the media file where the clip starts
+    __block double conformFactor = 1.0; // timeline seconds per file second (rate conform)
+    __block NSDictionary *source = nil;
     __block NSURL *mediaURL = nil;
     __block double frameRate = 24.0;
     __block id hexFormEffect = nil;
@@ -62,18 +65,18 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                 }
             }
 
-            // Get playhead time
-            SEL currentTimeSel = NSSelectorFromString(@"currentSequenceTime");
-            if ([timelineModule respondsToSelector:currentTimeSel]) {
-                CMTime t;
-                NSMethodSignature *sig = [timelineModule methodSignatureForSelector:currentTimeSel];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:timelineModule];
-                [inv setSelector:currentTimeSel];
-                [inv invoke];
-                [inv getReturnValue:&t];
-                if (t.timescale > 0) playheadTime = (double)t.value / t.timescale;
+            // Playhead, in the same timeline seconds get_playhead_position and the clip
+            // placement below use.
+            BOOL havePlayhead = NO;
+            for (NSString *name in @[@"playheadTime", @"currentSequenceTime"]) {
+                CMTime t = {0, 0, 0, 0};
+                if (SpliceKit_tryReadCMTimeSelector(timelineModule, name, &t) && t.timescale > 0) {
+                    playheadTime = SpliceKit_secondsFromTime(t);
+                    havePlayhead = YES;
+                    break;
+                }
             }
+            (void)havePlayhead;
 
             // Get selected items
             SEL selSel = NSSelectorFromString(@"selectedItems");
@@ -87,63 +90,51 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
             }
             selectedClip = items[0];
 
-            // Get clip timeline start and duration
-            if ([selectedClip respondsToSelector:@selector(timelineStartTime)]) {
-                CMTime t;
-                NSMethodSignature *sig = [selectedClip methodSignatureForSelector:@selector(timelineStartTime)];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:selectedClip];
-                [inv setSelector:@selector(timelineStartTime)];
-                [inv invoke];
-                [inv getReturnValue:&t];
-                if (t.timescale > 0) clipStart = (double)t.value / t.timescale;
+            // Where the clip sits and which part of which file it plays: the same readings
+            // timeline.getClipInfo and timeline.getAudioLevels use. The clip's placement comes
+            // from the sequence (-effectiveRangeOfObject:, or the connected-clip walk for a clip
+            // anchored above or below the primary storyline); its source media file and the
+            // seconds into that file where the clip starts come from SpliceKit_audioSourceForItem.
+            // This handler used to read -timelineStartTime and -trimStartTime itself. On FCP 12.3
+            // a connected clip answers -timelineStartTime with 0 (relative to its parent), so the
+            // reference time became the playhead's absolute time: 42 s into a 20 s screen
+            // recording, which AVFoundation answers with "Cannot Open".
+            id sequence = [timelineModule respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timelineModule, @selector(sequence)) : nil;
+            id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            CMTimeRange placement = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            NSString *placementError = nil;
+            NSString *clipHandle = SpliceKit_storeHandle(selectedClip);
+            if (!primaryObj || !SpliceKit_handleResolveTimelineClip(clipHandle, primaryObj, &placement, &placementError) ||
+                placement.start.timescale <= 0 || placement.duration.timescale <= 0) {
+                result = @{@"error": [NSString stringWithFormat:
+                    @"Could not read where the selected clip sits on the timeline%@",
+                    placementError.length ? [@": " stringByAppendingString:placementError] : @""]};
+                return;
             }
-            if ([selectedClip respondsToSelector:@selector(duration)]) {
-                CMTime t;
-                NSMethodSignature *sig = [selectedClip methodSignatureForSelector:@selector(duration)];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:selectedClip];
-                [inv setSelector:@selector(duration)];
-                [inv invoke];
-                [inv getReturnValue:&t];
-                if (t.timescale > 0) clipDuration = (double)t.value / t.timescale;
+            clipStart = SpliceKit_secondsFromTime(placement.start);
+            clipDuration = SpliceKit_secondsFromTime(placement.duration);
+
+            // The clip's own time (FCP's clippedRange), the time its effect keyframes are in.
+            CMTimeRange localRange = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            if (SpliceKit_tryReadCMTimeRangeSelector(selectedClip, @"clippedRange", &localRange) &&
+                localRange.start.timescale > 0) {
+                localStart = SpliceKit_secondsFromTime(localRange.start);
             }
 
-            // Get trim offset
-            if ([selectedClip respondsToSelector:NSSelectorFromString(@"trimStartTime")]) {
-                CMTime t;
-                SEL tsSel = NSSelectorFromString(@"trimStartTime");
-                NSMethodSignature *sig = [selectedClip methodSignatureForSelector:tsSel];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:selectedClip];
-                [inv setSelector:tsSel];
-                [inv invoke];
-                [inv getReturnValue:&t];
-                if (t.timescale > 0) trimStart = (double)t.value / t.timescale;
+            source = SpliceKit_audioSourceForItem(selectedClip);
+            NSString *path = [source[@"path"] isKindOfClass:[NSString class]] ? source[@"path"] : nil;
+            if (path.length) mediaURL = [NSURL fileURLWithPath:path];
+            fileStart = [source[@"fileStart"] respondsToSelector:@selector(doubleValue)]
+                ? [source[@"fileStart"] doubleValue] : 0.0;
+            if ([source[@"rateConformFactor"] respondsToSelector:@selector(doubleValue)]) {
+                double f = [source[@"rateConformFactor"] doubleValue];
+                if (isfinite(f) && f > 0) conformFactor = f;
             }
-
-            // Same resolver as timeline.getClipInfo (handles FCP 12.3 clipRef / media chains).
-            id clipForMedia = selectedClip;
-            if ([selectedClip respondsToSelector:NSSelectorFromString(@"containedItems")]) {
-                NSArray *contained = ((id (*)(id, SEL))objc_msgSend)(selectedClip, NSSelectorFromString(@"containedItems"));
-                if ([contained isKindOfClass:[NSArray class]] && contained.count > 0) {
-                    for (id item in contained) {
-                        NSString *cn = NSStringFromClass([item class]);
-                        if ([cn containsString:@"MediaComponent"]) {
-                            clipForMedia = item;
-                            break;
-                        }
-                    }
-                }
-            }
-            NSString *urlSource = nil;
-            NSString *representation = nil;
-            mediaURL = SpliceKit_clipInfoMediaURL(clipForMedia, &representation, &urlSource);
-            if (!mediaURL) {
-                mediaURL = SpliceKit_clipInfoMediaURL(selectedClip, &representation, &urlSource);
-            }
-            SpliceKit_log(@"[Stabilize] Selected clip class: %@, mediaURL: %@",
-                NSStringFromClass([selectedClip class]), mediaURL ? mediaURL.path : @"nil");
+            SpliceKit_log(@"[Stabilize] Selected clip class: %@ at %.3f-%.3f s, media: %@, file start %.3f s (via %@)",
+                NSStringFromClass([selectedClip class]), clipStart, clipStart + clipDuration,
+                mediaURL ? mediaURL.path : @"nil", fileStart, source[@"sourceStartSelector"] ?: @"none");
 
             // Get FFHeXFormEffect via FFCutawayEffects.transformEffectForObject:createIfAbsent:
             // This is FCP's own way to get/create the transform effect on any clip type.
@@ -202,8 +193,18 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
 
     if (result) return result;
 
+    NSString *kind = [source[@"kind"] isKindOfClass:[NSString class]] ? source[@"kind"] : @"";
     if (!mediaURL) {
-        return @{@"error": @"Could not find media file for selected clip"};
+        if ([source[@"isCollection"] boolValue] && [kind containsString:@"compound"]) {
+            return @{@"error": @"The selected clip is a compound clip with no single source media file; open it (Clip > Open Clip) and stabilize a clip inside it"};
+        }
+        return @{@"error": [NSString stringWithFormat:
+            @"The selected clip (%@) has no source media file to track (a title, generator or gap clip has none)",
+            kind.length ? kind : NSStringFromClass([selectedClip class])]};
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:mediaURL.path]) {   // off the main thread
+        return @{@"error": [NSString stringWithFormat:
+            @"The selected clip's source media file is missing on disk (Final Cut Pro: Missing File): %@", mediaURL.path]};
     }
     if (!hexFormEffect) {
         return @{@"error": [NSString stringWithFormat:
@@ -211,31 +212,62 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
             NSStringFromClass([selectedClip class]),
             mediaURL ? mediaURL.lastPathComponent : @"nil"]};
     }
-
-    SpliceKit_log(@"[Stabilize] Clip: %@ (start:%.2f dur:%.2f trim:%.2f playhead:%.2f fps:%.1f)",
-        mediaURL.lastPathComponent, clipStart, clipDuration, trimStart, playheadTime, frameRate);
-
-    // Step 2: Use Vision framework to track subject
-    // Load the video and get the reference frame
-    AVAsset *asset = [AVAsset assetWithURL:mediaURL];
-    if (!asset) {
-        return @{@"error": @"Could not load media asset"};
+    if (!(clipDuration > 0)) {
+        return @{@"error": @"The selected clip has no duration on the timeline"};
     }
 
-    // The playhead time in source media coordinates
-    double sourceTime = trimStart + (playheadTime - clipStart);
+    // Step 2: Use Vision framework to track subject
+    AVAsset *asset = [AVAsset assetWithURL:mediaURL];
+    NSArray *videoTracksForAsset = [asset tracksWithMediaType:AVMediaTypeVideo];
+    if (!asset || videoTracksForAsset.count == 0) {
+        return @{@"error": [NSString stringWithFormat:
+            @"The selected clip's source media file has no video track to track a subject in: %@", mediaURL.lastPathComponent]};
+    }
+    double assetDuration = CMTimeGetSeconds(asset.duration);
+    double fileDuration = clipDuration / conformFactor;
+    double fileEnd = fileStart + fileDuration;
+    // The file range the clip plays, from FCP's readings (get_clip_info shows the same
+    // numbers). A range that misses the file cannot be tracked; say so with the readings
+    // instead of handing AVFoundation a time it answers with "Cannot Open".
+    if (fileEnd <= 0.0 || (isfinite(assetDuration) && assetDuration > 0 && fileStart >= assetDuration)) {
+        return @{@"error": [NSString stringWithFormat:
+            @"The selected clip's range (%.3f-%.3f s into %@, a %.3f s file) lies outside its media file, from "
+            @"SpliceKit's readings of FCP's clip object (source start %.3f s via %@, media origin %.3f s via %@; "
+            @"get_clip_info shows the same): there are no frames of this clip to track",
+            fileStart, fileEnd, mediaURL.lastPathComponent, assetDuration,
+            [source[@"sourceStart"] doubleValue], source[@"sourceStartSelector"] ?: @"none",
+            [source[@"mediaOrigin"] doubleValue], source[@"mediaOriginSelector"] ?: @"none"]};
+    }
+    double readStart = fmax(0.0, fileStart);
+    double readEnd = (isfinite(assetDuration) && assetDuration > 0) ? fmin(fileEnd, assetDuration) : fileEnd;
+
+    // The reference frame is the one under the playhead when the playhead is over the
+    // clip; otherwise the clip's first frame, and the answer says so.
+    double clipEnd = clipStart + clipDuration;
+    BOOL playheadOverClip = (playheadTime >= clipStart - 0.0005 && playheadTime < clipEnd - 0.0005);
+    double referenceTimelineTime = playheadOverClip ? playheadTime : clipStart;
+    double sourceTime = fileStart + (referenceTimelineTime - clipStart) / conformFactor;
+    if (sourceTime < readStart) sourceTime = readStart;
+    if (sourceTime > readEnd - 0.001) sourceTime = fmax(readStart, readEnd - 0.001);
     CMTime refTime = CMTimeMakeWithSeconds(sourceTime, 600);
 
-    // Generate reference frame
+    SpliceKit_log(@"[Stabilize] Clip: %@ (timeline %.3f-%.3f, file %.3f-%.3f of %.3f, reference %.3f -> file %.3f, local start %.3f, fps %.3f)",
+        mediaURL.lastPathComponent, clipStart, clipEnd, fileStart, fileEnd, assetDuration,
+        referenceTimelineTime, sourceTime, localStart, frameRate);
+
+    // Generate reference frame. Half a frame of tolerance either side: exact-time requests
+    // on long-GOP files can come back empty between frames.
     AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
     gen.appliesPreferredTrackTransform = YES;
-    gen.requestedTimeToleranceBefore = kCMTimeZero;
-    gen.requestedTimeToleranceAfter = kCMTimeZero;
+    CMTime halfFrame = CMTimeMakeWithSeconds(0.5 / fmax(frameRate, 1.0), 600000);
+    gen.requestedTimeToleranceBefore = halfFrame;
+    gen.requestedTimeToleranceAfter = halfFrame;
 
     NSError *imgErr = nil;
     CGImageRef refImage = [gen copyCGImageAtTime:refTime actualTime:nil error:&imgErr];
     if (!refImage) {
-        return @{@"error": [NSString stringWithFormat:@"Could not get reference frame: %@", imgErr.localizedDescription]};
+        return @{@"error": [NSString stringWithFormat:@"Could not read the reference frame at %.3f s into %@: %@",
+                            sourceTime, mediaURL.lastPathComponent, imgErr.localizedDescription ?: @"unknown error"]};
     }
 
     size_t imgWidth = CGImageGetWidth(refImage);
@@ -244,6 +276,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     // Use Vision to detect the subject at the reference frame
     // Default: track center region (40% of frame) if no specific subject
     CGRect initialBBox = CGRectMake(0.3, 0.3, 0.4, 0.4); // normalized, center region
+    NSString *subject = @"center region";
 
     // Try to detect a person/face first
     Class vnDetectReq = NSClassFromString(@"VNDetectHumanRectanglesRequest");
@@ -260,6 +293,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
             id obs = results[0];
             CGRect bbox = ((CGRect (*)(id, SEL))STRET_MSG)(obs, NSSelectorFromString(@"boundingBox"));
             initialBBox = bbox;
+            subject = @"person";
             SpliceKit_log(@"[Stabilize] Detected human at (%.2f, %.2f, %.2f, %.2f)",
                 bbox.origin.x, bbox.origin.y, bbox.size.width, bbox.size.height);
         }
@@ -283,8 +317,9 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
         }
         AVAssetTrack *videoTrack = videoTracks[0];
 
-        CMTime startCM = CMTimeMakeWithSeconds(trimStart, 600);
-        CMTime durCM = CMTimeMakeWithSeconds(clipDuration, 600);
+        // Only the part of the file the clip plays.
+        CMTime startCM = CMTimeMakeWithSeconds(readStart, 600);
+        CMTime durCM = CMTimeMakeWithSeconds(readEnd - readStart, 600);
         CMTimeRange range = CMTimeRangeMake(startCM, durCM);
 
         reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
@@ -323,12 +358,18 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     id sequenceHandler = [[vnSeqHandler alloc] init];
     int frameCount = 0;
     int totalFrames = (int)(clipDuration * frameRate);
+    // One keyframe per timeline frame: a 60 fps file in a 29.97 fps project is tracked on
+    // every file frame (tracking needs them) but keyframed at the project's rate.
+    double keyframeSpacing = 1.0 / fmax(frameRate, 1.0);
+    double lastKeyframeTime = -INFINITY;
 
     CMSampleBufferRef sampleBuffer;
     while ((sampleBuffer = [output copyNextSampleBuffer]) != NULL) {
         @autoreleasepool {
             CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-            double frameTime = CMTimeGetSeconds(pts) - trimStart; // time within clip
+            // Keyframe time in the clip's own time (clippedRange), where its effects live:
+            // the clip's local start plus how far into the clip this frame plays.
+            double frameTime = localStart + (CMTimeGetSeconds(pts) - fileStart) * conformFactor;
 
             CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
             if (!pixelBuffer) {
@@ -360,11 +401,14 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                 double dx = cx - refCenterX;
                 double dy = cy - refCenterY;
 
-                [frameDeltas addObject:@{
+                if (frameTime - lastKeyframeTime >= keyframeSpacing * 0.95) {
+                    lastKeyframeTime = frameTime;
+                    [frameDeltas addObject:@{
                     @"time": @(frameTime),
                     @"dx": @(dx),    // normalized 0-1
                     @"dy": @(dy),
-                }];
+                    }];
+                }
             }
 
             CFRelease(sampleBuffer);
@@ -460,7 +504,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
             if ([hexFormEffect respondsToSelector:setScaleSel]) {
                 typedef void (*SetScaleFn)(id, SEL, CMTime, double, double, double, unsigned int);
                 SetScaleFn setScale = (SetScaleFn)objc_msgSend;
-                CMTime t0 = CMTimeMakeWithSeconds(0, (int32_t)(frameRate * 100));
+                CMTime t0 = CMTimeMakeWithSeconds(localStart, (int32_t)(frameRate * 100));
                 setScale(hexFormEffect, setScaleSel, t0, 1.05, 1.05, 1.0, 0);
             }
 
@@ -523,6 +567,19 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
         @"clipDuration": @(clipDuration),
         @"undoName": undoRegistered ? @"Stabilize Subject" : [NSNull null],
         @"undoRegistered": @(undoRegistered),
+        @"subject": subject,
+        @"subjectNote": [subject isEqualToString:@"person"]
+            ? @"a person was detected at the reference frame and tracked"
+            : @"no person was detected at the reference frame (Vision's human detector found none); the centre 40% of the frame was tracked instead",
+        @"referenceFrame": @{
+            @"timelineTime": @(referenceTimelineTime),
+            @"fileTime": @(sourceTime),
+            @"atPlayhead": @(playheadOverClip),
+            @"note": playheadOverClip ? @"the frame under the playhead"
+                : @"the playhead was not over the selected clip, so its first frame was used",
+        },
+        @"timeline": @{@"start": @(clipStart), @"end": @(clipEnd)},
+        @"sourceMedia": @{@"path": mediaURL.path ?: @"", @"fileStart": @(readStart), @"fileEnd": @(readEnd)},
         @"referencePosition": @{
             @"x": @(refCenterX),
             @"y": @(refCenterY),

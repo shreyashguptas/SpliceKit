@@ -367,23 +367,44 @@ NSDictionary *SpliceKit_handleWorkspace(NSDictionary *params) {
 
 static NSString *SpliceKit_formatRolesAssignMenuError(NSString *menuError,
                                                       NSString *menuCategory,
-                                                      NSString *roleName) {
+                                                      NSString *roleName,
+                                                      NSArray<NSString *> *available) {
     if (!menuError.length) return @"Failed to assign role via menu";
-
-    NSRange availRange = [menuError rangeOfString:@"Available: "];
-    if (availRange.location != NSNotFound) {
-        NSString *suffix = [menuError substringFromIndex:availRange.location + availRange.length];
-        NSString *trimmed = [suffix stringByTrimmingCharactersInSet:
-            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length == 0) {
+    if ([menuError rangeOfString:@"not found"].location != NSNotFound ||
+        [menuError rangeOfString:@"Available: "].location != NSNotFound) {
+        if (available.count == 0) {
             return [NSString stringWithFormat:
-                @"Cannot assign role '%@' via Modify > %@: the submenu enumerated no items. "
-                @"Final Cut Pro only populates Assign Roles menus when it is the frontmost "
-                @"application. Bring Final Cut Pro to the front, keep a clip selected, and retry.",
-                roleName, menuCategory];
+                @"Cannot assign role '%@': Final Cut Pro offered no roles in Modify > %@ for the selected clip "
+                @"(it lists only the roles that apply to the selection: video roles need a clip with video, "
+                @"audio roles a clip with audio).", roleName, menuCategory];
         }
+        return [NSString stringWithFormat:@"No role named '%@' in Modify > %@. Available: %@",
+                roleName, menuCategory, [available componentsJoinedByString:@", "]];
     }
     return menuError;
+}
+
+// Final Cut Pro builds the Assign Roles submenus lazily: they stay empty until AppKit asks
+// the submenu's delegate (an FFRolesMenuController) to fill them as the menu opens, which
+// only happens when a person opens it with FCP in front. Asking that delegate ourselves
+// (-menuNeedsUpdate:, what AppKit calls) fills the submenu from the current selection
+// whether or not FCP is frontmost. Returns the submenu, or nil. Main thread only.
+static NSMenu *SpliceKit_populatedRolesSubmenu(NSString *menuCategory, NSArray<NSString *> **outTitles) {
+    NSMenu *modify = [[NSApp mainMenu] itemWithTitle:@"Modify"].submenu;
+    NSMenu *submenu = [modify itemWithTitle:menuCategory].submenu;
+    if (!submenu) return nil;
+    id delegate = submenu.delegate;
+    if ([delegate respondsToSelector:@selector(menuNeedsUpdate:)]) {
+        [(id<NSMenuDelegate>)delegate menuNeedsUpdate:submenu];
+    }
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    for (NSMenuItem *item in submenu.itemArray) {
+        if (item.isSeparatorItem || item.title.length == 0) continue;
+        if (item.action != NSSelectorFromString(@"changeRole:")) continue;   // not "Edit Roles…"
+        [titles addObject:item.title];
+    }
+    if (outTitles) *outTitles = titles;
+    return submenu;
 }
 
 NSDictionary *SpliceKit_handleRolesAssign(NSDictionary *params) {
@@ -418,20 +439,51 @@ NSDictionary *SpliceKit_handleRolesAssign(NSDictionary *params) {
                 return;
             }
 
+            NSArray<NSString *> *available = @[];
+            NSMenu *submenu = SpliceKit_populatedRolesSubmenu(menuCategory, &available);
+            if (!submenu) {
+                result = @{@"error": [NSString stringWithFormat:@"Modify > %@ is not in this Final Cut Pro version's menus", menuCategory]};
+                return;
+            }
+            // Match the role name as Final Cut Pro spells it (case-insensitive).
+            NSString *menuTitle = nil;
+            for (NSString *title in available) {
+                if ([title caseInsensitiveCompare:roleName] == NSOrderedSame) { menuTitle = title; break; }
+            }
+            if (!menuTitle) {
+                result = @{@"error": SpliceKit_formatRolesAssignMenuError(
+                               @"not found", menuCategory, roleName, available),
+                           @"available": available};
+                return;
+            }
+
             NSDictionary *menuResult = SpliceKit_handleMenuExecute(
-                @{@"menuPath": @[@"Modify", menuCategory, roleName]});
+                @{@"menuPath": @[@"Modify", menuCategory, menuTitle]});
             if (menuResult[@"error"]) {
                 result = @{
                     @"error": SpliceKit_formatRolesAssignMenuError(
-                        menuResult[@"error"], menuCategory, roleName),
+                        menuResult[@"error"], menuCategory, roleName, available),
                 };
                 return;
+            }
+            // Read the menu back: FCP checks the role every selected clip now has.
+            NSString *checked = nil;
+            SpliceKit_populatedRolesSubmenu(menuCategory, NULL);
+            for (NSMenuItem *item in submenu.itemArray) {
+                if (item.state == NSControlStateValueOn && item.action == NSSelectorFromString(@"changeRole:")) {
+                    checked = item.title; break;
+                }
             }
             result = @{
                 @"status": @"ok",
                 @"type": roleType,
-                @"role": roleName,
-                @"method": @"menu",
+                @"role": menuTitle,
+                @"method": @"Modify menu (submenu filled through its FFRolesMenuController)",
+                @"selectedClips": @([(NSArray *)selectedItems count]),
+                // An audio role checks its subrole ("Music-1" after choosing "Music").
+                @"verified": @((BOOL)([checked isEqualToString:menuTitle] ||
+                                      [checked hasPrefix:[menuTitle stringByAppendingString:@"-"]])),
+                @"roleNowChecked": checked ?: [NSNull null],
             };
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
