@@ -12,25 +12,10 @@
 
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
+#import "SpliceKitTime.h"
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-
-// --- CMTime struct (matches Core Media layout) ---
-typedef struct {
-    int64_t  value;
-    int32_t  timescale;
-    uint32_t flags;
-    int64_t  epoch;
-} SB_CMTime;
-
-// On ARM64, structs <= 16 bytes return in registers; our CMTime is 24 bytes so
-// we always use objc_msgSend (ARM64 passes large structs via hidden pointer).
-#if defined(__arm64__)
-#define SB_STRET_MSG objc_msgSend
-#else
-#define SB_STRET_MSG objc_msgSend_stret
-#endif
 
 // --- Constants ---
 static NSString * const kStructureStorylineName = @"SpliceKit Structure";
@@ -187,11 +172,8 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
         id seq = ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence));
         if (!seq) return;
 
-        SEL fdSel = NSSelectorFromString(@"frameDuration");
-        if ([seq respondsToSelector:fdSel]) {
-            SB_CMTime fd = ((SB_CMTime (*)(id, SEL))SB_STRET_MSG)(seq, fdSel);
-            if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
-        }
+        CMTime fd = SpliceKit_sequenceFrameDuration(seq);
+        if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
         SEL dnSel = NSSelectorFromString(@"displayName");
         if ([seq respondsToSelector:dnSel]) {
             userSequenceName = ((id (*)(id, SEL))objc_msgSend)(seq, dnSel);
@@ -321,9 +303,7 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
 
     // Load temp project
     SpliceKit_executeOnMainThread(^{
-        id appDelegate = [NSApp delegate];
-        id editorContainer = ((id (*)(id, SEL))objc_msgSend)(appDelegate,
-            NSSelectorFromString(@"activeEditorContainer"));
+        id editorContainer = SpliceKit_getEditorContainer();
         if (editorContainer) {
             SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
             if ([editorContainer respondsToSelector:loadSel]) {
@@ -385,9 +365,7 @@ NSDictionary *SpliceKit_handleStructureGenerateCaptions(NSDictionary *params) {
         }
 
         if (userSeq) {
-            id appDelegate = [NSApp delegate];
-            id editorContainer = ((id (*)(id, SEL))objc_msgSend)(appDelegate,
-                NSSelectorFromString(@"activeEditorContainer"));
+            id editorContainer = SpliceKit_getEditorContainer();
             if (editorContainer) {
                 SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
                 if ([editorContainer respondsToSelector:loadSel]) {

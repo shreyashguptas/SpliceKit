@@ -329,7 +329,7 @@ static NSDictionary *SpliceKit_structureGapSummary(id sequence, id gap) {
     NSString *name = SpliceKit_displayNameForItem(gap);
     info[@"name"] = name.length ? name : @"Gap";
     id primary = SpliceKit_structurePrimaryObject(sequence);
-    SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
     if (primary && SpliceKit_tryReadTimelineRange(primary, gap, &range)) {
         double start = SpliceKit_secondsFromTime(range.start);
         double duration = SpliceKit_secondsFromTime(range.duration);
@@ -357,7 +357,7 @@ static NSArray *SpliceKit_structureTrailingSpineGaps(id sequence, double recorde
     NSMutableArray *gaps = [NSMutableArray array];
     for (id item in items) {
         if (!SpliceKit_structureItemIsSpineGap(item)) continue;
-        SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         if (!SpliceKit_tryReadTimelineRange(primary, item, &range)) continue;
         double start = SpliceKit_secondsFromTime(range.start);
         if (!isfinite(start)) continue;
@@ -377,12 +377,12 @@ static NSDictionary *SpliceKit_structureDeleteSpineGaps(id sequence, id timeline
     id rootItem = SpliceKit_structurePrimaryObject(sequence);
     if (!rootItem) return @{@"error": @"No primary storyline object on sequence"};
 
-    SpliceKit_CMTime playhead = {0, 1, 0, 0};
+    CMTime playhead = {0, 1, 0, 0};
     if (timeline && [timeline respondsToSelector:@selector(playheadTime)]) {
-        playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+        playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
     }
     NSError *deleteError = nil;
-    BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, SpliceKit_CMTime *, NSError **))objc_msgSend)(
+    BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, CMTime *, NSError **))objc_msgSend)(
         sequence, deleteSel, gaps, rootItem, NO, NO, &playhead, &deleteError);
     if (deleteError) {
         return @{@"error": deleteError.localizedDescription ?: @"Failed to delete appended spine gap"};
@@ -621,7 +621,7 @@ static NSDictionary *SpliceKit_structureCaptionSummary(id sequence, id caption) 
     if (text) info[@"text"] = text;
 
     id primaryObject = SpliceKit_structurePrimaryObject(sequence);
-    SpliceKit_CMTimeRange range = {0};
+    CMTimeRange range = {0};
     if (primaryObject && SpliceKit_tryReadTimelineRange(primaryObject, caption, &range)) {
         double start = SpliceKit_secondsFromTime(range.start);
         double end = start + SpliceKit_secondsFromTime(range.duration);
@@ -664,18 +664,15 @@ static NSArray *SpliceKit_structureCaptionsToRemove(id sequence, BOOL *outUsedRe
 static void SpliceKit_structureSeekTimelineToSeconds(id timeline, id sequence, double seconds) {
     if (!timeline || seconds < 0) seconds = 0;
     int fdN = 100, fdD = 2400;
-    SEL fdSel = NSSelectorFromString(@"frameDuration");
-    if (sequence && [sequence respondsToSelector:fdSel]) {
-        SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-        if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
-    }
+    CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+    if (fd.timescale > 0) { fdN = (int)fd.value; fdD = fd.timescale; }
     double fps = (double)fdD / (double)fdN;
     long long frames = (long long)llround(seconds * fps);
     if (frames < 0) frames = 0;
-    SpliceKit_CMTime t = {frames * fdN, fdD, 1, 0};
+    CMTime t = {frames * fdN, fdD, 1, 0};
     SEL setSel = @selector(setPlayheadTime:);
     if ([timeline respondsToSelector:setSel]) {
-        ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(timeline, setSel, t);
+        ((void (*)(id, SEL, CMTime))objc_msgSend)(timeline, setSel, t);
     }
 }
 
@@ -684,8 +681,8 @@ static double SpliceKit_structureSequenceDurationSeconds(id sequence) {
 
     SEL durSel = NSSelectorFromString(@"duration");
     if ([sequence respondsToSelector:durSel]) {
-        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
-        double secs = SpliceKit_cmtimeToSeconds(d);
+        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
+        double secs = SpliceKit_secondsFromTime(d);
         if (secs > 0) return secs;
     }
 
@@ -705,8 +702,8 @@ static double SpliceKit_structureSequenceDurationSeconds(id sequence) {
     double total = 0;
     for (id item in (NSArray *)items) {
         if (![item respondsToSelector:@selector(duration)]) continue;
-        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-        double secs = SpliceKit_cmtimeToSeconds(d);
+        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        double secs = SpliceKit_secondsFromTime(d);
         if (secs > 0) total += secs;
     }
     return total;
@@ -756,7 +753,7 @@ NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
                 } @catch (NSException *e) {}
             }
             if (tm && [tm respondsToSelector:@selector(playheadTime)]) {
-                SpliceKit_CMTime saved = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
+                CMTime saved = ((CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
                 savedPlayheadSeconds = SpliceKit_secondsFromTime(saved);
             }
             if (tm) {
@@ -841,7 +838,7 @@ NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params) {
         SpliceKit_executeOnMainThread(^{
             id tm = SpliceKit_getActiveTimelineModule();
             if (tm && [tm respondsToSelector:@selector(playheadTime)]) {
-                SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
+                CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(tm, @selector(playheadTime));
                 playheadAfterPaste = SpliceKit_secondsFromTime(t);
             }
         });
@@ -972,13 +969,13 @@ NSDictionary *SpliceKit_serverStructureRemove(NSDictionary *params) {
                         return;
                     }
 
-                    SpliceKit_CMTime playhead = {0, 1, 0, 0};
+                    CMTime playhead = {0, 1, 0, 0};
                     if ([timeline respondsToSelector:@selector(playheadTime)]) {
-                        playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                        playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
                     }
 
                     NSError *deleteError = nil;
-                    BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, SpliceKit_CMTime *, NSError **))objc_msgSend)(
+                    BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, CMTime *, NSError **))objc_msgSend)(
                         sequence, deleteSel, captions, rootItem, NO, NO, &playhead, &deleteError);
                     if (deleteError) {
                         result = @{@"error": deleteError.localizedDescription ?: @"Failed to delete structure captions"};
@@ -1136,13 +1133,13 @@ NSDictionary *SpliceKit_handleNativeCaptionsRemove(NSDictionary *params) {
                     return;
                 }
 
-                SpliceKit_CMTime playhead = {0, 1, 0, 0};
+                CMTime playhead = {0, 1, 0, 0};
                 if ([timeline respondsToSelector:@selector(playheadTime)]) {
-                    playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                    playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
                 }
 
                 NSError *deleteError = nil;
-                BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, SpliceKit_CMTime *, NSError **))objc_msgSend)(
+                BOOL deleted = ((BOOL (*)(id, SEL, id, id, BOOL, BOOL, CMTime *, NSError **))objc_msgSend)(
                     sequence, deleteSel, toRemove, rootItem, NO, NO, &playhead, &deleteError);
                 if (deleteError || !deleted) {
                     NSString *reason = deleteError.localizedDescription ?: @"Failed to delete caption items";

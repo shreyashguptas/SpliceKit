@@ -12,20 +12,17 @@
 #pragma mark - Range Selection & Batch Export
 
 // Helper: build a CMTime from seconds using the sequence timescale
-SpliceKit_CMTime SpliceKit_buildCMTime(double seconds, id timeline) {
+CMTime SpliceKit_buildCMTime(double seconds, id timeline) {
     int32_t timescale = 24000; // default
     SEL seqSel = @selector(sequence);
     if ([timeline respondsToSelector:seqSel]) {
         id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
         if (sequence) {
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0) timescale = fd.timescale;
-            }
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0) timescale = fd.timescale;
         }
     }
-    SpliceKit_CMTime t;
+    CMTime t;
     t.value = (int64_t)(seconds * timescale);
     t.timescale = timescale;
     t.flags = 1; // kCMTimeFlags_Valid
@@ -34,11 +31,11 @@ SpliceKit_CMTime SpliceKit_buildCMTime(double seconds, id timeline) {
 }
 
 // Helper: seek playhead and mark in/out via direct responder chain (no key simulation)
-BOOL SpliceKit_seekAndMark(id timeline, SpliceKit_CMTime time, NSString *actionSelector) {
+BOOL SpliceKit_seekAndMark(id timeline, CMTime time, NSString *actionSelector) {
     // Seek playhead
     SEL setSel = @selector(setPlayheadTime:);
     if (![timeline respondsToSelector:setSel]) return NO;
-    ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(timeline, setSel, time);
+    ((void (*)(id, SEL, CMTime))objc_msgSend)(timeline, setSel, time);
 
     // Let FCP update playhead position
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
@@ -78,12 +75,9 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
             if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
 
             // Get frame duration for marker length
-            SpliceKit_CMTime frameDur = {100, 2400, 1, 0}; // default 24fps
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0) frameDur = fd;
-            }
+            CMTime frameDur = {100, 2400, 1, 0}; // default 24fps
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0) frameDur = fd;
 
             // Build a list of clips with their timeline start/end times so we can
             // target the correct clip for each marker (not just the longest one).
@@ -99,8 +93,8 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                 double cumulativeStart = 0;
                 for (id item in (NSArray *)containedItems) {
                     if (![item respondsToSelector:@selector(duration)]) continue;
-                    SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-                    double dur = (d.timescale > 0) ? (double)d.value / d.timescale : 0;
+                    CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+                    double dur = SpliceKit_secondsFromTime(d);
 
                     [clipInfos addObject:@{@"clip": item, @"start": @(cumulativeStart), @"end": @(cumulativeStart + dur)}];
                     cumulativeStart += dur;
@@ -118,7 +112,7 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
             SEL renameSel = NSSelectorFromString(@"actionChangeMarkerDisplayName:marker:error:");
             BOOL canRename = [sequence respondsToSelector:renameSel];
 
-            typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, SpliceKit_CMTimeRange, NSError **);
+            typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, CMTimeRange, NSError **);
             AddMarkerFn addMarker = (AddMarkerFn)objc_msgSend;
 
             int32_t ts = frameDur.timescale > 0 ? frameDur.timescale : 600;
@@ -178,8 +172,8 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                 // timeline = range.start - clipSourceStart + clipTimelineStart
                 // => range.start = clipSourceStart + (T - clipTimelineStart).
                 double rangeStartSeconds = clipSourceStart + localTime;
-                SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
-                SpliceKit_CMTimeRange range = {markerTime, frameDur};
+                CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
+                CMTimeRange range = {markerTime, frameDur};
                 NSError *err = nil;
                 BOOL ok = addMarker(sequence, addSel, targetClip, isToDo, isChapter, range, &err);
                 if (ok) {
@@ -191,10 +185,10 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params) {
                         // at the exact time we placed it
                         SEL markersSel = NSSelectorFromString(@"markersInTimeRange:");
                         if ([sequence respondsToSelector:markersSel]) {
-                            SpliceKit_CMTime searchEnd = markerTime;
+                            CMTime searchEnd = markerTime;
                             searchEnd.value += frameDur.value;
-                            SpliceKit_CMTimeRange searchRange = {markerTime, frameDur};
-                            id foundMarkers = ((id (*)(id, SEL, SpliceKit_CMTimeRange))objc_msgSend)(
+                            CMTimeRange searchRange = {markerTime, frameDur};
+                            id foundMarkers = ((id (*)(id, SEL, CMTimeRange))objc_msgSend)(
                                 sequence, markersSel, searchRange);
                             if ([foundMarkers respondsToSelector:@selector(lastObject)]) {
                                 id marker = ((id (*)(id, SEL))objc_msgSend)(foundMarkers, @selector(lastObject));
@@ -306,29 +300,24 @@ NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params) {
     return result ?: @{@"error": @"Failed to blade at times"};
 }
 
-double SpliceKit_secondsFromTime(SpliceKit_CMTime t) {
-    if (t.timescale <= 0) return 0.0;
-    return (double)t.value / (double)t.timescale;
-}
-
-BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, SpliceKit_CMTimeRange *outRange) {
+BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, CMTimeRange *outRange) {
     if (!primaryObj || !item || !outRange) return NO;
     SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
     if (![primaryObj respondsToSelector:erSel]) return NO;
     @try {
-        *outRange = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObj, erSel, item);
+        *outRange = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObj, erSel, item);
         return outRange->start.timescale > 0 && outRange->duration.timescale > 0;
     } @catch (NSException *e) {}
     return NO;
 }
 
-static BOOL SpliceKit_tryReadLocalAudioRange(id item, SpliceKit_CMTimeRange *outRange) {
+static BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange) {
     if (!item || !outRange) return NO;
 
     SEL audioSel = NSSelectorFromString(@"audioClippedRange");
     if ([item respondsToSelector:audioSel]) {
         @try {
-            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, audioSel);
+            CMTimeRange range = ((CMTimeRange (*)(id, SEL))STRET_MSG)(item, audioSel);
             if (range.start.timescale > 0 && range.duration.timescale > 0) {
                 *outRange = range;
                 return YES;
@@ -339,7 +328,7 @@ static BOOL SpliceKit_tryReadLocalAudioRange(id item, SpliceKit_CMTimeRange *out
     SEL clipSel = NSSelectorFromString(@"clippedRange");
     if ([item respondsToSelector:clipSel]) {
         @try {
-            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, clipSel);
+            CMTimeRange range = ((CMTimeRange (*)(id, SEL))STRET_MSG)(item, clipSel);
             if (range.start.timescale > 0 && range.duration.timescale > 0) {
                 *outRange = range;
                 return YES;
@@ -387,7 +376,7 @@ static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, 
     for (id entry in entries) {
         if (![entry respondsToSelector:timeSel]) continue;
         @try {
-            SpliceKit_CMTime time = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(entry, timeSel);
+            CMTime time = ((CMTime (*)(id, SEL))STRET_MSG)(entry, timeSel);
             double seconds = SpliceKit_secondsFromTime(time);
             if (isfinite(seconds)) [times addObject:@(seconds)];
         } @catch (NSException *e) {}
@@ -433,10 +422,10 @@ NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                         double *outTempo) {
     if (!clip || !primaryObj) return @[];
 
-    SpliceKit_CMTimeRange timelineRange;
+    CMTimeRange timelineRange;
     if (!SpliceKit_tryReadTimelineRange(primaryObj, clip, &timelineRange)) return @[];
 
-    SpliceKit_CMTimeRange localRange;
+    CMTimeRange localRange;
     if (!SpliceKit_tryReadLocalAudioRange(clip, &localRange)) return @[];
 
     double timelineStartSec = SpliceKit_secondsFromTime(timelineRange.start);
@@ -549,7 +538,7 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
     BOOL isConnectedStoryline = NO;
 
     if (!skipSelf) {
-        SpliceKit_CMTimeRange range;
+        CMTimeRange range;
         if (SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) {
             double startSec = SpliceKit_secondsFromTime(range.start);
             double durationSec = SpliceKit_secondsFromTime(range.duration);
@@ -729,12 +718,9 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SpliceKit_CMTime frameDuration = {100, 3000, 1, 0};
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
-            }
+            CMTime frameDuration = {100, 3000, 1, 0};
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
             double frameSeconds = MAX(0.001, SpliceKit_secondsFromTime(frameDuration));
             if (effectiveMinTrimSeconds < 0.0) effectiveMinTrimSeconds = frameSeconds;
             if (effectiveMinResultDuration < 0.0) effectiveMinResultDuration = frameSeconds * 2.0;
@@ -1067,7 +1053,7 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                     id animHint = nil;
                     void *errorPtr = NULL;
                     double trimAmount = [entry[@"trimAmount"] doubleValue];
-                    SpliceKit_CMTime delta = SpliceKit_buildCMTime(-trimAmount, timeline);
+                    CMTime delta = SpliceKit_buildCMTime(-trimAmount, timeline);
 
                     BOOL ok = NO;
                     @try {

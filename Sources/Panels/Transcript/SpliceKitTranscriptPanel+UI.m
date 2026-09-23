@@ -1013,30 +1013,30 @@
 
     __block double playheadTime = -1;
     @try {
-        id timeline = [self getActiveTimelineModule];
+        id timeline = SpliceKit_getActiveTimelineModule();
         if (!timeline) return;
 
         SEL currentTimeSel = NSSelectorFromString(@"currentSequenceTime");
         if ([timeline respondsToSelector:currentTimeSel]) {
-            SpliceKitTranscript_CMTime t = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+            CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(
                 timeline, currentTimeSel);
-            double secs = CMTimeToSeconds(t);
+            double secs = SpliceKit_secondsFromTime(t);
             if (secs >= 0) playheadTime = secs;
         }
 
         if (playheadTime < 0 && [timeline respondsToSelector:@selector(playheadTime)]) {
-            SpliceKitTranscript_CMTime t = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+            CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(
                 timeline, @selector(playheadTime));
-            playheadTime = CMTimeToSeconds(t);
+            playheadTime = SpliceKit_secondsFromTime(t);
         }
 
         if (playheadTime < 0) {
-            id container = [self getEditorContainer];
+            id container = SpliceKit_getEditorContainer();
             SEL pstSel = NSSelectorFromString(@"playheadSequenceTime");
             if (container && [container respondsToSelector:pstSel]) {
-                SpliceKitTranscript_CMTime t = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+                CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(
                     container, pstSel);
-                playheadTime = CMTimeToSeconds(t);
+                playheadTime = SpliceKit_secondsFromTime(t);
             }
         }
     } @catch (NSException *e) {}

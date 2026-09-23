@@ -25,19 +25,11 @@
         return;
     }
 
-    // Frame duration — CMTime is a 24-byte struct (value:8 + timescale:4 + flags:4 + epoch:8)
-    // ARM64: returned by value from objc_msgSend
-    // x86_64: returned via pointer (objc_msgSend_stret) for structs > 16 bytes
+    // Frame duration (a CMTime, returned in memory on x86_64: see STRET_MSG)
     SEL fdSel = NSSelectorFromString(@"sequenceFrameDuration");
     if ([timelineModule respondsToSelector:fdSel]) {
         @try {
-            typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } CMTimeStruct;
-#if defined(__arm64__)
-            CMTimeStruct fd = ((CMTimeStruct (*)(id, SEL))objc_msgSend)(timelineModule, fdSel);
-#else
-            CMTimeStruct fd;
-            ((void (*)(CMTimeStruct *, id, SEL))objc_msgSend_stret)(&fd, timelineModule, fdSel);
-#endif
+            CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(timelineModule, fdSel);
             SpliceKit_log(@"[Captions] Frame duration: %lld/%d", fd.value, fd.timescale);
             if (fd.timescale > 0 && fd.value > 0) {
                 self.fdNum = (int)fd.value;
@@ -89,7 +81,7 @@
         familyName = [familyName componentsSeparatedByString:@"-"].firstObject;
     }
 
-    [xml appendFormat:@" font=\"%@\"", SpliceKitCaption_escapeXML(familyName)];
+    [xml appendFormat:@" font=\"%@\"", SpliceKit_escapeXMLWithApostrophe(familyName)];
     [xml appendFormat:@" fontSize=\"%.0f\"", s.fontSize];
     [xml appendFormat:@" fontColor=\"%@\"", SpliceKitCaption_colorToFCPXML(color)];
     [xml appendString:@" alignment=\"center\""];
@@ -271,7 +263,7 @@
 
     // <title> — use start="3600s" (FCP standard for Motion titles)
     [xml appendFormat:@"%@<title ref=\"r2\"%@ offset=\"%@\" name=\"%@\" duration=\"%@\" start=\"3600s\">\n",
-        indent, laneAttr, offsetStr, SpliceKitCaption_escapeXML(text), durStr];
+        indent, laneAttr, offsetStr, SpliceKit_escapeXMLWithApostrophe(text), durStr];
 
     // Param 1: Content Position (in Motion template coordinate space)
     [xml appendFormat:@"%@    <param name=\"Content Position\" key=\"%@\" value=\"0 %.0f\"/>\n",
@@ -293,10 +285,10 @@
     // Visible text
     [xml appendFormat:@"%@    <text>\n", indent];
     [xml appendFormat:@"%@        <text-style ref=\"%@\">%@</text-style>\n",
-        indent, tsVis, SpliceKitCaption_escapeXML(mainText)];
+        indent, tsVis, SpliceKit_escapeXMLWithApostrophe(mainText)];
     if (punctText.length > 0) {
         [xml appendFormat:@"%@        <text-style ref=\"%@\">%@</text-style>\n",
-            indent, tsPunct, SpliceKitCaption_escapeXML(punctText)];
+            indent, tsPunct, SpliceKit_escapeXMLWithApostrophe(punctText)];
     }
     [xml appendFormat:@"%@    </text>\n", indent];
 
@@ -312,7 +304,7 @@
     [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" fontFace=\"%@\" "
         @"fontColor=\"%@\" strokeColor=\"%@\" strokeWidth=\"0\" "
         @"shadowColor=\"0 0 0 0.1947\" kerning=\"-3.2\" alignment=\"center\">\n",
-        indent, SpliceKitCaption_escapeXML(familyName), s.fontSize, fontFace, fontColorStr, hiliteStr];
+        indent, SpliceKit_escapeXMLWithApostrophe(familyName), s.fontSize, fontFace, fontColorStr, hiliteStr];
     [xml appendFormat:@"%@            <param name=\"MotionSimpleValues\" key=\"MotionTextStyle:SimpleValues\">\n", indent];
     [xml appendFormat:@"%@                <param name=\"motionTextTracking\" key=\"tracking\" value=\"-3.2\"/>\n", indent];
     [xml appendFormat:@"%@            </param>\n", indent];
@@ -323,7 +315,7 @@
         [xml appendFormat:@"%@        <text-style font=\"%@\" fontSize=\"%.0f\" fontFace=\"%@\" "
             @"fontColor=\"%@\" strokeColor=\"%@\" strokeWidth=\"0\" "
             @"shadowColor=\"0 0 0 0.1947\" alignment=\"center\"/>\n",
-            indent, SpliceKitCaption_escapeXML(familyName), s.fontSize, fontFace, fontColorStr, hiliteStr];
+            indent, SpliceKit_escapeXMLWithApostrophe(familyName), s.fontSize, fontFace, fontColorStr, hiliteStr];
         [xml appendFormat:@"%@    </text-style-def>\n", indent];
     }
     if (b64.length > 0) {
@@ -360,7 +352,7 @@
     NSString *posParam = [self contentPositionParamXML];
     if (posParam.length > 0) [xml appendFormat:@"%@    %@", indent, posParam];
     [xml appendFormat:@"%@    <text><text-style ref=\"%@\">%@</text-style></text>\n",
-        indent, tsID, SpliceKitCaption_escapeXML(text)];
+        indent, tsID, SpliceKit_escapeXMLWithApostrophe(text)];
     [xml appendFormat:@"%@    %@\n", indent, tsDef];
     [xml appendFormat:@"%@</title>\n", indent];
     return xml;

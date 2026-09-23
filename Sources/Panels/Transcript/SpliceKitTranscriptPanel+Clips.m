@@ -22,8 +22,8 @@
 
         double clipDuration = 0;
         if ([item respondsToSelector:@selector(duration)]) {
-            SpliceKitTranscript_CMTime d = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-            clipDuration = CMTimeToSeconds(d);
+            CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+            clipDuration = SpliceKit_secondsFromTime(d);
         }
 
         BOOL isMedia = [className containsString:@"MediaComponent"];
@@ -86,10 +86,10 @@
     if (![primaryObject respondsToSelector:erSel]) return NO;
 
     @try {
-        SpliceKitTranscript_CMTimeRange range =
-            ((SpliceKitTranscript_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObject, erSel, item);
-        double start = CMTimeToSeconds(range.start);
-        double duration = CMTimeToSeconds(range.duration);
+        CMTimeRange range =
+            ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObject, erSel, item);
+        double start = SpliceKit_secondsFromTime(range.start);
+        double duration = SpliceKit_secondsFromTime(range.duration);
         if (duration <= 0) return NO;
         if (startOut) *startOut = start;
         if (durationOut) *durationOut = duration;
@@ -104,9 +104,9 @@
     if (![item respondsToSelector:offsetSel]) return -1;
 
     @try {
-        SpliceKitTranscript_CMTime offset =
-            ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(item, offsetSel);
-        return CMTimeToSeconds(offset);
+        CMTime offset =
+            ((CMTime (*)(id, SEL))STRET_MSG)(item, offsetSel);
+        return SpliceKit_secondsFromTime(offset);
     } @catch (__unused NSException *e) {
         return -1;
     }
@@ -128,8 +128,8 @@
 
     double clipDuration = 0;
     if ([item respondsToSelector:@selector(duration)]) {
-        SpliceKitTranscript_CMTime d = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-        clipDuration = CMTimeToSeconds(d);
+        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        clipDuration = SpliceKit_secondsFromTime(d);
     }
     if (clipDuration <= 0) return;
 
@@ -158,11 +158,11 @@
     if (!innerMedia) return;
 
     double collTrimStart = 0;
-    SpliceKitTranscript_CMTimeRange collClipped;
+    CMTimeRange collClipped;
     if ([self readTimeRange:@"clippedRange" of:item into:&collClipped]) {
-        collTrimStart = CMTimeToSeconds(collClipped.start);
+        collTrimStart = SpliceKit_secondsFromTime(collClipped.start);
         SpliceKit_log(@"[Transcript]   collection clippedRange: start=%.2fs dur=%.2fs",
-                      collTrimStart, CMTimeToSeconds(collClipped.duration));
+                      collTrimStart, SpliceKit_secondsFromTime(collClipped.duration));
     }
 
     // A clip whose frame rate FCP conforms to the project's (30 fps media in a 29.97
@@ -187,12 +187,12 @@
             } @catch (__unused NSException *e) {}
         }
     }
-    SpliceKitTranscript_CMTimeRange collFull, mediaFull;
+    CMTimeRange collFull, mediaFull;
     if (!isContainerOfClips &&
         [self readTimeRange:@"unclippedRange" of:item into:&collFull] &&
         [self readTimeRange:@"unclippedRange" of:innerMedia into:&mediaFull]) {
-        double collStart = CMTimeToSeconds(collFull.start), collDur = CMTimeToSeconds(collFull.duration);
-        double mediaStart = CMTimeToSeconds(mediaFull.start), mediaDur = CMTimeToSeconds(mediaFull.duration);
+        double collStart = SpliceKit_secondsFromTime(collFull.start), collDur = SpliceKit_secondsFromTime(collFull.duration);
+        double mediaStart = SpliceKit_secondsFromTime(mediaFull.start), mediaDur = SpliceKit_secondsFromTime(mediaFull.duration);
         if (collDur > 0 && mediaDur > 0) {
             double factor = collDur / mediaDur;
             BOOL spacesDiffer = fabs(factor - 1.0) > 1e-5 || fabs(collStart - mediaStart) > 0.001;
@@ -219,12 +219,12 @@
     }
 }
 
-- (BOOL)readTimeRange:(NSString *)selectorName of:(id)object into:(SpliceKitTranscript_CMTimeRange *)out {
+- (BOOL)readTimeRange:(NSString *)selectorName of:(id)object into:(CMTimeRange *)out {
     SEL sel = NSSelectorFromString(selectorName);
     if (!object || ![object respondsToSelector:sel]) return NO;
     @try {
         NSMethodSignature *sig = [object methodSignatureForSelector:sel];
-        if (!sig || [sig methodReturnLength] != sizeof(SpliceKitTranscript_CMTimeRange)) return NO;
+        if (!sig || [sig methodReturnLength] != sizeof(CMTimeRange)) return NO;
         NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
         [inv setTarget:object];
         [inv setSelector:sel];
@@ -263,9 +263,9 @@
 
 - (void)addMediaClip:(id)clip timelineObject:(id)timelineObject duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
     double trimStart = 0;
-    SpliceKitTranscript_CMTimeRange unclipped;
+    CMTimeRange unclipped;
     if ([self readTimeRange:@"unclippedRange" of:clip into:&unclipped]) {
-        trimStart = CMTimeToSeconds(unclipped.start);
+        trimStart = SpliceKit_secondsFromTime(unclipped.start);
     }
     [self addMediaClip:clip
           timelineObject:timelineObject
@@ -289,14 +289,14 @@
             SEL volSel = NSSelectorFromString(@"audioLevelChannel");
             id channel = [stack respondsToSelector:volSel] ? ((id (*)(id, SEL))objc_msgSend)(stack, volSel) : nil;
             if (!channel) continue;
-            SpliceKitTranscript_CMTime indefinite = {0, 0, 17, 0};
+            CMTime indefinite = {0, 0, 17, 0};
             double gain = NAN;
             SEL curveSel = NSSelectorFromString(@"curveDoubleValueAtTime:");
             SEL valSel = NSSelectorFromString(@"doubleValueAtTime:");
             if ([channel respondsToSelector:curveSel]) {
-                gain = ((double (*)(id, SEL, SpliceKitTranscript_CMTime))objc_msgSend)(channel, curveSel, indefinite);
+                gain = ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, curveSel, indefinite);
             } else if ([channel respondsToSelector:valSel]) {
-                gain = ((double (*)(id, SEL, SpliceKitTranscript_CMTime))objc_msgSend)(channel, valSel, indefinite);
+                gain = ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, valSel, indefinite);
             }
             if (!isfinite(gain)) continue;
             return gain > 1e-6 ? 20.0 * log10(gain) : -INFINITY;
@@ -328,9 +328,9 @@
     // FCP stores times in the source media's timecode space, but external ASR tools
     // like Parakeet return file-relative timestamps starting from 0.
     double mediaOrigin = 0;
-    SpliceKitTranscript_CMTimeRange originRange;
+    CMTimeRange originRange;
     if ([self readTimeRange:@"unclippedRange" of:clip into:&originRange]) {
-        mediaOrigin = CMTimeToSeconds(originRange.start);
+        mediaOrigin = SpliceKit_secondsFromTime(originRange.start);
     }
     info[@"mediaOrigin"] = @(mediaOrigin);
 

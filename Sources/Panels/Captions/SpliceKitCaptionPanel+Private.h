@@ -21,28 +21,12 @@
 #import <QuartzCore/QuartzCore.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <dlfcn.h>
-
-#if defined(__x86_64__)
-#define STRET_MSG objc_msgSend_stret
-#else
-#define STRET_MSG objc_msgSend
-#endif
+#import "SpliceKitTime.h"
+#import "SpliceKitStrings.h"
 
 @interface SpliceKitCaptionPanel ()
 @property (nonatomic, strong) NSTextField *statusLabel;
 @end
-
-typedef struct {
-    int64_t value;
-    int32_t timescale;
-    uint32_t flags;
-    int64_t epoch;
-} SpliceKitCaption_CMTime;
-
-typedef struct {
-    SpliceKitCaption_CMTime start;
-    SpliceKitCaption_CMTime duration;
-} SpliceKitCaption_CMTimeRange;
 
 @interface SpliceKitCaptionPanel () <NSWindowDelegate>
 @property (nonatomic, strong) NSPanel *panel;
@@ -100,7 +84,6 @@ typedef struct {
 
 #pragma mark - Defined in SpliceKitCaptionPanel.m
 
-double SpliceKitCaption_CMTimeToSeconds(SpliceKitCaption_CMTime t);
 extern NSString * const kWP_ContentPositionKey;
 extern NSString * const kWP_ContentOpacityKey;
 extern NSString * const kWP_CustomSpeedKey;
@@ -112,7 +95,6 @@ extern const double kWP_FadeOutDuration;
 #pragma mark - Defined in SpliceKitCaptionStyle.m
 
 NSString *SpliceKitCaption_colorToFCPXML(NSColor *color);
-NSString *SpliceKitCaption_escapeXML(NSString *str);
 NSDictionary *SpliceKitCaption_transcriptWordToDictionary(SpliceKitTranscriptWord *word);
 SpliceKitTranscriptWord *SpliceKitCaption_transcriptWordFromDictionary(NSDictionary *dict);
 

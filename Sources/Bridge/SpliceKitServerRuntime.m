@@ -509,7 +509,7 @@ NSDictionary *SpliceKit_handleCallMethodWithArgs(NSDictionary *params) {
                     [inv setArgument:&val atIndex:argIdx];
                 } else if ([type isEqualToString:@"cmtime"]) {
                     NSDictionary *tv = arg[@"value"];
-                    SpliceKit_CMTime t = {
+                    CMTime t = {
                         .value = [tv[@"value"] longLongValue],
                         .timescale = [tv[@"timescale"] intValue],
                         .flags = 1, .epoch = 0

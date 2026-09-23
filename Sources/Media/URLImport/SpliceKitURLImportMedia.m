@@ -213,9 +213,7 @@ NSDictionary *SpliceKitURLImportFFprobeJSONForPath(NSString *path, NSString **ou
         return nil;
     }
 
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:ffprobe];
-    task.arguments = @[
+    NSArray *arguments = @[
         @"-v", @"error",
         @"-show_streams",
         @"-show_format",
@@ -223,22 +221,19 @@ NSDictionary *SpliceKitURLImportFFprobeJSONForPath(NSString *path, NSString **ou
         path,
     ];
 
-    NSPipe *pipe = [NSPipe pipe];
-    task.standardOutput = pipe;
-    task.standardError = pipe;
-
+    int status = -1;
+    NSData *data = nil;
     NSError *launchError = nil;
-    if (![task launchAndReturnError:&launchError]) {
+    if (SpliceKit_runProcess(ffprobe, arguments, nil, SpliceKitProcessMergeStderr, 0,
+                             &status, &data, NULL, &launchError) != SpliceKitProcessExited) {
         if (outError) {
             *outError = launchError.localizedDescription ?: @"Could not launch ffprobe to inspect the source media.";
         }
         return nil;
     }
 
-    NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
-    [task waitUntilExit];
     NSString *output = SpliceKitURLImportTrimmedString(SpliceKitURLImportStringFromData(data));
-    if (task.terminationStatus != 0) {
+    if (status != 0) {
         if (outError) {
             *outError = output.length > 0 ? output : @"ffprobe failed while inspecting the source media.";
         }

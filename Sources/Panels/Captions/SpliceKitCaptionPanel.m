@@ -34,10 +34,6 @@ NSNotificationName const SpliceKitCaptionDidGenerateNotification = @"SpliceKitCa
 
 id SpliceKitCaption_currentSequence(void);
 
-double SpliceKitCaption_CMTimeToSeconds(SpliceKitCaption_CMTime t) {
-    return (t.timescale > 0) ? (double)t.value / t.timescale : 0;
-}
-
 #pragma mark - Word-Progress Template Config (SpliceKit Caption)
 //
 // The legacy word-progress title export emits only 3 params per title:
@@ -748,10 +744,10 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
         [xml appendFormat:@"                            <caption lane=\"1\" offset=\"%@\" "
             @"name=\"%@\" duration=\"%@\" role=\"%@\">\n",
             offsetStr,
-            SpliceKitCaption_escapeXML(text),
+            SpliceKit_escapeXMLWithApostrophe(text),
             durStr, captionRole];
         [xml appendFormat:@"                                <text>%@</text>\n",
-            SpliceKitCaption_escapeXML(text)];
+            SpliceKit_escapeXMLWithApostrophe(text)];
         [xml appendString:@"                            </caption>\n"];
         captionCount++;
     }
@@ -809,9 +805,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
         tempSeq = SpliceKitCaption_findSequenceByPrefix(tempName);
         if (!tempSeq) return;
 
-        id appDelegate = [NSApp delegate];
-        id editorContainer = ((id (*)(id, SEL))objc_msgSend)(appDelegate,
-            NSSelectorFromString(@"activeEditorContainer"));
+        id editorContainer = SpliceKit_getEditorContainer();
         if (!editorContainer) return;
 
         SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
@@ -860,9 +854,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
             }
         }
 
-        id appDelegate = [NSApp delegate];
-        id editorContainer = ((id (*)(id, SEL))objc_msgSend)(appDelegate,
-            NSSelectorFromString(@"activeEditorContainer"));
+        id editorContainer = SpliceKit_getEditorContainer();
         if (editorContainer && userSequence) {
             SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
             if ([editorContainer respondsToSelector:loadSel]) {

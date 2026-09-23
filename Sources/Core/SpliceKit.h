@@ -348,7 +348,16 @@ extern Class SpliceKit_PEDocument;
 #pragma mark - Timeline Module
 
 // Get the active FFAnchoredTimelineModule. Returns nil if no project is open.
+// With the Dual Timeline open this is the focused window's timeline.
 id SpliceKit_getActiveTimelineModule(void);
+
+#pragma GCC visibility push(hidden)
+// The editor container (PEEditorContainerModule) SpliceKit_getActiveTimelineModule reads
+// its timeline module from: the Dual Timeline's focused container when that feature is
+// installed, else NSApp.delegate.activeEditorContainer. Load a project into the timeline
+// the user is working in with -loadEditorForSequence: on this.
+id SpliceKit_getEditorContainer(void);
+#pragma GCC visibility pop
 
 #pragma mark - Timeline Overview Bar
 

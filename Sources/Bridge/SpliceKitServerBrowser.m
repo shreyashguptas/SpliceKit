@@ -172,14 +172,14 @@ NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                         info[@"name"] = name ?: @"";
                     }
                     if ([clip respondsToSelector:@selector(duration)]) {
-                        SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
+                        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
                         info[@"duration"] = SpliceKit_serializeCMTime(d);
                     } else if ([clip respondsToSelector:NSSelectorFromString(@"clippedRange")]) {
-                        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                        CMTimeRange r = ((CMTimeRange (*)(id, SEL))STRET_MSG)(
                             clip, NSSelectorFromString(@"clippedRange"));
                         info[@"duration"] = SpliceKit_serializeCMTime(r.duration);
                     } else if ([clip respondsToSelector:NSSelectorFromString(@"unclippedRange")]) {
-                        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                        CMTimeRange r = ((CMTimeRange (*)(id, SEL))STRET_MSG)(
                             clip, NSSelectorFromString(@"unclippedRange"));
                         info[@"duration"] = SpliceKit_serializeCMTime(r.duration);
                     }
@@ -216,11 +216,11 @@ static NSString *SpliceKit_browserShortDescription(id obj, NSUInteger maxLength)
     return desc;
 }
 
-static BOOL SpliceKit_browserCMTimeIsUsable(SpliceKit_CMTime t) {
+static BOOL SpliceKit_browserCMTimeIsUsable(CMTime t) {
     return (t.timescale > 0 && t.value >= 0);
 }
 
-static void SpliceKit_browserAssignTime(NSMutableDictionary *dict, NSString *key, SpliceKit_CMTime t) {
+static void SpliceKit_browserAssignTime(NSMutableDictionary *dict, NSString *key, CMTime t) {
     if (!dict || key.length == 0) return;
     if (SpliceKit_browserCMTimeIsUsable(t)) {
         dict[key] = SpliceKit_serializeCMTime(t);
@@ -263,20 +263,20 @@ static NSDictionary *SpliceKit_browserTimelineItemSummary(id item, id container)
     if (name.length > 0) summary[@"name"] = name;
 
     if ([item respondsToSelector:@selector(duration)]) {
-        SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
         SpliceKit_browserAssignTime(summary, @"duration", duration);
     }
 
     SEL effectiveRangeSel = NSSelectorFromString(@"effectiveRangeOfObject:");
     if (container && [container respondsToSelector:effectiveRangeSel]) {
         @try {
-            SpliceKit_CMTimeRange range =
-                ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(container, effectiveRangeSel, item);
+            CMTimeRange range =
+                ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(container, effectiveRangeSel, item);
             if (SpliceKit_browserCMTimeIsUsable(range.start)) {
                 summary[@"startTime"] = SpliceKit_serializeCMTime(range.start);
             }
             if (SpliceKit_browserCMTimeIsUsable(range.duration)) {
-                SpliceKit_CMTime endTime = SpliceKit_endTimeForRange(range);
+                CMTime endTime = SpliceKit_endTimeForRange(range);
                 if (SpliceKit_browserCMTimeIsUsable(endTime)) {
                     summary[@"endTime"] = SpliceKit_serializeCMTime(endTime);
                 }
@@ -307,7 +307,7 @@ static NSDictionary *SpliceKit_browserPlacementSnapshot(id timelineModule, id cl
         NSString *sequenceName = SpliceKit_browserClipName(sequence);
         if (sequenceName.length > 0) snapshot[@"sequenceName"] = sequenceName;
         if ([sequence respondsToSelector:@selector(duration)]) {
-            SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
+            CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
             SpliceKit_browserAssignTime(snapshot, @"sequenceDuration", duration);
         }
     }
@@ -318,23 +318,23 @@ static NSDictionary *SpliceKit_browserPlacementSnapshot(id timelineModule, id cl
         snapshot[@"containerDescription"] = SpliceKit_browserShortDescription(container, 240);
         SEL endSel = NSSelectorFromString(@"endTimeOfLastContainedItem");
         if ([container respondsToSelector:endSel]) {
-            SpliceKit_CMTime end = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(container, endSel);
+            CMTime end = ((CMTime (*)(id, SEL))STRET_MSG)(container, endSel);
             SpliceKit_browserAssignTime(snapshot, @"containerEndTime", end);
         }
     }
 
     SEL currentSel = NSSelectorFromString(@"currentSequenceTime");
     if ([timelineModule respondsToSelector:currentSel]) {
-        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timelineModule, currentSel);
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timelineModule, currentSel);
         SpliceKit_browserAssignTime(snapshot, @"currentSequenceTime", t);
     }
     if ([timelineModule respondsToSelector:@selector(playheadTime)]) {
-        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timelineModule, @selector(playheadTime));
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timelineModule, @selector(playheadTime));
         SpliceKit_browserAssignTime(snapshot, @"playheadTime", t);
     }
     SEL committedSel = NSSelectorFromString(@"committedPlayheadTime");
     if ([timelineModule respondsToSelector:committedSel]) {
-        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timelineModule, committedSel);
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timelineModule, committedSel);
         SpliceKit_browserAssignTime(snapshot, @"committedPlayheadTime", t);
     }
 
@@ -931,18 +931,18 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             // starts at the source timecode), so inSeconds/outSeconds count from that frame.
             // browser.listClips reports `duration`, which can differ from clippedRange; the
             // range end is accepted up to the longer of the two.
-            SpliceKit_CMTimeRange clipRange = {0};
+            CMTimeRange clipRange = {0};
             BOOL haveClipRange = NO;
             if ([clip respondsToSelector:@selector(clippedRange)]) {
-                clipRange = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(clip, @selector(clippedRange));
+                clipRange = ((CMTimeRange (*)(id, SEL))STRET_MSG)(clip, @selector(clippedRange));
                 haveClipRange = clipRange.duration.timescale > 0;
             }
             double listedDuration = NAN;
             if ([clip respondsToSelector:@selector(duration)]) {
-                SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
+                CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
                 if (dur.timescale > 0) listedDuration = (double)dur.value / (double)dur.timescale;
                 if (!haveClipRange && dur.timescale > 0) {
-                    clipRange.start = (SpliceKit_CMTime){0, dur.timescale, 1, 0};
+                    clipRange.start = (CMTime){0, dur.timescale, 1, 0};
                     clipRange.duration = dur;
                     haveClipRange = YES;
                 }
@@ -961,7 +961,7 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             SEL clipFrameSel = NSSelectorFromString(@"frameDuration");
             if ([clip respondsToSelector:clipFrameSel]) {
                 @try {
-                    SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, clipFrameSel);
+                    CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(clip, clipFrameSel);
                     if (fd.timescale > 0 && fd.value > 0) clipFrameSeconds = (double)fd.value / (double)fd.timescale;
                 } @catch (__unused NSException *e) {}
             }
@@ -1006,7 +1006,7 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                 }
             }
 
-            SpliceKit_CMTimeRange sourceRange = clipRange;
+            CMTimeRange sourceRange = clipRange;
             if (!wholeClip) {
                 int32_t startScale = clipRange.start.timescale > 0 ? clipRange.start.timescale : clipRange.duration.timescale;
                 int32_t durationScale = clipRange.duration.timescale;
@@ -1079,7 +1079,7 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
             Class rangeObjClass = objc_getClass("FigTimeRangeAndObject");
             SEL rangeAndObjSel = NSSelectorFromString(@"rangeAndObjectWithRange:andObject:");
             if (haveClipRange && rangeObjClass && [(id)rangeObjClass respondsToSelector:rangeAndObjSel]) {
-                mediaRange = ((id (*)(id, SEL, SpliceKit_CMTimeRange, id))objc_msgSend)(
+                mediaRange = ((id (*)(id, SEL, CMTimeRange, id))objc_msgSend)(
                     (id)rangeObjClass, rangeAndObjSel, sourceRange, clip);
             }
             if (!wholeClip && !mediaRange) {

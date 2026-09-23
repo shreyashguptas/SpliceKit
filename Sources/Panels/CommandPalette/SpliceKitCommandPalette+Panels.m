@@ -362,25 +362,8 @@
 #pragma mark - Remove Silences
 
 - (NSString *)findSilenceDetector {
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    // 1. Inside the FCP framework bundle (deployed by patcher)
-    NSString *buildDir = [[[NSBundle mainBundle] bundlePath]
-        stringByAppendingPathComponent:@"Contents/Frameworks/SpliceKit.framework/Versions/A/Resources"];
-    NSString *builtPath = [buildDir stringByAppendingPathComponent:@"silence-detector"];
-    if ([fm isExecutableFileAtPath:builtPath]) return builtPath;
-
-    // 2. Common deploy directories
-    NSString *home = NSHomeDirectory();
-    NSArray *paths = @[
-        [home stringByAppendingPathComponent:@"Applications/SpliceKit/tools/silence-detector"],
-        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/silence-detector"],
-        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/build/silence-detector"],
-    ];
-    for (NSString *p in paths) {
-        if ([fm isExecutableFileAtPath:p]) return p;
-    }
-    return nil;
+    // The framework's Resources (deployed by make install), then the per-user tool locations.
+    return SpliceKit_findHelperTool(@"silence-detector", nil);
 }
 
 - (void)showSilenceOptionsPanel {
@@ -569,22 +552,18 @@
                     tlOff += dur; continue;
                 }
 
-                NSTask *t = [[NSTask alloc] init];
-                t.executableURL = [NSURL fileURLWithPath:detector];
-                t.arguments = @[mp, @"--threshold", threshold, @"--min-duration", minDurStr,
-                                @"--padding", padStr,
-                                @"--start", [NSString stringWithFormat:@"%.4f", trim],
-                                @"--end", [NSString stringWithFormat:@"%.4f", trim + dur]];
-                NSPipe *op = [NSPipe pipe];
-                t.standardOutput = op;
-                t.standardError = [NSPipe pipe];
-                NSError *e = nil;
-                [t launchAndReturnError:&e];
-                if (e) { tlOff += dur; continue; }
-                [t waitUntilExit];
+                NSArray *detectorArgs = @[mp, @"--threshold", threshold, @"--min-duration", minDurStr,
+                                          @"--padding", padStr,
+                                          @"--start", [NSString stringWithFormat:@"%.4f", trim],
+                                          @"--end", [NSString stringWithFormat:@"%.4f", trim + dur]];
+                int detectorStatus = -1;
+                NSData *d = nil;
+                if (SpliceKit_runProcess(detector, detectorArgs, nil, SpliceKitProcessOptionsNone, 0,
+                                         &detectorStatus, &d, NULL, NULL) != SpliceKitProcessExited) {
+                    tlOff += dur; continue;
+                }
 
-                if (t.terminationStatus == 0) {
-                    NSData *d = [op.fileHandleForReading readDataToEndOfFile];
+                if (detectorStatus == 0) {
                     NSDictionary *r = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
                     for (NSDictionary *rng in r[@"silentRanges"]) {
                         double ss = [rng[@"start"] doubleValue], se = [rng[@"end"] doubleValue];

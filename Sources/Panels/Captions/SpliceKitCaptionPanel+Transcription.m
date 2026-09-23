@@ -162,8 +162,8 @@
 
         double clipDuration = 0;
         if ([item respondsToSelector:@selector(duration)]) {
-            SpliceKitCaption_CMTime d = ((SpliceKitCaption_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-            clipDuration = SpliceKitCaption_CMTimeToSeconds(d);
+            CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+            clipDuration = SpliceKit_secondsFromTime(d);
         }
 
         BOOL isMedia = [className containsString:@"MediaComponent"];
@@ -209,10 +209,10 @@
     if (![primaryObject respondsToSelector:rangeSel]) return NO;
 
     @try {
-        SpliceKitCaption_CMTimeRange range =
-            ((SpliceKitCaption_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObject, rangeSel, item);
-        double start = SpliceKitCaption_CMTimeToSeconds(range.start);
-        double duration = SpliceKitCaption_CMTimeToSeconds(range.duration);
+        CMTimeRange range =
+            ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObject, rangeSel, item);
+        double start = SpliceKit_secondsFromTime(range.start);
+        double duration = SpliceKit_secondsFromTime(range.duration);
         if (duration <= 0) return NO;
         if (startOut) *startOut = start;
         if (durationOut) *durationOut = duration;
@@ -227,9 +227,9 @@
     if (![item respondsToSelector:offsetSel]) return -1;
 
     @try {
-        SpliceKitCaption_CMTime offset =
-            ((SpliceKitCaption_CMTime (*)(id, SEL))STRET_MSG)(item, offsetSel);
-        return SpliceKitCaption_CMTimeToSeconds(offset);
+        CMTime offset =
+            ((CMTime (*)(id, SEL))STRET_MSG)(item, offsetSel);
+        return SpliceKit_secondsFromTime(offset);
     } @catch (__unused NSException *e) {
         return -1;
     }
@@ -248,8 +248,8 @@
 
     double clipDuration = 0;
     if ([item respondsToSelector:@selector(duration)]) {
-        SpliceKitCaption_CMTime d = ((SpliceKitCaption_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-        clipDuration = SpliceKitCaption_CMTimeToSeconds(d);
+        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        clipDuration = SpliceKit_secondsFromTime(d);
     }
     if (clipDuration <= 0) return;
 
@@ -275,14 +275,14 @@
     SEL crSel = NSSelectorFromString(@"clippedRange");
     if ([item respondsToSelector:crSel]) {
         NSMethodSignature *sig = [item methodSignatureForSelector:crSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitCaption_CMTimeRange)) {
-            SpliceKitCaption_CMTimeRange range;
+        if (sig && [sig methodReturnLength] == sizeof(CMTimeRange)) {
+            CMTimeRange range;
             NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:item];
             [inv setSelector:crSel];
             [inv invoke];
             [inv getReturnValue:&range];
-            collTrimStart = SpliceKitCaption_CMTimeToSeconds(range.start);
+            collTrimStart = SpliceKit_secondsFromTime(range.start);
         }
     }
 
@@ -324,14 +324,14 @@
     SEL unclippedSel = NSSelectorFromString(@"unclippedRange");
     if ([clip respondsToSelector:unclippedSel]) {
         NSMethodSignature *sig = [clip methodSignatureForSelector:unclippedSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitCaption_CMTimeRange)) {
-            SpliceKitCaption_CMTimeRange range;
+        if (sig && [sig methodReturnLength] == sizeof(CMTimeRange)) {
+            CMTimeRange range;
             NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:clip];
             [inv setSelector:unclippedSel];
             [inv invoke];
             [inv getReturnValue:&range];
-            trimStart = SpliceKitCaption_CMTimeToSeconds(range.start);
+            trimStart = SpliceKit_secondsFromTime(range.start);
         }
     }
     [self addMediaClip:clip
@@ -356,14 +356,14 @@
     SEL ucSel = NSSelectorFromString(@"unclippedRange");
     if ([clip respondsToSelector:ucSel]) {
         NSMethodSignature *sig = [clip methodSignatureForSelector:ucSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitCaption_CMTimeRange)) {
-            SpliceKitCaption_CMTimeRange range;
+        if (sig && [sig methodReturnLength] == sizeof(CMTimeRange)) {
+            CMTimeRange range;
             NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:clip];
             [inv setSelector:ucSel];
             [inv invoke];
             [inv getReturnValue:&range];
-            mediaOrigin = SpliceKitCaption_CMTimeToSeconds(range.start);
+            mediaOrigin = SpliceKit_secondsFromTime(range.start);
         }
     }
     info[@"mediaOrigin"] = @(mediaOrigin);
@@ -453,7 +453,7 @@
 
             // Detect frame rate
             if ([timeline respondsToSelector:@selector(sequenceFrameDuration)]) {
-                SpliceKitCaption_CMTime fd = ((SpliceKitCaption_CMTime (*)(id, SEL))STRET_MSG)(
+                CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;

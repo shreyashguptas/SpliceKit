@@ -400,8 +400,8 @@ static NSDictionary *SpliceKit_readChannel(id channel, double timeSeconds) {
     @try {
         SEL valSel = NSSelectorFromString(@"doubleValueAtTime:");
         if ([channel respondsToSelector:valSel]) {
-            SpliceKit_CMTime t = {(int64_t)(timeSeconds * 600), 600, 1, 0};
-            double val = ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, valSel, t);
+            CMTime t = {(int64_t)(timeSeconds * 600), 600, 1, 0};
+            double val = ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, valSel, t);
             info[@"value"] = @(val);
         }
     } @catch (NSException *e) {}
@@ -480,30 +480,30 @@ double SpliceKit_channelValue(id channel) {
     if (!channel) return 0;
     @try {
         // Use kCMTimeIndefinite: {0, 0, 17, 0} for constant (non-keyframed) value
-        SpliceKit_CMTime t = {0, 0, 17, 0};
+        CMTime t = {0, 0, 17, 0};
         SEL sel = NSSelectorFromString(@"curveDoubleValueAtTime:");
         if ([channel respondsToSelector:sel]) {
-            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, t);
+            return ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, sel, t);
         }
         sel = NSSelectorFromString(@"doubleValueAtTime:");
         if ([channel respondsToSelector:sel]) {
-            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, t);
+            return ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, sel, t);
         }
     } @catch (NSException *e) {}
     return 0;
 }
 
 // Read channel value at a specific time (for keyframed parameters)
-double SpliceKit_channelValueAtTime(id channel, SpliceKit_CMTime time) {
+double SpliceKit_channelValueAtTime(id channel, CMTime time) {
     if (!channel) return 0;
     @try {
         SEL sel = NSSelectorFromString(@"curveDoubleValueAtTime:");
         if ([channel respondsToSelector:sel]) {
-            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, time);
+            return ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, sel, time);
         }
         sel = NSSelectorFromString(@"doubleValueAtTime:");
         if ([channel respondsToSelector:sel]) {
-            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, time);
+            return ((double (*)(id, SEL, CMTime))objc_msgSend)(channel, sel, time);
         }
     } @catch (NSException *e) {}
     return 0;
@@ -543,12 +543,12 @@ BOOL SpliceKit_removeChannelKeyframes(id channel) {
     return NO;
 }
 
-BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, SpliceKit_CMTime time, unsigned int options) {
+BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, CMTime time, unsigned int options) {
     if (!channel) return NO;
     @try {
         SEL sel = NSSelectorFromString(@"setCurveDoubleValue:atTime:options:");
         if ([channel respondsToSelector:sel]) {
-            ((void (*)(id, SEL, double, SpliceKit_CMTime, unsigned int))objc_msgSend)(
+            ((void (*)(id, SEL, double, CMTime, unsigned int))objc_msgSend)(
                 channel, sel, value, time, options);
             return YES;
         }
@@ -556,13 +556,13 @@ BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, Splice
     return NO;
 }
 
-BOOL SpliceKit_setChannelValueAtTime(id channel, double value, SpliceKit_CMTime time) {
+BOOL SpliceKit_setChannelValueAtTime(id channel, double value, CMTime time) {
     return SpliceKit_setChannelValueAtTimeWithOptions(channel, value, time, 0);
 }
 
 // Helper: set a double on a channel
 BOOL SpliceKit_setChannelValue(id channel, double value) {
-    SpliceKit_CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
+    CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
     return SpliceKit_setChannelValueAtTime(channel, value, t);
 }
 

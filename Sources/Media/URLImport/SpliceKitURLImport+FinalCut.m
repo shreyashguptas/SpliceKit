@@ -62,9 +62,9 @@
     NSString *uid = [[NSUUID UUID] UUIDString];
     NSString *fmtID = [NSString stringWithFormat:@"fmt_%@", [uid substringToIndex:8]];
     NSString *assetID = [NSString stringWithFormat:@"asset_%@", [uid substringToIndex:8]];
-    NSString *clipName = SpliceKitURLImportEscapeXML(job.clipName ?: @"Imported Clip");
-    NSString *escapedEvent = SpliceKitURLImportEscapeXML(eventName ?: @"URL Imports");
-    NSString *mediaURL = SpliceKitURLImportEscapeXML(
+    NSString *clipName = SpliceKit_escapeXMLWithApostrophe(job.clipName ?: @"Imported Clip");
+    NSString *escapedEvent = SpliceKit_escapeXMLWithApostrophe(eventName ?: @"URL Imports");
+    NSString *mediaURL = SpliceKit_escapeXMLWithApostrophe(
         [[[NSURL fileURLWithPath:(job.normalizedPath ?: job.downloadPath)] absoluteURL] absoluteString]);
     NSString *duration = mediaInfo[@"duration"] ?: @"2400/2400s";
     NSString *frameDuration = mediaInfo[@"frameDuration"] ?: @"100/2400s";

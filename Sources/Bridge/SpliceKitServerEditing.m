@@ -76,7 +76,7 @@ static NSDictionary *SpliceKit_handleSelectionEntryForItem(id item, id primaryOb
     entry[@"name"] = SpliceKit_displayNameForItem(item) ?: @"";
     entry[@"class"] = NSStringFromClass([item class]) ?: @"";
     entry[@"lane"] = @(SpliceKit_laneForItem(item));
-    SpliceKit_CMTimeRange range;
+    CMTimeRange range;
     if (SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) {
         entry[@"startTime"] = SpliceKit_serializeCMTime(range.start);
         entry[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
@@ -105,7 +105,7 @@ static NSDictionary *SpliceKit_handleFindConnectedEntry(id primaryObj, id target
     NSMutableSet *visited = [NSMutableSet set];
     NSInteger spineIndex = 0;
     for (id spineItem in spineItems) {
-        SpliceKit_CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         BOOL haveSpineStart = SpliceKit_tryReadTimelineRange(primaryObj, spineItem, &sr);
         double spineStart = haveSpineStart ? SpliceKit_secondsFromTime(sr.start) : 0.0;
         SpliceKit_collectConnectedItems(spineItem, primaryObj, primaryObj, 0.0, YES,
@@ -126,7 +126,7 @@ static NSDictionary *SpliceKit_handleFindConnectedEntry(id primaryObj, id target
 // the clip is a nested connected clip whose absolute range the spine cannot
 // report, *outRange has timescale 0 (callers that need a range check for it).
 id SpliceKit_handleResolveTimelineClip(NSString *handle, id primaryObj,
-                                              SpliceKit_CMTimeRange *outRange,
+                                              CMTimeRange *outRange,
                                               NSString **outError) {
     id obj = SpliceKit_resolveHandle(handle);
     if (!obj) {
@@ -144,7 +144,7 @@ id SpliceKit_handleResolveTimelineClip(NSString *handle, id primaryObj,
         if (outError) *outError = @"markers are not clips; use the marker actions (changeMarkerName, markMarkerCompleted, removeMarker)";
         return nil;
     }
-    SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
     if (!SpliceKit_tryReadTimelineRange(primaryObj, obj, &range)) {
         // Not directly on the spine's coordinate system: nested connected clips
         // (inside a connected storyline, or anchored to a connected clip).
@@ -162,8 +162,8 @@ id SpliceKit_handleResolveTimelineClip(NSString *handle, id primaryObj,
             if ((int32_t)[et[@"timescale"] intValue] != ts) {
                 endValue = (long long)llround([et[@"seconds"] doubleValue] * ts);
             }
-            SpliceKit_CMTime start = {startValue, ts, 1, 0};
-            SpliceKit_CMTime duration = {endValue - startValue, ts, 1, 0};
+            CMTime start = {startValue, ts, 1, 0};
+            CMTime duration = {endValue - startValue, ts, 1, 0};
             range.start = start;
             range.duration = duration;
         }
@@ -362,7 +362,7 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SpliceKit_CMTimeRange beforeRange;
+            CMTimeRange beforeRange;
             NSString *resolveError = nil;
             id item = SpliceKit_handleResolveTimelineClip(handle, primaryObj, &beforeRange, &resolveError);
             if (!item) {
@@ -415,12 +415,9 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                 ? @"primary storyline: subsequent clips and their connected clips move"
                 : @"connected clip only: the primary storyline does not ripple";
 
-            SpliceKit_CMTime frameDuration = {100, 3000, 1, 0};
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
-            }
+            CMTime frameDuration = {100, 3000, 1, 0};
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
             double frameSeconds = MAX(0.001, SpliceKit_secondsFromTime(frameDuration));
             double halfFrame = frameSeconds / 2.0;
 
@@ -533,7 +530,7 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
             // through NULL (the actionTrimDuration crash we hit before).
             NSError * __autoreleasing trimError = nil;
             NSError * __autoreleasing *trimErrorPtr = &trimError;
-            SpliceKit_CMTime deltaTime = SpliceKit_buildCMTime(delta, timeline);
+            CMTime deltaTime = SpliceKit_buildCMTime(delta, timeline);
             if (deltaTime.timescale == frameDuration.timescale) {
                 deltaTime.value = deltaFrames * frameDuration.value;   // exact frame multiple
             }
@@ -620,7 +617,7 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params) {
                           invokeError ? [NSString stringWithFormat:@" (%@)", invokeError] : @"", undoStepLog);
 
             // Re-read the clip's absolute range and judge the result by its duration.
-            SpliceKit_CMTimeRange afterRange;
+            CMTimeRange afterRange;
             BOOL afterReadable = SpliceKit_tryReadTimelineRange(primaryObj, item, &afterRange);
             double afterStart = afterReadable ? SpliceKit_secondsFromTime(afterRange.start) : beforeStart;
             double afterDuration = afterReadable ? SpliceKit_secondsFromTime(afterRange.duration) : beforeDuration;

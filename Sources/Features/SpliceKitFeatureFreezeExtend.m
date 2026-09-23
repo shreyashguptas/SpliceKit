@@ -45,12 +45,9 @@ double SpliceKit_transitionFrameDurationSeconds(id timeline) {
     SEL seqSel = @selector(sequence);
     if ([timeline respondsToSelector:seqSel]) {
         id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
-        SEL fdSel = NSSelectorFromString(@"frameDuration");
-        if (sequence && [sequence respondsToSelector:fdSel]) {
-            SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-            if (fd.timescale > 0 && fd.value > 0) {
-                seconds = (double)fd.value / (double)fd.timescale;
-            }
+        CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+        if (fd.timescale > 0 && fd.value > 0) {
+            seconds = (double)fd.value / (double)fd.timescale;
         }
     }
     return MAX(seconds, 1.0 / 120.0);
@@ -59,9 +56,8 @@ double SpliceKit_transitionFrameDurationSeconds(id timeline) {
 double SpliceKit_transitionCurrentTimeSeconds(id timeline) {
     SEL currentTimeSel = NSSelectorFromString(@"currentSequenceTime");
     if (![timeline respondsToSelector:currentTimeSel]) return 0.0;
-    SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, currentTimeSel);
-    if (t.timescale <= 0) return 0.0;
-    return (double)t.value / (double)t.timescale;
+    CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, currentTimeSel);
+    return SpliceKit_secondsFromTime(t);
 }
 
 BOOL SpliceKit_transitionSeekToSeconds(id timeline, double seconds) {
@@ -71,22 +67,19 @@ BOOL SpliceKit_transitionSeekToSeconds(id timeline, double seconds) {
     SEL seqSel = @selector(sequence);
     if ([timeline respondsToSelector:seqSel]) {
         id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
-        SEL fdSel = NSSelectorFromString(@"frameDuration");
-        if (sequence && [sequence respondsToSelector:fdSel]) {
-            SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-            if (fd.timescale > 0) timescale = fd.timescale;
-        }
+        CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+        if (fd.timescale > 0) timescale = fd.timescale;
     }
 
     SEL setSel = @selector(setPlayheadTime:);
     if (![timeline respondsToSelector:setSel]) return NO;
 
-    SpliceKit_CMTime targetTime;
+    CMTime targetTime;
     targetTime.value = (int64_t)llround(seconds * (double)timescale);
     targetTime.timescale = timescale;
     targetTime.flags = 1;
     targetTime.epoch = 0;
-    ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(timeline, setSel, targetTime);
+    ((void (*)(id, SEL, CMTime))objc_msgSend)(timeline, setSel, targetTime);
     return YES;
 }
 
@@ -105,8 +98,8 @@ static BOOL SpliceKit_transitionGetItemBounds(id item, double *outStart, double 
     SEL durSel = @selector(duration);
     if (![item respondsToSelector:startSel] || ![item respondsToSelector:durSel]) return NO;
 
-    SpliceKit_CMTime start = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, startSel);
-    SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, durSel);
+    CMTime start = ((CMTime (*)(id, SEL))STRET_MSG)(item, startSel);
+    CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(item, durSel);
     if (start.timescale <= 0 || duration.timescale <= 0) return NO;
 
     *outStart = (double)start.value / (double)start.timescale;
@@ -122,8 +115,8 @@ static BOOL SpliceKit_transitionGetItemBoundsInContext(id context, id item,
     SEL rangeSel = NSSelectorFromString(@"effectiveRangeOfObject:");
     if (![context respondsToSelector:rangeSel]) return NO;
 
-    SpliceKit_CMTimeRange range =
-        ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(context, rangeSel, item);
+    CMTimeRange range =
+        ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(context, rangeSel, item);
     if (range.start.timescale <= 0 || range.duration.timescale <= 0) return NO;
 
     *outStart = (double)range.start.value / (double)range.start.timescale;
@@ -313,7 +306,7 @@ static double SpliceKit_defaultTransitionDurationSeconds(id timeline) {
     SEL durSel = NSSelectorFromString(@"defaultTransitionDurationForVideo");
     if (![sequence respondsToSelector:durSel]) return seconds;
 
-    SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
+    CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, durSel);
     if (duration.timescale > 0 && duration.value > 0) {
         seconds = (double)duration.value / (double)duration.timescale;
     }
@@ -420,10 +413,10 @@ static void SpliceKit_logTimelineClips(id timelineModule, NSString *label) {
         NSString *cls = NSStringFromClass([item class]) ?: @"?";
         if (canGetRange) {
             @try {
-                SpliceKit_CMTimeRange range =
-                    ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObj, erSel, item);
-                double s = (range.start.timescale > 0) ? (double)range.start.value / (double)range.start.timescale : 0;
-                double d = (range.duration.timescale > 0) ? (double)range.duration.value / (double)range.duration.timescale : 0;
+                CMTimeRange range =
+                    ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObj, erSel, item);
+                double s = SpliceKit_secondsFromTime(range.start);
+                double d = SpliceKit_secondsFromTime(range.duration);
                 [desc appendFormat:@" [%@ %.4f+%.4f]", cls, s, d];
             } @catch (NSException *e) {
                 [desc appendFormat:@" [%@ ERR]", cls];
@@ -460,7 +453,7 @@ static BOOL SpliceKit_applyHoldFrameExtension(id timelineModule, double clipStar
             for (id item in items) {
                 if (transCls && [item isKindOfClass:transCls]) continue;
                 @try {
-                    SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erSel, item);
+                    CMTimeRange range = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erSel, item);
                     double s = (range.start.timescale > 0) ? (double)range.start.value/(double)range.start.timescale : -1;
                     if (fabs(s - clipStart) < frame * 2.0) { targetClip = item; break; }
                 } @catch (NSException *ex) { continue; }
@@ -502,8 +495,8 @@ static BOOL SpliceKit_applyHoldFrameExtension(id timelineModule, double clipStar
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         if (prim && [prim respondsToSelector:erSel]) {
             @try {
-                SpliceKit_CMTimeRange curRange = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erSel, targetClip);
-                newDur = (curRange.duration.timescale > 0) ? (double)curRange.duration.value / (double)curRange.duration.timescale : 0;
+                CMTimeRange curRange = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erSel, targetClip);
+                newDur = SpliceKit_secondsFromTime(curRange.duration);
                 if (newDur > clipDur + frame) { holdWorked = YES; break; }
             } @catch (NSException *ex) {}
         }
@@ -548,7 +541,7 @@ static BOOL SpliceKit_applyHoldFrameExtension(id timelineModule, double clipStar
 
             // The hold always extends the END of the clip on the timeline.
             // Trim the END back by the hold amount (negative delta).
-            SpliceKit_CMTime delta;
+            CMTime delta;
             delta.timescale = 60000;
             delta.flags = 1;
             delta.epoch = 0;
@@ -646,8 +639,8 @@ static char SpliceKit_swizzled_displayTransitionAlert(id self, SEL _cmd, char *r
         for (id item in items) {
             if (transCls && [item isKindOfClass:transCls]) continue;
             @try {
-                SpliceKit_CMTimeRange range =
-                    ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                CMTimeRange range =
+                    ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                         primaryObj, erSel, item);
                 if (range.duration.timescale <= 0 || range.duration.value <= 0) continue;
                 double s = (double)range.start.value / (double)range.start.timescale;
@@ -746,8 +739,8 @@ static char SpliceKit_swizzled_displayTransitionAlert(id self, SEL _cmd, char *r
                             clipIdx++;
                             if (clipIdx == 2) {
                                 @try {
-                                    SpliceKit_CMTimeRange r =
-                                        ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erS, itm);
+                                    CMTimeRange r =
+                                        ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(prim, erS, itm);
                                     if (r.duration.timescale > 0) {
                                         double s = (double)r.start.value / (double)r.start.timescale;
                                         double d = (double)r.duration.value / (double)r.duration.timescale;

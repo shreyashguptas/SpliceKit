@@ -67,28 +67,22 @@
     statusUpdate(@"Building Parakeet transcriber (first time only)...");
     SpliceKit_log(@"[Transcript] Building Parakeet transcriber...");
 
-    NSTask *task = [[NSTask alloc] init];
-    task.launchPath = @"/usr/bin/swift";
-    task.arguments = @[@"build", @"-c", @"release"];
-    task.currentDirectoryPath = projectDir;
-
-    NSPipe *outputPipe = [NSPipe pipe];
-    task.standardOutput = outputPipe;
-    task.standardError = outputPipe;
-
-    @try {
-        [task launch];
-        [task waitUntilExit];
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Transcript] Failed to launch swift build: %@", e.reason);
+    // The build log is drained while swift runs: it is far larger than a pipe holds, and
+    // waiting for exit before reading it blocked the build forever.
+    int buildStatus = -1;
+    NSData *outputData = nil;
+    NSError *launchError = nil;
+    if (SpliceKit_runProcess(@"/usr/bin/swift", @[@"build", @"-c", @"release"], projectDir,
+                             SpliceKitProcessMergeStderr, 0, &buildStatus, &outputData, NULL,
+                             &launchError) != SpliceKitProcessExited) {
+        SpliceKit_log(@"[Transcript] Failed to launch swift build: %@", launchError.localizedDescription);
         return NO;
     }
 
-    NSData *outputData = [outputPipe.fileHandleForReading readDataToEndOfFile];
     NSString *output = [[NSString alloc] initWithData:outputData encoding:NSUTF8StringEncoding];
 
-    if (task.terminationStatus != 0) {
-        SpliceKit_log(@"[Transcript] Parakeet build failed (exit code %d)", task.terminationStatus);
+    if (buildStatus != 0) {
+        SpliceKit_log(@"[Transcript] Parakeet build failed (exit code %d)", buildStatus);
         // Log last 500 chars of build output for diagnostics
         NSString *tail = output.length > 500 ? [output substringFromIndex:output.length - 500] : output;
         SpliceKit_log(@"[Transcript] Build output (last 500 chars): %@", tail);
@@ -134,19 +128,12 @@
         }];
         if (!buildOK) {
             NSString *xcodeCheck = @"";
-            NSTask *xcTask = [[NSTask alloc] init];
-            xcTask.launchPath = @"/usr/bin/xcode-select";
-            xcTask.arguments = @[@"-p"];
-            NSPipe *xcPipe = [NSPipe pipe];
-            xcTask.standardOutput = xcPipe;
-            xcTask.standardError = xcPipe;
-            @try {
-                [xcTask launch];
-                [xcTask waitUntilExit];
-                if (xcTask.terminationStatus != 0) {
-                    xcodeCheck = @"\n\nXcode Command Line Tools are NOT installed.\nRun this in Terminal: xcode-select --install";
-                }
-            } @catch (NSException *e) {}
+            int xcStatus = -1;
+            if (SpliceKit_runProcess(@"/usr/bin/xcode-select", @[@"-p"], nil, SpliceKitProcessMergeStderr, 0,
+                                     &xcStatus, NULL, NULL, NULL) == SpliceKitProcessExited &&
+                xcStatus != 0) {
+                xcodeCheck = @"\n\nXcode Command Line Tools are NOT installed.\nRun this in Terminal: xcode-select --install";
+            }
 
             // Name the command that actually installs it. The old text pointed at
             // "the SpliceKit patcher app" and a path to copy a binary into by
@@ -190,7 +177,7 @@
 
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) {
                 [self setErrorState:@"No active timeline. Open a project first."];
                 return;
@@ -198,7 +185,7 @@
 
             // Detect frame rate
             if ([timeline respondsToSelector:@selector(sequenceFrameDuration)]) {
-                SpliceKitTranscript_CMTime fd = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+                CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;

@@ -14,6 +14,8 @@
 #import "SpliceKitURLImport.h"
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
+#import "SpliceKitProcess.h"
+#import "SpliceKitStrings.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <sys/clonefile.h>
@@ -102,7 +104,6 @@ extern NSString * const SpliceKitURLImportStateFailed;
 extern NSString * const SpliceKitURLImportStateCancelled;
 NSString *SpliceKitURLImportTrimmedString(id value);
 NSString *SpliceKitURLImportSanitizeFilename(NSString *input);
-NSString *SpliceKitURLImportEscapeXML(NSString *input);
 BOOL SpliceKitURLImportIsDirectMediaExtension(NSString *extension);
 NSString *SpliceKitURLImportSharedDownloadsDirectory(void);
 NSString *SpliceKitURLImportSharedNormalizedDirectory(void);

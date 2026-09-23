@@ -139,8 +139,8 @@ static NSString *SpliceKitLiveCamImportXML(NSURL *fileURL,
     NSString *uid = [[NSUUID UUID] UUIDString];
     NSString *fmtID = [NSString stringWithFormat:@"fmt_%@", [uid substringToIndex:8]];
     NSString *assetID = [NSString stringWithFormat:@"asset_%@", [uid substringToIndex:8]];
-    NSString *escapedClip = SpliceKitLiveCamEscapeXML(clipName ?: @"LiveCam");
-    NSString *escapedEvent = SpliceKitLiveCamEscapeXML(eventName ?: @"LiveCam");
+    NSString *escapedClip = SpliceKit_escapeXMLWithApostrophe(clipName ?: @"LiveCam");
+    NSString *escapedEvent = SpliceKit_escapeXMLWithApostrophe(eventName ?: @"LiveCam");
     NSString *duration = SpliceKitLiveCamString(mediaInfo[@"duration"]);
     NSString *frameDuration = SpliceKitLiveCamString(mediaInfo[@"frameDuration"]);
     int width = [mediaInfo[@"width"] intValue] ?: 1280;
@@ -262,9 +262,9 @@ static BOOL SpliceKitLiveCamSelectClipInBrowser(id clip) {
             SEL clippedRangeSel = NSSelectorFromString(@"clippedRange");
             SEL durationSel = NSSelectorFromString(@"duration");
             if ([clip respondsToSelector:clippedRangeSel]) {
-                clipRange = ((CMTimeRange (*)(id, SEL))SPLICEKIT_LIVECAM_STRET_MSG)(clip, clippedRangeSel);
+                clipRange = ((CMTimeRange (*)(id, SEL))STRET_MSG)(clip, clippedRangeSel);
             } else if ([clip respondsToSelector:durationSel]) {
-                CMTime duration = ((CMTime (*)(id, SEL))SPLICEKIT_LIVECAM_STRET_MSG)(clip, durationSel);
+                CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(clip, durationSel);
                 clipRange = CMTimeRangeMake(kCMTimeZero, duration);
             }
 

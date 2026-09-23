@@ -123,16 +123,6 @@ NSString *SpliceKitLiveCamSanitizeFilename(NSString *input) {
     return joined.length > 0 ? joined : @"LiveCam";
 }
 
-NSString *SpliceKitLiveCamEscapeXML(NSString *input) {
-    NSString *text = SpliceKitLiveCamString(input);
-    text = [text stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
-    text = [text stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
-    text = [text stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
-    text = [text stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
-    text = [text stringByReplacingOccurrencesOfString:@"'" withString:@"&apos;"];
-    return text;
-}
-
 BOOL SpliceKitLiveCamPresetSupportsTimestampOverlay(NSString *identifier) {
     return [identifier isEqualToString:@"securityCam"] ||
            [identifier isEqualToString:@"oldCamcorder"] ||

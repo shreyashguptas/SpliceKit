@@ -15,6 +15,7 @@
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitURLImport.h"
+#import "SpliceKitProcess.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>

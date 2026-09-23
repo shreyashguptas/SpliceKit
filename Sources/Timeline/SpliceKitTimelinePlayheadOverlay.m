@@ -32,26 +32,12 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitTime.h"
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreMedia/CoreMedia.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-
-// objc_msgSend_stret is x86-only. On arm64, struct returns use plain msgSend.
-#if defined(__x86_64__)
-#define PO_STRET objc_msgSend_stret
-#else
-#define PO_STRET objc_msgSend
-#endif
-
-// Opaque CMTime mirror — matches sizeof(CMTime) = 24 with 8-byte alignment.
-typedef struct __attribute__((aligned(8))) {
-    int64_t value;
-    int32_t timescale;
-    uint32_t flags;
-    int64_t epoch;
-} PO_CMTime;
 
 // TLKTimelineView.locationRangeForTime: returns _TLKRange { double location; double length; }
 typedef struct {
@@ -84,7 +70,7 @@ static BOOL      sPendingCenteredScrollTakeover = NO;
 
 // Last observed playhead state from the swizzle.
 // Guarded by sObservedLock.
-static PO_CMTime  sObservedTime = {0};
+static CMTime  sObservedTime = {0};
 static CFTimeInterval sObservedWall = 0;
 static double     sObservedRate = 0.0;
 static os_unfair_lock sObservedLock = OS_UNFAIR_LOCK_INIT;
@@ -170,13 +156,13 @@ static double PO_currentRate(void) {
 
 // Convert an extrapolated CMTime to an x coordinate in the timeline view's
 // own coordinate space, via -[TLKTimelineView locationRangeForTime:].
-static BOOL PO_xForTime(NSView *timelineView, PO_CMTime t, double *outX) {
+static BOOL PO_xForTime(NSView *timelineView, CMTime t, double *outX) {
     if (!timelineView || !outX) return NO;
     SEL sel = @selector(locationRangeForTime:);
     if (![timelineView respondsToSelector:sel]) return NO;
     PO_TLKRange range = {0};
     @try {
-        range = ((PO_TLKRange (*)(id, SEL, PO_CMTime))PO_STRET)(timelineView, sel, t);
+        range = ((PO_TLKRange (*)(id, SEL, CMTime))STRET_MSG)(timelineView, sel, t);
     } @catch (NSException *e) {
         return NO;
     }
@@ -189,7 +175,7 @@ static void PO_seedObservationFromView(NSView *view) {
     SEL phSel = @selector(playheadTime);
     if (![view respondsToSelector:phSel]) return;
     @try {
-        PO_CMTime t = ((PO_CMTime (*)(id, SEL))PO_STRET)(view, phSel);
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(view, phSel);
         if (t.timescale <= 0) return;
         os_unfair_lock_lock(&sObservedLock);
         sObservedTime = t;
@@ -202,9 +188,9 @@ static void PO_seedObservationFromView(NSView *view) {
 // ---- Swizzled -[TLKTimelineView _setPlayheadTime_NoKVO:animate:] ----
 
 static void SpliceKit_swizzled_setPlayheadTimeNoKVO(id self_, SEL _cmd,
-                                                     PO_CMTime time, BOOL animate) {
+                                                     CMTime time, BOOL animate) {
     // Call original FIRST so the real UI updates as normal. Then capture.
-    ((void (*)(id, SEL, PO_CMTime, BOOL))sOrigSetPlayheadTimeNoKVO)(self_, _cmd, time, animate);
+    ((void (*)(id, SEL, CMTime, BOOL))sOrigSetPlayheadTimeNoKVO)(self_, _cmd, time, animate);
 
     // While a playback session is active, ignore updates belonging to a
     // different timeline/player. Global PEPlayer notifications can cover the
@@ -304,7 +290,7 @@ static void PO_snapNativePlayheadToModel(void) {
     SEL phSel = @selector(playheadTime);
     if (![view respondsToSelector:phSel]) return;
     @try {
-        PO_CMTime t = ((PO_CMTime (*)(id, SEL))PO_STRET)(view, phSel);
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(view, phSel);
         double x = 0.0;
         if (t.timescale > 0 && PO_xForTime(view, t, &x)) {
             PO_setNativePlayheadX(marker, x);
@@ -353,7 +339,7 @@ static BOOL PO_scrollDuringPlayback(id timelineView) {
     }
 
     os_unfair_lock_lock(&sObservedLock);
-    PO_CMTime base = sObservedTime;
+    CMTime base = sObservedTime;
     CFTimeInterval baseWall = sObservedWall;
     double rate = sObservedRate;
     os_unfair_lock_unlock(&sObservedLock);
@@ -380,7 +366,7 @@ static BOOL PO_scrollDuringPlayback(id timelineView) {
 
     // Extrapolate forward: t_now = base + (now - baseWall) * rate
     double extraSecs = elapsed * rate;
-    PO_CMTime extrapolated = base;
+    CMTime extrapolated = base;
     int64_t addValue = (int64_t)llround(extraSecs * (double)base.timescale);
     extrapolated.value += addValue;
 
@@ -577,7 +563,7 @@ static void PO_onPlaybackBegan(id source) {
     static NSUInteger sBeginDiagnostics = 0;
     if (sBeginDiagnostics < 12) {
         @try {
-            PO_CMTime diagnosticTime = ((PO_CMTime (*)(id, SEL))PO_STRET)(view, @selector(playheadTime));
+            CMTime diagnosticTime = ((CMTime (*)(id, SEL))STRET_MSG)(view, @selector(playheadTime));
             double timeX = NAN;
             PO_xForTime(view, diagnosticTime, &timeX);
             CGPoint modelPosition = marker.position;
@@ -623,7 +609,7 @@ static void PO_onPlaybackBegan(id source) {
     // native marker — still a visual win, no functional regression.
     BOOL canDriveScroll = NO;
     if (userWantsCentered && [view respondsToSelector:phSel]) {
-        PO_CMTime probeTime = ((PO_CMTime (*)(id, SEL))PO_STRET)(view, phSel);
+        CMTime probeTime = ((CMTime (*)(id, SEL))STRET_MSG)(view, phSel);
         double probeX = 0.0;
         BOOL gotX = (probeTime.timescale > 0) && PO_xForTime(view, probeTime, &probeX);
         BOOL gotClip = [view.superview isKindOfClass:[NSClipView class]];

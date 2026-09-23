@@ -20,17 +20,14 @@
 // they handle parameter marshaling and validation.
 //
 
-static SpliceKit_CMTime SpliceKit_directActionFrameDuration(id timeline) {
-    SpliceKit_CMTime frameDuration = {1, 24, 1, 0};
+static CMTime SpliceKit_directActionFrameDuration(id timeline) {
+    CMTime frameDuration = {1, 24, 1, 0};
     SEL seqSel = @selector(sequence);
     if ([timeline respondsToSelector:seqSel]) {
         id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
         if (sequence) {
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
-            }
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
         }
     }
     return frameDuration;
@@ -39,12 +36,12 @@ static SpliceKit_CMTime SpliceKit_directActionFrameDuration(id timeline) {
 // Nudge delta from timeline.directAction params. MCP tool direct_timeline_action can only
 // send `frames` and `amount` (mapped to params[@"frames"] / params[@"amount"]). Raw JSON-RPC
 // callers may also use deltaSeconds, seconds, or nudgeAmount — not exposed on the MCP tool.
-static SpliceKit_CMTime SpliceKit_directActionNudgeDelta(NSDictionary *params, id timeline) {
-    SpliceKit_CMTime frameDuration = SpliceKit_directActionFrameDuration(timeline);
+static CMTime SpliceKit_directActionNudgeDelta(NSDictionary *params, id timeline) {
+    CMTime frameDuration = SpliceKit_directActionFrameDuration(timeline);
     if (params[@"frames"] != nil) {
         long long frames = [params[@"frames"] longLongValue];
         if (frames == 0) frames = 1;
-        SpliceKit_CMTime delta = frameDuration;
+        CMTime delta = frameDuration;
         delta.value = frames * frameDuration.value;
         return delta;
     }
@@ -65,7 +62,7 @@ static SpliceKit_CMTime SpliceKit_directActionNudgeDelta(NSDictionary *params, i
     }
     if (haveSeconds) {
         int32_t timescale = frameDuration.timescale > 0 ? frameDuration.timescale : 24000;
-        SpliceKit_CMTime t = {(int64_t)(seconds * timescale), timescale, 1, 0};
+        CMTime t = {(int64_t)(seconds * timescale), timescale, 1, 0};
         return t;
     }
     return frameDuration;
@@ -116,13 +113,13 @@ static id SpliceKit_directActionFirstMarkerLike(id container) {
 // A marker whose timeline time is within a frame of the playhead. selectedItems is not consulted.
 static id SpliceKit_markerAtPlayhead(id timeline, id sequence) {
     if (!timeline || !sequence || ![timeline respondsToSelector:@selector(playheadTime)]) return nil;
-    SpliceKit_CMTime playhead = {0, 1, 0, 0};
+    CMTime playhead = {0, 1, 0, 0};
     @try {
-        playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+        playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
     } @catch (NSException *e) {
         return nil;
     }
-    SpliceKit_CMTime frame = SpliceKit_directActionFrameDuration(timeline);
+    CMTime frame = SpliceKit_directActionFrameDuration(timeline);
     double playheadSeconds = SpliceKit_secondsFromTime(playhead);
     double frameSeconds = SpliceKit_secondsFromTime(frame);
     if (!(frameSeconds > 0)) frameSeconds = 1.0 / 24.0;
@@ -133,11 +130,11 @@ static id SpliceKit_markerAtPlayhead(id timeline, id sequence) {
             double startSeconds = playheadSeconds - frameSeconds;
             if (startSeconds < 0) startSeconds = 0;
             int32_t ts = frame.timescale > 0 ? frame.timescale : 2400;
-            SpliceKit_CMTimeRange window = {
+            CMTimeRange window = {
                 SpliceKit_timeFromSeconds(startSeconds, ts),
                 SpliceKit_timeFromSeconds(frameSeconds * 2.0, ts)
             };
-            id found = ((id (*)(id, SEL, SpliceKit_CMTimeRange))objc_msgSend)(sequence, markersSel, window);
+            id found = ((id (*)(id, SEL, CMTimeRange))objc_msgSend)(sequence, markersSel, window);
             for (id marker in SpliceKit_directActionCollection(found)) {
                 if (SpliceKit_isMarkerLikeItem(marker)) return marker;
             }
@@ -158,7 +155,7 @@ static id SpliceKit_markerAtPlayhead(id timeline, id sequence) {
     for (id item in spine) {
         @try {
             if (primary) {
-                SpliceKit_CMTimeRange itemRange = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                CMTimeRange itemRange = {{0, 0, 0, 0}, {0, 0, 0, 0}};
                 if (SpliceKit_tryReadTimelineRange(primary, item, &itemRange)) {
                     double start = SpliceKit_secondsFromTime(itemRange.start);
                     double end = start + SpliceKit_secondsFromTime(itemRange.duration);
@@ -181,7 +178,7 @@ static id SpliceKit_markerAtPlayhead(id timeline, id sequence) {
             for (id child in children) {
                 if (!SpliceKit_isMarkerLikeItem(child)) continue;
                 if (!primary) return child;
-                SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
                 if (!SpliceKit_tryReadTimelineRange(primary, child, &range)) continue;
                 double t = SpliceKit_secondsFromTime(range.start);
                 if (fabs(t - playheadSeconds) <= frameSeconds + 0.0005) return child;
@@ -727,8 +724,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                     result = @{@"error": @"Timeline module does not respond to _nudgeAnchorObjectWithDelta:"};
                     return;
                 }
-                SpliceKit_CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
-                typedef BOOL (*NudgeAnchorFn)(id, SEL, SpliceKit_CMTime);
+                CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
+                typedef BOOL (*NudgeAnchorFn)(id, SEL, CMTime);
                 BOOL ok = ((NudgeAnchorFn)objc_msgSend)(timeline, sel, delta);
                 if (!ok) {
                     result = @{@"error": @"Final Cut Pro could not nudge anchored items by the requested amount"};
@@ -748,8 +745,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                     result = @{@"error": @"Timeline module does not respond to _nudgeSpineObjectWithDelta:"};
                     return;
                 }
-                SpliceKit_CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
-                typedef BOOL (*NudgeSpineFn)(id, SEL, SpliceKit_CMTime);
+                CMTime delta = SpliceKit_directActionNudgeDelta(params, timeline);
+                typedef BOOL (*NudgeSpineFn)(id, SEL, CMTime);
                 BOOL ok = ((NudgeSpineFn)objc_msgSend)(timeline, sel, delta);
                 if (!ok) {
                     result = @{@"error": @"Final Cut Pro could not nudge spine items by the requested amount"};
@@ -1588,19 +1585,14 @@ NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params) {
                 id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
                 if (sequence) {
                     // Try to get frameDuration to derive timescale
-                    // On ARM64, objc_msgSend handles struct returns directly
-                    SEL fdSel = NSSelectorFromString(@"frameDuration");
-                    if ([sequence respondsToSelector:fdSel]) {
-                        SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(
-                            sequence, fdSel);
-                        if (fd.timescale > 0) timescale = fd.timescale;
-                    }
+                    CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+                    if (fd.timescale > 0) timescale = fd.timescale;
                 }
             }
 
             // Build CMTime from seconds
             double secs = [seconds doubleValue];
-            SpliceKit_CMTime targetTime;
+            CMTime targetTime;
             targetTime.value = (int64_t)(secs * timescale);
             targetTime.timescale = timescale;
             targetTime.flags = 1; // kCMTimeFlags_Valid
@@ -1609,7 +1601,7 @@ NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params) {
             // Call setPlayheadTime: on the timeline module
             SEL setSel = @selector(setPlayheadTime:);
             if ([timeline respondsToSelector:setSel]) {
-                ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                ((void (*)(id, SEL, CMTime))objc_msgSend)(
                     timeline, setSel, targetTime);
                 result = @{
                     @"status": @"ok",
@@ -1636,8 +1628,8 @@ NSDictionary *SpliceKit_handlePlaybackGetPosition(NSDictionary *params) {
             // Read playhead time
             SEL phSel = NSSelectorFromString(@"playheadTime");
             if ([timeline respondsToSelector:phSel]) {
-                SpliceKit_CMTime pht = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, phSel);
-                double seconds = (pht.timescale > 0) ? (double)pht.value / pht.timescale : 0;
+                CMTime pht = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, phSel);
+                double seconds = SpliceKit_secondsFromTime(pht);
 
                 NSMutableDictionary *r = [NSMutableDictionary dictionary];
                 r[@"seconds"] = @(seconds);
@@ -1648,17 +1640,14 @@ NSDictionary *SpliceKit_handlePlaybackGetPosition(NSDictionary *params) {
                 if ([timeline respondsToSelector:seqSel]) {
                     id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, seqSel);
                     if (sequence && [sequence respondsToSelector:@selector(duration)]) {
-                        SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
+                        CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
                         r[@"duration"] = SpliceKit_serializeCMTime(dur);
                     }
                     // Frame rate
-                    SEL fdSel = NSSelectorFromString(@"frameDuration");
-                    if (sequence && [sequence respondsToSelector:fdSel]) {
-                        SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                        if (fd.timescale > 0 && fd.value > 0) {
-                            r[@"frameRate"] = @((double)fd.timescale / fd.value);
-                            r[@"frameDuration"] = SpliceKit_serializeCMTime(fd);
-                        }
+                    CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+                    if (fd.timescale > 0 && fd.value > 0) {
+                        r[@"frameRate"] = @((double)fd.timescale / fd.value);
+                        r[@"frameDuration"] = SpliceKit_serializeCMTime(fd);
                     }
                 }
 

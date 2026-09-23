@@ -743,7 +743,7 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
     // --- Save user's current state ---
     id userSequence = nil;
     NSString *userSequenceName = nil;
-    SpliceKit_CMTime savedPlayhead = {0, 600, 1, 0}; // default: 0s
+    CMTime savedPlayhead = {0, 600, 1, 0}; // default: 0s
     {
         id tm = SpliceKit_getActiveTimelineModule();
         if (tm) {
@@ -755,7 +755,7 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
             // Improvement #10: Save playhead position for restore after switch-back
             SEL playheadSel = NSSelectorFromString(@"playheadTime");
             if ([tm respondsToSelector:playheadSel]) {
-                savedPlayhead = ((SpliceKit_CMTime (*)(id, SEL))objc_msgSend)(tm, playheadSel);
+                savedPlayhead = ((CMTime (*)(id, SEL))objc_msgSend)(tm, playheadSel);
             }
         }
     }
@@ -828,9 +828,7 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
         SpliceKit_log(@"[FCPXMLPaste] Found temp project: %@", tempProjectName);
 
         // --- Load temp project ---
-        id appDelegate = [NSApp delegate];
-        id editorContainer = ((id (*)(id, SEL))objc_msgSend)(appDelegate,
-            NSSelectorFromString(@"activeEditorContainer"));
+        id editorContainer = SpliceKit_getEditorContainer();
         if (!editorContainer) goto cleanup;
 
         ((void (*)(id, SEL, id))objc_msgSend)(editorContainer,
@@ -903,7 +901,7 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
             if (tm) {
                 SEL setSel = NSSelectorFromString(@"setPlayheadTime:");
                 if ([tm respondsToSelector:setSel]) {
-                    ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(tm, setSel, savedPlayhead);
+                    ((void (*)(id, SEL, CMTime))objc_msgSend)(tm, setSel, savedPlayhead);
                 }
             }
         }

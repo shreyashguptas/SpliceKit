@@ -24,10 +24,10 @@ static NSString *SpliceKitCaption_previewText(NSString *text, NSUInteger maxLeng
     return [[safe substringToIndex:maxLength] stringByAppendingString:@"..."];
 }
 
-static NSString *SpliceKitCaption_formatCMTime(SpliceKitCaption_CMTime time) {
+static NSString *SpliceKitCaption_formatCMTime(CMTime time) {
     if (time.timescale <= 0) return @"invalid";
     return [NSString stringWithFormat:@"%lld/%ds (%.4fs)",
-            time.value, time.timescale, SpliceKitCaption_CMTimeToSeconds(time)];
+            time.value, time.timescale, SpliceKit_secondsFromTime(time)];
 }
 
 static NSString *SpliceKitCaption_describeObject(id obj) {
@@ -102,8 +102,8 @@ static long long SpliceKitCaption_frameCountForSeconds(double seconds, int fdNum
     return frames;
 }
 
-static SpliceKitCaption_CMTime SpliceKitCaption_makeFrameAlignedCMTime(long long frames, int fdNum, int fdDen) {
-    SpliceKitCaption_CMTime time;
+static CMTime SpliceKitCaption_makeFrameAlignedCMTime(long long frames, int fdNum, int fdDen) {
+    CMTime time;
     time.value = frames * MAX(fdNum, 1);
     time.timescale = MAX(fdDen, 1);
     time.flags = 1;
@@ -111,12 +111,12 @@ static SpliceKitCaption_CMTime SpliceKitCaption_makeFrameAlignedCMTime(long long
     return time;
 }
 
-static id SpliceKitCaption_newGapComponent(SpliceKitCaption_CMTime duration, SpliceKitCaption_CMTime sampleDuration) {
+static id SpliceKitCaption_newGapComponent(CMTime duration, CMTime sampleDuration) {
     Class gapClass = objc_getClass("FFAnchoredGapGeneratorComponent");
     if (!gapClass) return nil;
     SEL gapSel = NSSelectorFromString(@"newGap:ofSampleDuration:");
     if (![gapClass respondsToSelector:gapSel]) return nil;
-    return ((id (*)(id, SEL, SpliceKitCaption_CMTime, SpliceKitCaption_CMTime))objc_msgSend)(
+    return ((id (*)(id, SEL, CMTime, CMTime))objc_msgSend)(
         gapClass, gapSel, duration, sampleDuration);
 }
 
@@ -723,8 +723,8 @@ static id SpliceKitCaption_newRuntimeCaptionGenerator(NSString *text,
         return nil;
     }
 
-    SpliceKitCaption_CMTime sampleDuration = SpliceKitCaption_makeFrameAlignedCMTime(1, fdNum, fdDen);
-    SpliceKitCaption_CMTime duration = SpliceKitCaption_makeFrameAlignedCMTime(MAX(durationFrames, 1), fdNum, fdDen);
+    CMTime sampleDuration = SpliceKitCaption_makeFrameAlignedCMTime(1, fdNum, fdDen);
+    CMTime duration = SpliceKitCaption_makeFrameAlignedCMTime(MAX(durationFrames, 1), fdNum, fdDen);
     SpliceKit_log(@"[Captions][RuntimeTitle] Requesting generator template=\"%@\" text=\"%@\" durationFrames=%lld duration=%@ sample=%@",
                   kSpliceKitRuntimeCaptionTemplateMatch,
                   SpliceKitCaption_previewText(text, 100),
@@ -733,7 +733,7 @@ static id SpliceKitCaption_newRuntimeCaptionGenerator(NSString *text,
                   SpliceKitCaption_formatCMTime(sampleDuration));
     id generator = nil;
     @try {
-        generator = ((id (*)(id, SEL, id, SpliceKitCaption_CMTime, SpliceKitCaption_CMTime))objc_msgSend)(
+        generator = ((id (*)(id, SEL, id, CMTime, CMTime))objc_msgSend)(
             genClass, createSel, kSpliceKitRuntimeCaptionTemplateMatch, duration, sampleDuration);
     } @catch (NSException *e) {
         SpliceKit_log(@"[Captions][RuntimeTitle] Generator creation threw: %@\n%@",
@@ -835,8 +835,8 @@ static BOOL SpliceKitCaption_effectiveRangeForObject(id primary,
     if (![primary respondsToSelector:rangeSel]) return NO;
 
     @try {
-        SpliceKitCaption_CMTimeRange range =
-            ((SpliceKitCaption_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primary, rangeSel, object);
+        CMTimeRange range =
+            ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(primary, rangeSel, object);
         if (range.start.timescale <= 0 || range.duration.timescale <= 0) return NO;
         double start = (double)range.start.value / (double)range.start.timescale;
         double duration = (double)range.duration.value / (double)range.duration.timescale;
@@ -945,10 +945,10 @@ static BOOL SpliceKitCaption_isGeneratorTitleObject(id obj) {
 static BOOL SpliceKitCaption_setChannelDouble(id channel, double value) {
     if (!channel) return NO;
     @try {
-        SpliceKitCaption_CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
+        CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
         SEL setSel = NSSelectorFromString(@"setCurveDoubleValue:atTime:options:");
         if ([channel respondsToSelector:setSel]) {
-            ((void (*)(id, SEL, double, SpliceKitCaption_CMTime, unsigned int))objc_msgSend)(
+            ((void (*)(id, SEL, double, CMTime, unsigned int))objc_msgSend)(
                 channel, setSel, value, t, 0);
             return YES;
         }
@@ -1157,8 +1157,8 @@ BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double timeoutSec,
             }
             SEL setUnclippedStartSel = NSSelectorFromString(@"setUnclippedStart:");
             if ([storyline respondsToSelector:setUnclippedStartSel]) {
-                SpliceKitCaption_CMTime zero = SpliceKitCaption_makeFrameAlignedCMTime(0, fdN, fdD);
-                ((void (*)(id, SEL, SpliceKitCaption_CMTime))objc_msgSend)(storyline, setUnclippedStartSel, zero);
+                CMTime zero = SpliceKitCaption_makeFrameAlignedCMTime(0, fdN, fdD);
+                ((void (*)(id, SEL, CMTime))objc_msgSend)(storyline, setUnclippedStartSel, zero);
                 SpliceKit_log(@"[Captions][Native] setUnclippedStart:%@", SpliceKitCaption_formatCMTime(zero));
             }
 
@@ -1392,10 +1392,10 @@ BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double timeoutSec,
 
         id tm = SpliceKit_getActiveTimelineModule();
         if (tm) {
-            SpliceKitCaption_CMTime zeroTime = SpliceKitCaption_makeFrameAlignedCMTime(0, fdN, fdD);
+            CMTime zeroTime = SpliceKitCaption_makeFrameAlignedCMTime(0, fdN, fdD);
             SEL setSel = NSSelectorFromString(@"setPlayheadTime:");
             if ([tm respondsToSelector:setSel]) {
-                ((void (*)(id, SEL, SpliceKitCaption_CMTime))objc_msgSend)(tm, setSel, zeroTime);
+                ((void (*)(id, SEL, CMTime))objc_msgSend)(tm, setSel, zeroTime);
                 SpliceKit_log(@"[Captions][Native] Set playhead time to %@", SpliceKitCaption_formatCMTime(zeroTime));
             }
         }

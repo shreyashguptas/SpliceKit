@@ -13,26 +13,13 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitTime.h"
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreMedia/CoreMedia.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <dlfcn.h>
-
-#if defined(__x86_64__)
-#define OV_STRET objc_msgSend_stret
-#else
-#define OV_STRET objc_msgSend
-#endif
-
-typedef struct __attribute__((aligned(8))) {
-    int64_t value;
-    int32_t timescale;
-    uint32_t flags;
-    int64_t epoch;
-} OV_CMTime;
-typedef struct { OV_CMTime start; OV_CMTime duration; } OV_CMTimeRange;
 
 static const CGFloat kOverviewBarHeight = 40.0;
 static const CGFloat kOverviewBarTopInset = 28.0;  // leave room for FCP's ruler ticks
@@ -81,7 +68,7 @@ static double OV_sequenceDurationSeconds(void) {
 
     SEL durSel = NSSelectorFromString(@"duration");
     if ([collection respondsToSelector:durSel]) {
-        OV_CMTime d = ((OV_CMTime (*)(id, SEL))OV_STRET)(collection, durSel);
+        CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(collection, durSel);
         if (d.timescale > 0) {
             double secs = (double)d.value / (double)d.timescale;
             if (secs > 0) return secs;
@@ -96,7 +83,7 @@ static double OV_sequenceDurationSeconds(void) {
     int32_t totalTs = 0;
     for (id item in (NSArray *)items) {
         if (![item respondsToSelector:durSel]) continue;
-        OV_CMTime cd = ((OV_CMTime (*)(id, SEL))OV_STRET)(item, durSel);
+        CMTime cd = ((CMTime (*)(id, SEL))STRET_MSG)(item, durSel);
         if (cd.timescale <= 0) continue;
         if (totalTs == 0) totalTs = cd.timescale;
         if (cd.timescale == totalTs) totalValue += cd.value;
@@ -111,9 +98,8 @@ static double OV_playheadSeconds(void) {
     if (!tm) return 0.0;
     SEL phSel = NSSelectorFromString(@"playheadTime");
     if (![tm respondsToSelector:phSel]) return 0.0;
-    OV_CMTime t = ((OV_CMTime (*)(id, SEL))OV_STRET)(tm, phSel);
-    if (t.timescale <= 0) return 0.0;
-    return (double)t.value / (double)t.timescale;
+    CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(tm, phSel);
+    return SpliceKit_secondsFromTime(t);
 }
 
 static int32_t OV_sequenceTimescale(void) {
@@ -121,7 +107,7 @@ static int32_t OV_sequenceTimescale(void) {
     if (!seq) return 24000;
     SEL fdSel = NSSelectorFromString(@"frameDuration");
     if (![seq respondsToSelector:fdSel]) return 24000;
-    OV_CMTime fd = ((OV_CMTime (*)(id, SEL))OV_STRET)(seq, fdSel);
+    CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(seq, fdSel);
     return fd.timescale > 0 ? fd.timescale : 24000;
 }
 
@@ -347,9 +333,9 @@ static BOOL OV_collectionIsRenderable(id collection) {
         // an external compositor to draw later, and leaves the NSImage
         // empty. We want it to draw directly into the image, so nil here.
         NSMutableArray *rectsAndColors = nil;
-        OV_CMTime     invalidTime  = {0, 0, 0, 0};
-        OV_CMTimeRange invalidRange = {{0,0,0,0}, {0,0,0,0}};
-        NSImage *img = ((NSImage *(*)(id, SEL, id, OV_CMTime, OV_CMTimeRange, id, id))objc_msgSend)(
+        CMTime     invalidTime  = {0, 0, 0, 0};
+        CMTimeRange invalidRange = {{0,0,0,0}, {0,0,0,0}};
+        NSImage *img = ((NSImage *(*)(id, SEL, id, CMTime, CMTimeRange, id, id))objc_msgSend)(
             renderer, renderSel, collection, invalidTime, invalidRange, rectsAndColors, nil);
 
         static int sRenderCount = 0;
@@ -465,7 +451,7 @@ static BOOL OV_collectionIsRenderable(id collection) {
     }
     SEL tppSel = NSSelectorFromString(@"timePerPixel");
     if ([self.fcpTimelineView respondsToSelector:tppSel]) {
-        OV_CMTime tpp = ((OV_CMTime (*)(id, SEL))OV_STRET)(self.fcpTimelineView, tppSel);
+        CMTime tpp = ((CMTime (*)(id, SEL))STRET_MSG)(self.fcpTimelineView, tppSel);
         if (tpp.timescale > 0) tppSeconds = (double)tpp.value / tpp.timescale;
     }
     if (tppSeconds <= 0) return NSZeroRect;
@@ -505,12 +491,12 @@ static BOOL OV_collectionIsRenderable(id collection) {
     SEL setSel = NSSelectorFromString(@"setPlayheadTime:");
     if (![tm respondsToSelector:setSel]) return;
     int32_t ts = OV_sequenceTimescale();
-    OV_CMTime t;
+    CMTime t;
     t.value = (int64_t)(seconds * ts);
     t.timescale = ts;
     t.flags = 1;
     t.epoch = 0;
-    ((void (*)(id, SEL, OV_CMTime))objc_msgSend)(tm, setSel, t);
+    ((void (*)(id, SEL, CMTime))objc_msgSend)(tm, setSel, t);
 }
 
 // Scroll the main timeline so `t0` lands at the left edge of the visible area.
@@ -531,7 +517,7 @@ static BOOL OV_collectionIsRenderable(id collection) {
     }
     SEL tppSel = NSSelectorFromString(@"timePerPixel");
     if ([tv respondsToSelector:tppSel]) {
-        OV_CMTime tpp = ((OV_CMTime (*)(id, SEL))OV_STRET)(tv, tppSel);
+        CMTime tpp = ((CMTime (*)(id, SEL))STRET_MSG)(tv, tppSel);
         if (tpp.timescale > 0) tppSeconds = (double)tpp.value / tpp.timescale;
     }
     if (tppSeconds <= 0) return;
@@ -552,7 +538,7 @@ static BOOL OV_collectionIsRenderable(id collection) {
     if (![tv respondsToSelector:zoomSel]) return;
     int32_t ts = OV_sequenceTimescale();
     if (ts <= 0) ts = 24000;
-    OV_CMTimeRange range;
+    CMTimeRange range;
     range.start.value = (int64_t)(t0 * ts);
     range.start.timescale = ts;
     range.start.flags = 1;
@@ -561,7 +547,7 @@ static BOOL OV_collectionIsRenderable(id collection) {
     range.duration.timescale = ts;
     range.duration.flags = 1;
     range.duration.epoch = 0;
-    ((void (*)(id, SEL, OV_CMTimeRange, double))objc_msgSend)(tv, zoomSel, range, 0.0);
+    ((void (*)(id, SEL, CMTimeRange, double))objc_msgSend)(tv, zoomSel, range, 0.0);
 }
 
 #pragma mark - Mouse

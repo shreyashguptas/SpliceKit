@@ -17,10 +17,10 @@
 static id SpliceKit_scenePrimaryClipAtPlayhead(id timeline, id primaryObj,
                                                double *outStart, double *outEnd) {
     if (!timeline || !primaryObj) return nil;
-    SpliceKit_CMTime playheadTime = {0, 1, 0, 0};
+    CMTime playheadTime = {0, 1, 0, 0};
     @try {
         if ([timeline respondsToSelector:@selector(playheadTime)]) {
-            playheadTime = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+            playheadTime = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
         }
     } @catch (NSException *e) {}
     double ph = SpliceKit_secondsFromTime(playheadTime);
@@ -28,7 +28,7 @@ static id SpliceKit_scenePrimaryClipAtPlayhead(id timeline, id primaryObj,
         [primaryObj respondsToSelector:@selector(containedItems)]
             ? ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)) : nil);
     for (id item in items) {
-        SpliceKit_CMTimeRange range;
+        CMTimeRange range;
         if (!SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) continue;
         double start = SpliceKit_secondsFromTime(range.start);
         double end = start + SpliceKit_secondsFromTime(range.duration);
@@ -48,7 +48,7 @@ static NSArray *SpliceKit_scenePrimarySpineCandidates(id primaryObj) {
         [primaryObj respondsToSelector:@selector(containedItems)]
             ? ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)) : nil);
     for (id item in items) {
-        SpliceKit_CMTimeRange range;
+        CMTimeRange range;
         if (!SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) continue;
         double start = SpliceKit_secondsFromTime(range.start);
         double end = start + SpliceKit_secondsFromTime(range.duration);
@@ -197,7 +197,7 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                 clipName = SpliceKit_displayNameForItem(targetClip);
 
                 if (clipTimelineEnd <= clipTimelineStart) {
-                    SpliceKit_CMTimeRange range;
+                    CMTimeRange range;
                     if (primaryObj && SpliceKit_tryReadTimelineRange(primaryObj, targetClip, &range)) {
                         clipTimelineStart = SpliceKit_secondsFromTime(range.start);
                         clipTimelineEnd = clipTimelineStart + SpliceKit_secondsFromTime(range.duration);
@@ -414,10 +414,10 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                 openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
                 sceneOpenedUndoGroup = openedUndoGroup;
 
-                SpliceKit_CMTime frameDur = {1, 30, 1, 0};
+                CMTime frameDur = {1, 30, 1, 0};
                 SEL fdSel = NSSelectorFromString(@"frameDuration");
                 if ([sequence respondsToSelector:fdSel]) {
-                    frameDur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
+                    frameDur = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
                 }
                 int32_t ts = (frameDur.timescale > 0) ? frameDur.timescale : 600;
 
@@ -428,7 +428,7 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                         return;
                     }
 
-                    typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, SpliceKit_CMTimeRange, NSError **);
+                    typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, CMTimeRange, NSError **);
                     AddMarkerFn addMarker = (AddMarkerFn)objc_msgSend;
 
                     for (NSDictionary *sc in sceneChanges) {
@@ -443,8 +443,8 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
                         // Detection times are media-file seconds; range.start = clipSourceStart + (fileTime - fileStart).
                         double clipSourceStart = mapClipSourceStartKnown ? mapClipSourceStart : 0.0;
                         double rangeStartSeconds = clipSourceStart + (fileTime - mapFileStart);
-                        SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
-                        SpliceKit_CMTimeRange range = {markerTime, frameDur};
+                        CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
+                        CMTimeRange range = {markerTime, frameDur};
                         NSError *err = nil;
                         BOOL ok = addMarker(sequence, addSel, clipForApply, NO, NO, range, &err);
                         if (ok) applied++;

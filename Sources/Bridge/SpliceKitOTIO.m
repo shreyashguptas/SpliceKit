@@ -26,6 +26,7 @@
 #import <setjmp.h>
 #import <pthread.h>
 #import "SpliceKitMenus.h"
+#import "SpliceKitStrings.h"
 
 #pragma mark - OpenTimelineIO Native Conversion
 
@@ -61,17 +62,6 @@ static id otio_withoutNulls(id value) {
         return out;
     }
     return value;
-}
-
-static NSString *otio_esc(id value) {
-    if (!value || value == (id)kCFNull) return @"";
-    NSString *str = [value isKindOfClass:[NSString class]] ? value : [value description];
-    NSMutableString *s = [str mutableCopy];
-    [s replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, s.length)];
-    return s;
 }
 
 static long long otio_gcd(long long a, long long b) {
@@ -272,7 +262,7 @@ static void otio_appendParams(NSMutableString *xml, id params, NSString *indent)
     if ([params isKindOfClass:[NSDictionary class]]) {
         for (NSString *pName in (NSDictionary *)params) {
             [xml appendFormat:@"%@<param name=\"%@\" value=\"%@\"/>",
-                indent, otio_esc(pName), otio_esc([(NSDictionary *)params objectForKey:pName])];
+                indent, SpliceKit_escapeXML(pName), SpliceKit_escapeXML([(NSDictionary *)params objectForKey:pName])];
         }
         return;
     }
@@ -284,7 +274,7 @@ static void otio_appendParams(NSMutableString *xml, id params, NSString *indent)
         for (NSString *key in param) {
             id val = param[key];
             if (!val || val == (id)kCFNull) continue;
-            [attrs appendFormat:@" %@=\"%@\"", key, otio_esc(val)];
+            [attrs appendFormat:@" %@=\"%@\"", key, SpliceKit_escapeXML(val)];
         }
         if (attrs.length > 0) {
             [xml appendFormat:@"%@<param%@/>", indent, attrs];
@@ -370,7 +360,7 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
                                         int *tsCounter, NSString *titleEffectRef) {
     NSDictionary *genMeta = otio_fcpxMeta(ref);
     NSDictionary *params = otio_generatorParams(ref);
-    NSString *clipName = otio_esc(child[@"name"] ?: @"Title");
+    NSString *clipName = SpliceKit_escapeXML(child[@"name"] ?: @"Title");
 
     // Get text content: FCPXML metadata > Premiere extraction > clip name
     NSString *text = genMeta[@"text"] ?: params[@"text"];
@@ -399,7 +389,7 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
 
     // Add role if present
     NSString *role = genMeta[@"role"] ?: params[@"role"];
-    if (role) [xml appendFormat:@" role=\"%@\"", otio_esc(role)];
+    if (role) [xml appendFormat:@" role=\"%@\"", SpliceKit_escapeXML(role)];
     [xml appendString:@">\n"];
 
     // Motion/title parameters must precede text blocks.
@@ -422,12 +412,12 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
             NSString *segRef = seg[@"ref"] ?: @"";
             NSString *segText = seg[@"text"] ?: @"";
             [xml appendFormat:@"<text-style ref=\"%@\">%@</text-style>",
-                otio_esc(segRef), otio_esc(segText)];
+                SpliceKit_escapeXML(segRef), SpliceKit_escapeXML(segText)];
         }
         [xml appendString:@"</text>\n"];
     } else {
         [xml appendFormat:@"                            <text><text-style ref=\"%@\">%@</text-style></text>\n",
-            tsId, otio_esc(text)];
+            tsId, SpliceKit_escapeXML(text)];
     }
 
     // Text style definitions
@@ -442,10 +432,10 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
             NSDictionary *attrs = sd[@"attrs"] ?: @{};
             NSMutableString *attrStr = [NSMutableString string];
             for (NSString *key in attrs) {
-                [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(attrs[key])];
+                [attrStr appendFormat:@" %@=\"%@\"", key, SpliceKit_escapeXML(attrs[key])];
             }
             [xml appendFormat:@"                            <text-style-def id=\"%@\">"
-                @"<text-style%@/></text-style-def>\n", otio_esc(sdId), attrStr];
+                @"<text-style%@/></text-style-def>\n", SpliceKit_escapeXML(sdId), attrStr];
         }
     } else {
         // Default style — matches FCP's own Basic Title output
@@ -459,7 +449,7 @@ static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
     if (adjTransform && [adjTransform isKindOfClass:[NSDictionary class]]) {
         NSMutableString *attrStr = [NSMutableString string];
         for (NSString *key in adjTransform) {
-            [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(adjTransform[key])];
+            [attrStr appendFormat:@" %@=\"%@\"", key, SpliceKit_escapeXML(adjTransform[key])];
         }
         [xml appendFormat:@"                            <adjust-transform%@/>\n", attrStr];
     }
@@ -614,7 +604,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
             NSDictionary *refMeta = otio_fcpxMeta(ref);
             NSMutableString *assetAttrs = [NSMutableString stringWithFormat:
                 @"        <asset name=\"%@\" format=\"r1\" id=\"%@\" duration=\"%@\" start=\"%@\" hasVideo=\"%d\" hasAudio=\"1\"",
-                otio_esc(c[@"name"] ?: @"Clip"), aid, durStr, assetStartStr, isVideo ? 1 : 0];
+                SpliceKit_escapeXML(c[@"name"] ?: @"Clip"), aid, durStr, assetStartStr, isVideo ? 1 : 0];
             // Optional metadata attributes
             for (NSString *metaKey in @[@"uid", @"audioSources", @"audioChannels",
                                         @"audioRate", @"videoSources"]) {
@@ -643,23 +633,23 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                     id val = mediaRep[key];
                     if (!val || val == (id)kCFNull) continue;
                     [seenRepKeys addObject:key];
-                    [repAttrs appendFormat:@" %@=\"%@\"", key, otio_esc(val)];
+                    [repAttrs appendFormat:@" %@=\"%@\"", key, SpliceKit_escapeXML(val)];
                 }
                 if (![seenRepKeys containsObject:@"src"]) {
-                    [repAttrs appendFormat:@" src=\"%@\"", otio_esc(srcURL)];
+                    [repAttrs appendFormat:@" src=\"%@\"", SpliceKit_escapeXML(srcURL)];
                 }
                 if (uidVal.length > 0 && ![seenRepKeys containsObject:@"sig"]) {
-                    [repAttrs appendFormat:@" sig=\"%@\"", otio_esc(uidVal)];
+                    [repAttrs appendFormat:@" sig=\"%@\"", SpliceKit_escapeXML(uidVal)];
                 }
                 [assetXml appendFormat:@"            <media-rep%@/>\n        </asset>\n", repAttrs];
             } else if (uidVal && uidVal.length > 0) {
                 [assetXml appendFormat:
                     @"            <media-rep kind=\"original-media\" sig=\"%@\" src=\"%@\"/>\n"
-                    @"        </asset>\n", otio_esc(uidVal), otio_esc(srcURL)];
+                    @"        </asset>\n", SpliceKit_escapeXML(uidVal), SpliceKit_escapeXML(srcURL)];
             } else {
                 [assetXml appendFormat:
                     @"            <media-rep kind=\"original-media\" src=\"%@\"/>\n"
-                    @"        </asset>\n", otio_esc(srcURL)];
+                    @"        </asset>\n", SpliceKit_escapeXML(srcURL)];
             }
 
             // Collect effect resources from clip effects
@@ -677,11 +667,11 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                 if (uid.length > 0) {
                     [effectXml appendFormat:
                         @"        <effect id=\"%@\" name=\"%@\" uid=\"%@\"/>\n",
-                        eid, otio_esc(eName), otio_esc(uid)];
+                        eid, SpliceKit_escapeXML(eName), SpliceKit_escapeXML(uid)];
                 } else {
                     [effectXml appendFormat:
                         @"        <effect id=\"%@\" name=\"%@\"/>\n",
-                        eid, otio_esc(eName)];
+                        eid, SpliceKit_escapeXML(eName)];
                 }
             }
         }
@@ -789,13 +779,13 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                 item[@"sourceStartSec"] = @(3600.0);
                 item[@"openTag"] = [NSString stringWithFormat:
                     @"<gap name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"3600s\">",
-                    otio_esc(child[@"name"] ?: @"Gap"), otio_time(offRT), otio_time(srDur)];
+                    SpliceKit_escapeXML(child[@"name"] ?: @"Gap"), otio_time(offRT), otio_time(srDur)];
             } else if (!otio_isExternal(ref)) {
                 item[@"type"] = @"gap";
                 item[@"sourceStartSec"] = @(3600.0);
                 item[@"openTag"] = [NSString stringWithFormat:
                     @"<gap name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"3600s\">",
-                    otio_esc(child[@"name"] ?: @"Gap"), otio_time(offRT), otio_time(srDur)];
+                    SpliceKit_escapeXML(child[@"name"] ?: @"Gap"), otio_time(offRT), otio_time(srDur)];
             } else {
                 NSString *aid = assets[ref[@"target_url"]] ?: @"r2";
                 double srcStartSec = otio_sourceStart(child);
@@ -844,7 +834,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                 // Verified both ways against FCP 12.3 build 450152 before changing this.
                 NSMutableString *tag = [NSMutableString stringWithFormat:
                     @"<asset-clip name=\"%@\" ref=\"%@\" offset=\"%@\" duration=\"%@\" start=\"%@\" format=\"r1\"",
-                    otio_esc(child[@"name"] ?: @"Clip"), aid,
+                    SpliceKit_escapeXML(child[@"name"] ?: @"Clip"), aid,
                     otio_time(offRT), otio_time(adjDurRT), otio_time(adjSrcStartRT)];
                 if (!enabled) [tag appendString:@" enabled=\"0\""];
                 [tag appendString:@">"];
@@ -882,7 +872,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                             if ([key isEqualToString:@"resource"]) continue;
                             id val = attrs[key];
                             if ([val isKindOfClass:[NSString class]]) {
-                                [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(val)];
+                                [attrStr appendFormat:@" %@=\"%@\"", key, SpliceKit_escapeXML(val)];
                             }
                         }
                         [cx appendFormat:@"\n                        <%@%@", eName, attrStr];
@@ -935,7 +925,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                         NSString *mappedRef = effectRefs[eRef] ?: eRef;
                         [filterXml appendFormat:
                             @"\n                            <filter-audio name=\"%@\" ref=\"%@\"/>",
-                            otio_esc(eName), mappedRef];
+                            SpliceKit_escapeXML(eName), mappedRef];
                     } else if (eName.length > 0) {
                         // filter-video goes inside <video> — skip if no valid ref
                         NSString *eRef = otio_fcpxEffectRef(fcpxMeta) ?: @"";
@@ -943,7 +933,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                         NSString *mappedRef = effectRefs[eRef] ?: eRef;
                         [filterXml appendFormat:
                             @"\n                            <filter-video name=\"%@\" ref=\"%@\"",
-                            otio_esc(eName), mappedRef];
+                            SpliceKit_escapeXML(eName), mappedRef];
                         id params = otio_fcpxEffectParams(fcpxMeta);
                         BOOL hasParams = ([params isKindOfClass:[NSDictionary class]] && [(NSDictionary *)params count] > 0) ||
                                          ([params isKindOfClass:[NSArray class]] && [(NSArray *)params count] > 0);
@@ -975,7 +965,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                     NSString *markerType = fcpxMeta[@"marker_type"] ?: @"marker";
                     NSString *startStr = otio_time(m[@"marked_range"][@"start_time"]);
                     NSString *durStr = otio_time(m[@"marked_range"][@"duration"]);
-                    NSString *name = otio_esc(m[@"name"] ?: @"Marker");
+                    NSString *name = SpliceKit_escapeXML(m[@"name"] ?: @"Marker");
 
                     if ([markerType isEqualToString:@"chapter-marker"]) {
                         NSString *posterOff = fcpxMeta[@"posterOffset"] ?: @"0s";
@@ -1065,7 +1055,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                             [cx appendFormat:
                                 @"\n                        <asset-clip name=\"%@\" ref=\"%@\" lane=\"%d\""
                                 @" offset=\"%@\" duration=\"%@\" format=\"r1\"",
-                                otio_esc(child[@"name"] ?: @"Clip"), aid, lane,
+                                SpliceKit_escapeXML(child[@"name"] ?: @"Clip"), aid, lane,
                                 otio_time(offRT), otio_time(child[@"source_range"][@"duration"])];
                             if (srcStart > 0.001) {
                                 [cx appendFormat:@" start=\"%@\"", otio_time(srcRT)];
@@ -1141,7 +1131,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
     [xml appendString:@"    </resources>\n"];
     NSString *targetEvent = eventName.length > 0 ? eventName
                                                 : (otio_defaultEventName() ?: projectName);
-    [xml appendFormat:@"    <event name=\"%@\">\n", otio_esc(targetEvent)];
+    [xml appendFormat:@"    <event name=\"%@\">\n", SpliceKit_escapeXML(targetEvent)];
 
     // Asset-clip browser items (so clips appear in FCP's event browser)
     for (NSString *url in assets) {
@@ -1155,7 +1145,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
                         cRef[@"available_range"][@"duration"] : c[@"source_range"][@"duration"];
                     [xml appendFormat:
                         @"        <asset-clip name=\"%@\" ref=\"%@\" format=\"r1\" duration=\"%@\"/>\n",
-                        otio_esc(c[@"name"] ?: @"Clip"), aid, otio_time(durRT)];
+                        SpliceKit_escapeXML(c[@"name"] ?: @"Clip"), aid, otio_time(durRT)];
                     goto nextAsset;
                 }
             }
@@ -1163,7 +1153,7 @@ NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName)
         nextAsset:;
     }
 
-    [xml appendFormat:@"        <project name=\"%@\">\n", otio_esc(projectName)];
+    [xml appendFormat:@"        <project name=\"%@\">\n", SpliceKit_escapeXML(projectName)];
     [xml appendFormat:@"            <sequence format=\"r1\" duration=\"%@\" tcStart=\"0s\" tcFormat=\"NDF\">\n",
         otio_time(seqDurRT)];
     [xml appendString:@"                <spine>\n"];

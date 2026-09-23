@@ -143,13 +143,13 @@ BOOL SpliceKit_itemIsMulticamClip(id item) {
     return NO;
 }
 
-BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, SpliceKit_CMTime *out) {
+BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, CMTime *out) {
     if (!obj || name.length == 0 || !out) return NO;
     SEL sel = NSSelectorFromString(name);
     if (![obj respondsToSelector:sel]) return NO;
     if (!SpliceKit_selectorReturnsCMTime(obj, sel)) return NO;
     @try {
-        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(obj, sel);
+        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(obj, sel);
         if (t.timescale > 0) {
             *out = t;
             return YES;
@@ -158,13 +158,13 @@ BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, SpliceKit_CMTime *o
     return NO;
 }
 
-BOOL SpliceKit_tryReadCMTimeRangeSelector(id obj, NSString *name, SpliceKit_CMTimeRange *out) {
+BOOL SpliceKit_tryReadCMTimeRangeSelector(id obj, NSString *name, CMTimeRange *out) {
     if (!obj || name.length == 0 || !out) return NO;
     SEL sel = NSSelectorFromString(name);
     if (![obj respondsToSelector:sel]) return NO;
     if (!SpliceKit_selectorReturnsCMTimeRange(obj, sel)) return NO;
     @try {
-        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(obj, sel);
+        CMTimeRange r = ((CMTimeRange (*)(id, SEL))STRET_MSG)(obj, sel);
         if (r.start.timescale > 0 && r.duration.timescale > 0) {
             *out = r;
             return YES;
@@ -189,8 +189,8 @@ NSString *SpliceKit_tryReadStringSelector(id obj, NSString *name) {
 // one when it is a multiple of the other (exact), else in the duration's timescale with
 // rounding. The earlier integer division in the start's timescale truncated: a clip at
 // time zero (timescale 1) and 18.018 s long reported an end of 18.000 s (QA run 2).
-SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
-    SpliceKit_CMTime start = range.start, duration = range.duration;
+CMTime SpliceKit_endTimeForRange(CMTimeRange range) {
+    CMTime start = range.start, duration = range.duration;
     if (duration.timescale <= 0) return start;
     if (start.timescale <= 0) return start;   // an unknown start stays unknown
     if (duration.timescale == start.timescale) {
@@ -199,7 +199,7 @@ SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
     }
     if (duration.timescale % start.timescale == 0) {
         int64_t factor = duration.timescale / start.timescale;
-        SpliceKit_CMTime end = duration;
+        CMTime end = duration;
         end.value = start.value * factor + duration.value;
         end.flags = start.flags; end.epoch = start.epoch;
         return end;
@@ -209,16 +209,10 @@ SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range) {
         start.value += duration.value * factor;
         return start;
     }
-    SpliceKit_CMTime end = duration;
+    CMTime end = duration;
     end.value = (int64_t)llround((double)start.value * (double)duration.timescale / (double)start.timescale) + duration.value;
     end.flags = start.flags; end.epoch = start.epoch;
     return end;
-}
-
-SpliceKit_CMTime SpliceKit_timeFromSeconds(double seconds, int32_t timescale) {
-    int32_t ts = timescale > 0 ? timescale : 600;
-    SpliceKit_CMTime t = {(int64_t)round(seconds * ts), ts, 1, 0};
-    return t;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +296,7 @@ NSDictionary *SpliceKit_describeMarker(id marker, id primaryObj, NSString *paren
 
     if (parentHandle.length > 0) info[@"parentHandle"] = parentHandle;
 
-    SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
     BOOL haveRange = NO;
     NSString *timeSource = @"unknown";
 
@@ -329,7 +323,7 @@ NSDictionary *SpliceKit_describeMarker(id marker, id primaryObj, NSString *paren
     } else {
         NSArray<NSString *> *timeSelectors = @[@"anchoredOffset", @"startTime", @"time", @"offset"];
         for (NSString *selName in timeSelectors) {
-            SpliceKit_CMTime t = {0, 0, 0, 0};
+            CMTime t = {0, 0, 0, 0};
             if (SpliceKit_tryReadCMTimeSelector(marker, selName, &t)) {
                 if ([selName isEqualToString:@"anchoredOffset"] && haveParentStart) {
                     // anchoredOffset is relative to the parent clip; make it absolute
@@ -461,11 +455,11 @@ void SpliceKit_collectConnectedItems(id item,
             info[@"class"] = cls;
             info[@"name"] = SpliceKit_displayNameForItem(child);
 
-            SpliceKit_CMTime childDuration = {0, 0, 0, 0};
+            CMTime childDuration = {0, 0, 0, 0};
             BOOL haveDuration = NO;
             if ([child respondsToSelector:@selector(duration)]) {
                 @try {
-                    childDuration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(child, @selector(duration));
+                    childDuration = ((CMTime (*)(id, SEL))STRET_MSG)(child, @selector(duration));
                     haveDuration = childDuration.timescale > 0;
                     info[@"duration"] = SpliceKit_serializeCMTime(childDuration);
                 } @catch (NSException *e) {}
@@ -494,7 +488,7 @@ void SpliceKit_collectConnectedItems(id item,
             SEL trimOffSel = NSSelectorFromString(@"trimmedOffset");
             if ([child respondsToSelector:trimOffSel]) {
                 @try {
-                    SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(child, trimOffSel);
+                    CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(child, trimOffSel);
                     info[@"trimmedOffset"] = SpliceKit_serializeCMTime(t);
                 } @catch (NSException *e) {}
             }
@@ -529,7 +523,7 @@ void SpliceKit_collectConnectedItems(id item,
             }
 
             // Absolute timing: spine effectiveRange -> container-relative range -> anchoredOffset.
-            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             BOOL haveStart = NO;
             double childStartSeconds = 0.0;
             NSString *timeSource = @"unknown";
@@ -544,20 +538,20 @@ void SpliceKit_collectConnectedItems(id item,
                 haveStart = YES;
                 childStartSeconds = childContainerStart + SpliceKit_secondsFromTime(range.start);
                 timeSource = @"containerRange+containerStart";
-                SpliceKit_CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, range.start.timescale);
-                SpliceKit_CMTimeRange absRange = {absStart, range.duration};
+                CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, range.start.timescale);
+                CMTimeRange absRange = {absStart, range.duration};
                 info[@"startTime"] = SpliceKit_serializeCMTime(absStart);
                 info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(absRange));
             } else {
-                SpliceKit_CMTime offset = {0, 0, 0, 0};
+                CMTime offset = {0, 0, 0, 0};
                 if (haveParentStart && SpliceKit_tryReadCMTimeSelector(child, @"anchoredOffset", &offset)) {
                     haveStart = YES;
                     childStartSeconds = parentStartSeconds + SpliceKit_secondsFromTime(offset);
                     timeSource = @"anchoredOffset+parentStart";
-                    SpliceKit_CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, offset.timescale);
+                    CMTime absStart = SpliceKit_timeFromSeconds(childStartSeconds, offset.timescale);
                     info[@"startTime"] = SpliceKit_serializeCMTime(absStart);
                     if (haveDuration) {
-                        SpliceKit_CMTimeRange absRange = {absStart, childDuration};
+                        CMTimeRange absRange = {absStart, childDuration};
                         info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(absRange));
                     }
                 }
@@ -650,15 +644,15 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
 
             // Playhead
             if ([timeline respondsToSelector:@selector(playheadTime)]) {
-                SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
                 state[@"playheadTime"] = SpliceKit_serializeCMTime(t);
             }
 
             // Sequence duration — try sequence.duration first, fall back to summing spine clips
             BOOL durationSet = NO;
             if ([sequence respondsToSelector:@selector(duration)]) {
-                SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
-                double secs = (d.timescale > 0) ? (double)d.value / d.timescale : 0;
+                CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
+                double secs = SpliceKit_secondsFromTime(d);
                 if (secs > 0) {
                     state[@"duration"] = SpliceKit_serializeCMTime(d);
                     durationSet = YES;
@@ -675,7 +669,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                         int32_t totalTs = 0;
                         for (id ci in (NSArray *)cItems) {
                             if (![ci respondsToSelector:@selector(duration)]) continue;
-                            SpliceKit_CMTime cd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(ci, @selector(duration));
+                            CMTime cd = ((CMTime (*)(id, SEL))STRET_MSG)(ci, @selector(duration));
                             if (cd.timescale > 0) {
                                 if (totalTs == 0) totalTs = cd.timescale;
                                 if (cd.timescale == totalTs) {
@@ -686,7 +680,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                             }
                         }
                         if (totalTs > 0) {
-                            SpliceKit_CMTime computed = {totalValue, totalTs, 1, 0};
+                            CMTime computed = {totalValue, totalTs, 1, 0};
                             state[@"duration"] = SpliceKit_serializeCMTime(computed);
                         }
                     }
@@ -749,7 +743,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                             info[@"name"] = name ?: @"";
                         }
                         if ([item respondsToSelector:@selector(duration)]) {
-                            SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+                            CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
                             info[@"duration"] = SpliceKit_serializeCMTime(d);
                         }
                         if ([item respondsToSelector:@selector(anchoredLane)]) {
@@ -785,14 +779,14 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                         // Trimmed offset (in-point in source media)
                         SEL trimOffSel = NSSelectorFromString(@"trimmedOffset");
                         if ([item respondsToSelector:trimOffSel]) {
-                            SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, trimOffSel);
+                            CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(item, trimOffSel);
                             info[@"trimmedOffset"] = SpliceKit_serializeCMTime(t);
                         }
 
                         // Absolute position in timeline via effectiveRangeOfObject:
                         if (canGetRange) {
                             @try {
-                                SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                CMTimeRange range = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                                     primaryObj, erSel, item);
                                 info[@"startTime"] = SpliceKit_serializeCMTime(range.start);
                                 info[@"endTime"] = SpliceKit_serializeCMTime(SpliceKit_endTimeForRange(range));
@@ -828,13 +822,13 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                                                 ni[@"name"] = nn ?: @"";
                                             }
                                             if ([nestedItem respondsToSelector:@selector(duration)]) {
-                                                SpliceKit_CMTime nd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(nestedItem, @selector(duration));
+                                                CMTime nd = ((CMTime (*)(id, SEL))STRET_MSG)(nestedItem, @selector(duration));
                                                 ni[@"duration"] = SpliceKit_serializeCMTime(nd);
                                             }
                                             ni[@"handle"] = SpliceKit_storeHandle(nestedItem);
                                             if (canGetInnerRange) {
                                                 @try {
-                                                    SpliceKit_CMTimeRange nr = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                                    CMTimeRange nr = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                                                         innerPrimary, innerErSel, nestedItem);
                                                     ni[@"startTime"] = SpliceKit_serializeCMTime(nr.start);
                                                 } @catch (NSException *e) {}
@@ -856,7 +850,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
             // Frame rate from sequence
             SEL frdSel = NSSelectorFromString(@"frameDuration");
             if ([sequence respondsToSelector:frdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, frdSel);
+                CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, frdSel);
                 state[@"frameDuration"] = SpliceKit_serializeCMTime(fd);
                 if (fd.value > 0) {
                     state[@"frameRate"] = @((double)fd.timescale / fd.value);
@@ -872,7 +866,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
             BOOL haveSpineBounds = NO;
             if (spineArray && primaryObj) {
                 for (id spineItem in spineArray) {
-                    SpliceKit_CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                    CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
                     if (!SpliceKit_tryReadTimelineRange(primaryObj, spineItem, &sr)) continue;
                     double s = SpliceKit_secondsFromTime(sr.start);
                     double e = s + SpliceKit_secondsFromTime(sr.duration);
@@ -905,7 +899,7 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                         NSInteger spineIndex = 0;
                         for (id spineItem in spineArray) {
                             if ((NSInteger)connectedItems.count >= connectedLimit) break;
-                            SpliceKit_CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+                            CMTimeRange sr = {{0, 0, 0, 0}, {0, 0, 0, 0}};
                             BOOL haveSpineStart = SpliceKit_tryReadTimelineRange(primaryObj, spineItem, &sr);
                             double spineStart = haveSpineStart ? SpliceKit_secondsFromTime(sr.start) : 0.0;
                             NSString *spineHandle = SpliceKit_storeHandle(spineItem);
@@ -984,11 +978,11 @@ static NSDictionary *SpliceKit_handleTimelineGetDetailedStateBody(NSDictionary *
                             int32_t fdTs = (int32_t)[((NSDictionary *)fdInfo)[@"timescale"] intValue];
                             if (fdTs > 0) queryTs = fdTs;
                         }
-                        SpliceKit_CMTimeRange queryRange = {
+                        CMTimeRange queryRange = {
                             SpliceKit_timeFromSeconds(queryStart, queryTs),
                             SpliceKit_timeFromSeconds(queryDuration, queryTs)
                         };
-                        id found = ((id (*)(id, SEL, SpliceKit_CMTimeRange))objc_msgSend)(sequence, markersSel, queryRange);
+                        id found = ((id (*)(id, SEL, CMTimeRange))objc_msgSend)(sequence, markersSel, queryRange);
                         NSArray *foundArray = SpliceKit_mixerArrayFromContainer(found);
                         fromQuery = foundArray.count;
                         for (id m in foundArray) {

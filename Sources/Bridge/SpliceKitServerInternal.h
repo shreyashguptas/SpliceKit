@@ -45,24 +45,9 @@
 #include <mach-o/nlist.h>
 #include <objc/message.h>
 
-// On x86_64, returning a struct larger than 16 bytes from objc_msgSend requires
-// the _stret variant. ARM64 doesn't have this distinction — all structs go
-// through the regular objc_msgSend. We build universal, so handle both.
-#if defined(__x86_64__)
-#define STRET_MSG objc_msgSend_stret
-#else
-#define STRET_MSG objc_msgSend
-#endif
-
-//
-// We define our own CMTime/CMTimeRange structs so we can read them from
-// objc_msgSend return values without importing CoreMedia headers (which
-// would create a link dependency we don't want in a dylib).
-// The layout matches Apple's — we just need the fields for serialization.
-//
-
-typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } SpliceKit_CMTime;
-typedef struct { SpliceKit_CMTime start; SpliceKit_CMTime duration; } SpliceKit_CMTimeRange;
+// CMTime / CMTimeRange, STRET_MSG and the seconds <-> CMTime helpers.
+#import "SpliceKitTime.h"
+#import "SpliceKitStrings.h"
 
 #pragma GCC visibility push(hidden)
 
@@ -72,7 +57,7 @@ extern NSMutableDictionary<NSString *, id> *sHandleMap;
 NSString *SpliceKit_handlePointerKey(id object);
 double SpliceKit_secondsSinceLoad(void);
 uint64_t SpliceKit_handleGeneration(void);
-NSDictionary *SpliceKit_serializeCMTime(SpliceKit_CMTime t);
+NSDictionary *SpliceKit_serializeCMTime(CMTime t);
 id SpliceKit_serializeReturnValue(NSInvocation *invocation, BOOL returnHandle);
 
 #pragma mark - Defined in SpliceKitServerRuntime.m
@@ -155,11 +140,10 @@ BOOL SpliceKit_selectorReturnsObject(id obj, SEL sel);
 BOOL SpliceKit_tryReadBoolSelector(id obj, NSString *name, BOOL *out);
 NSString *SpliceKit_itemContainerKind(id item);
 BOOL SpliceKit_itemIsMulticamClip(id item);
-BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, SpliceKit_CMTime *out);
-BOOL SpliceKit_tryReadCMTimeRangeSelector(id obj, NSString *name, SpliceKit_CMTimeRange *out);
+BOOL SpliceKit_tryReadCMTimeSelector(id obj, NSString *name, CMTime *out);
+BOOL SpliceKit_tryReadCMTimeRangeSelector(id obj, NSString *name, CMTimeRange *out);
 NSString *SpliceKit_tryReadStringSelector(id obj, NSString *name);
-SpliceKit_CMTime SpliceKit_endTimeForRange(SpliceKit_CMTimeRange range);
-SpliceKit_CMTime SpliceKit_timeFromSeconds(double seconds, int32_t timescale);
+CMTime SpliceKit_endTimeForRange(CMTimeRange range);
 BOOL SpliceKit_isMarkerLikeItem(id item);
 NSDictionary *SpliceKit_describeMarker(id marker, id primaryObj, NSString *parentHandle,
                                        BOOL haveParentStart, double parentStartSeconds);
@@ -196,7 +180,6 @@ NSDictionary *SpliceKit_handleFCPXMLImportStatus(NSDictionary *params);
 
 #pragma mark - Defined in SpliceKitServerTimelineActions.m
 
-id SpliceKit_getEditorContainer(void);
 NSDictionary *SpliceKit_makeFilePanelDialogPendingDictionary(NSString *action, NSDictionary *base);
 NSDictionary *SpliceKit_annotateCreateActionFilePanelPending(NSDictionary *result, NSString *action);
 NSDictionary *SpliceKit_annotatePendingDialog(NSDictionary *result, NSString *action);
@@ -211,12 +194,11 @@ NSDictionary *SpliceKit_sendAppActionAsyncNoWait(NSString *selectorName);
 
 #pragma mark - Defined in SpliceKitServerBatchEdits.m
 
-SpliceKit_CMTime SpliceKit_buildCMTime(double seconds, id timeline);
-BOOL SpliceKit_seekAndMark(id timeline, SpliceKit_CMTime time, NSString *actionSelector);
+CMTime SpliceKit_buildCMTime(double seconds, id timeline);
+BOOL SpliceKit_seekAndMark(id timeline, CMTime time, NSString *actionSelector);
 NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params);
 NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params);
-double SpliceKit_secondsFromTime(SpliceKit_CMTime t);
-BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, SpliceKit_CMTimeRange *outRange);
+BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, CMTimeRange *outRange);
 NSArray<NSNumber *> *SpliceKit_sortedUniqueSeconds(NSArray<NSNumber *> *values, double epsilon);
 NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                  id primaryObj,
@@ -245,7 +227,7 @@ NSArray *SpliceKit_handleSelectionCurrentItems(id timeline);
 NSMutableSet<NSString *> *SpliceKit_handleSelectionPointerKeys(NSArray *items);
 BOOL SpliceKit_handleSelectionApply(id timeline, NSArray *items, NSString **outSelector);
 id SpliceKit_handleResolveTimelineClip(NSString *handle, id primaryObj,
-                                       SpliceKit_CMTimeRange *outRange,
+                                       CMTimeRange *outRange,
                                        NSString **outError);
 
 #pragma mark - Defined in SpliceKitServerClipInfo.m
@@ -349,8 +331,8 @@ NSArray<id> *SpliceKit_keyframeTargetsForClip(id clip);
 NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName);
 void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
 double SpliceKit_channelValue(id channel);
-double SpliceKit_channelValueAtTime(id channel, SpliceKit_CMTime time);
-BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, SpliceKit_CMTime time, unsigned int options);
+double SpliceKit_channelValueAtTime(id channel, CMTime time);
+BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, CMTime time, unsigned int options);
 NSDictionary *SpliceKit_handleInspectorGet(NSDictionary *params);
 NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
 NSDictionary *SpliceKit_handleInspectorGetTitle(NSDictionary *params);
@@ -397,7 +379,6 @@ NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params);
 double SpliceKit_quantizeSecondsToFrameGrid(double seconds, double frameSeconds);
 id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName);
 NSDictionary *SpliceKit_handleBeatsDetect(NSDictionary *params);
-double SpliceKit_cmtimeToSeconds(SpliceKit_CMTime t);
 NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params);
 NSDictionary *SpliceKit_handleFlexMusicGetSong(NSDictionary *params);
 NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params);

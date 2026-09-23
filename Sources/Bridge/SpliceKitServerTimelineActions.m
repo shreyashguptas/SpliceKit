@@ -17,26 +17,7 @@
 //
 
 id SpliceKit_getActiveTimelineModule(void) {
-    id editorContainer = nil;
-    id delegate = nil;
-
-    // Only walk the dual timeline focus chain if the feature is actually installed.
-    // Without this check, the focus chain can dereference stale or invalid state
-    // on platforms where the dual timeline swizzles failed to install.
-    if (SpliceKit_isDualTimelineInstalled()) {
-        editorContainer = SpliceKit_dualTimelineFocusedEditorContainer();
-    }
-
-    if (!editorContainer) {
-        id app = ((id (*)(id, SEL))objc_msgSend)(
-            objc_getClass("NSApplication"), @selector(sharedApplication));
-        delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-        if (!delegate) return nil;
-
-        SEL aecSel = @selector(activeEditorContainer);
-        if (![delegate respondsToSelector:aecSel]) return nil;
-        editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, aecSel);
-    }
+    id editorContainer = SpliceKit_getEditorContainer();
     if (!editorContainer) return nil;
 
     // Get timeline module from editor container
@@ -47,11 +28,9 @@ id SpliceKit_getActiveTimelineModule(void) {
 
     // Fallback: try activeEditorModule
     SEL aemSel = @selector(activeEditorModule);
-    if (!delegate) {
-        id app = ((id (*)(id, SEL))objc_msgSend)(
-            objc_getClass("NSApplication"), @selector(sharedApplication));
-        delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-    }
+    id app = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("NSApplication"), @selector(sharedApplication));
+    id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
     if ([delegate respondsToSelector:aemSel]) {
         return ((id (*)(id, SEL))objc_msgSend)(delegate, aemSel);
     }
@@ -60,8 +39,13 @@ id SpliceKit_getActiveTimelineModule(void) {
 }
 
 id SpliceKit_getEditorContainer(void) {
-    id editorContainer = SpliceKit_dualTimelineFocusedEditorContainer();
-    if (editorContainer) return editorContainer;
+    // Only walk the dual timeline focus chain if the feature is actually installed.
+    // Without this check, the focus chain can dereference stale or invalid state
+    // on platforms where the dual timeline swizzles failed to install.
+    if (SpliceKit_isDualTimelineInstalled()) {
+        id editorContainer = SpliceKit_dualTimelineFocusedEditorContainer();
+        if (editorContainer) return editorContainer;
+    }
 
     id app = ((id (*)(id, SEL))objc_msgSend)(
         objc_getClass("NSApplication"), @selector(sharedApplication));
@@ -1067,13 +1051,10 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                 if (!sequence) { todoResult = @{@"error": @"No sequence in timeline"}; return; }
 
                 // Get playhead time for marker position
-                SpliceKit_CMTime playheadTime = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
-                SpliceKit_CMTime frameDur = {100, 2400, 1, 0};
-                SEL fdSel = NSSelectorFromString(@"frameDuration");
-                if ([sequence respondsToSelector:fdSel]) {
-                    SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                    if (fd.timescale > 0) frameDur = fd;
-                }
+                CMTime playheadTime = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                CMTime frameDur = {100, 2400, 1, 0};
+                CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+                if (fd.timescale > 0) frameDur = fd;
 
                 // Find the primary-storyline clip at the playhead (timeline range via effectiveRangeOfObject:).
                 id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
@@ -1089,7 +1070,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                         if ([primaryObj respondsToSelector:erSel]) {
                             for (id item in (NSArray *)items) {
                                 @try {
-                                    SpliceKit_CMTimeRange itemRange = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                    CMTimeRange itemRange = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                                         primaryObj, erSel, item);
                                     double clipTimelineStart = SpliceKit_secondsFromTime(itemRange.start);
                                     double clipDur = SpliceKit_secondsFromTime(itemRange.duration);
@@ -1136,10 +1117,10 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                 // => range.start = clipSourceStart + (T - clipTimelineStart).
                 double rangeStartSeconds = clipSourceStart + localTime;
                 int32_t ts = frameDur.timescale > 0 ? frameDur.timescale : 600;
-                SpliceKit_CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
-                SpliceKit_CMTimeRange range = {markerTime, frameDur};
+                CMTime markerTime = {(int64_t)llround(rangeStartSeconds * ts), ts, 1, 0};
+                CMTimeRange range = {markerTime, frameDur};
                 NSError *err = nil;
-                typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, SpliceKit_CMTimeRange, NSError **);
+                typedef BOOL (*AddMarkerFn)(id, SEL, id, BOOL, BOOL, CMTimeRange, NSError **);
                 BOOL ok = ((AddMarkerFn)objc_msgSend)(sequence, addSel, targetClip, YES, NO, range, &err);
                 if (ok) {
                     NSMutableDictionary *okOut = [@{@"action": @"addTodoMarker", @"status": @"ok"} mutableCopy];

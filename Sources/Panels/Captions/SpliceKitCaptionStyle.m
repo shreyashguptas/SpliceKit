@@ -27,17 +27,6 @@ static NSColor *SpliceKitCaption_colorFromString(NSString *str) {
     return [NSColor colorWithRed:r green:g blue:b alpha:a];
 }
 
-NSString *SpliceKitCaption_escapeXML(NSString *str) {
-    if (!str) return @"";
-    NSMutableString *s = [str mutableCopy];
-    [s replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, s.length)];
-    [s replaceOccurrencesOfString:@"'" withString:@"&apos;" options:0 range:NSMakeRange(0, s.length)];
-    return s;
-}
-
 NSDictionary *SpliceKitCaption_transcriptWordToDictionary(SpliceKitTranscriptWord *word) {
     if (!word) return @{};
     return @{

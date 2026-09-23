@@ -117,7 +117,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) {
                 [self setErrorState:@"No active timeline. Open a project first."];
                 return;
@@ -125,7 +125,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
             // Detect frame rate
             if ([timeline respondsToSelector:@selector(sequenceFrameDuration)]) {
-                SpliceKitTranscript_CMTime fd = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+                CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;
@@ -369,17 +369,17 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                         // Get timeRange (CMTimeRange struct)
                         SEL trSel = NSSelectorFromString(@"timeRange");
                         NSMethodSignature *sig = [fcpWord methodSignatureForSelector:trSel];
-                        if (!sig || [sig methodReturnLength] != sizeof(SpliceKitTranscript_CMTimeRange)) continue;
+                        if (!sig || [sig methodReturnLength] != sizeof(CMTimeRange)) continue;
 
-                        SpliceKitTranscript_CMTimeRange timeRange;
+                        CMTimeRange timeRange;
                         NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                         [inv setTarget:fcpWord];
                         [inv setSelector:trSel];
                         [inv invoke];
                         [inv getReturnValue:&timeRange];
 
-                        double startTime = CMTimeToSeconds(timeRange.start);
-                        double duration = CMTimeToSeconds(timeRange.duration);
+                        double startTime = SpliceKit_secondsFromTime(timeRange.start);
+                        double duration = SpliceKit_secondsFromTime(timeRange.duration);
 
                         if (duration <= 0) continue;
                         [assetWords addObject:@{
@@ -491,7 +491,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) {
                 [self setErrorState:@"No active timeline. Open a project first."];
                 return;
@@ -499,7 +499,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
             // Detect frame rate
             if ([timeline respondsToSelector:@selector(sequenceFrameDuration)]) {
-                SpliceKitTranscript_CMTime fd = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+                CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;

@@ -26,17 +26,12 @@ NSString *SpliceKitSwiftMacroPluginDirectory(void) {
         return xcodeAppPlugins;
     }
 
-    NSTask *select = [[NSTask alloc] init];
-    select.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcode-select"];
-    select.arguments = @[@"-p"];
-    NSPipe *selectOut = [NSPipe pipe];
-    select.standardOutput = selectOut;
-    select.standardError = [NSPipe pipe];
     @try {
-        [select launch];
-        [select waitUntilExit];
-        if (select.terminationStatus == 0) {
-            NSData *data = [selectOut.fileHandleForReading readDataToEndOfFile];
+        int selectStatus = -1;
+        NSData *data = nil;
+        if (SpliceKit_runProcess(@"/usr/bin/xcode-select", @[@"-p"], nil, SpliceKitProcessOptionsNone, 0,
+                                 &selectStatus, &data, NULL, NULL) == SpliceKitProcessExited &&
+            selectStatus == 0) {
             NSString *devRoot = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             devRoot = [devRoot stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             if (devRoot.length) {

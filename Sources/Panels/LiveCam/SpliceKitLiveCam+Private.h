@@ -26,12 +26,8 @@
 #import <objc/message.h>
 #import <mach/mach.h>
 #import <mach/mach_time.h>
-
-#if defined(__x86_64__)
-#define SPLICEKIT_LIVECAM_STRET_MSG objc_msgSend_stret
-#else
-#define SPLICEKIT_LIVECAM_STRET_MSG objc_msgSend
-#endif
+#import "SpliceKitTime.h"
+#import "SpliceKitStrings.h"
 
 typedef NS_ENUM(NSInteger, SpliceKitLiveCamDestination) {
     SpliceKitLiveCamDestinationLibrary = 0,
@@ -311,7 +307,6 @@ NSString *SpliceKitLiveCamString(id value);
 double SpliceKitLiveCamResidentMB(void);
 NSString *SpliceKitLiveCamTrimmedString(id value);
 NSString *SpliceKitLiveCamSanitizeFilename(NSString *input);
-NSString *SpliceKitLiveCamEscapeXML(NSString *input);
 BOOL SpliceKitLiveCamPresetSupportsTimestampOverlay(NSString *identifier);
 BOOL SpliceKitLiveCamTimestampOverlayEnabled(void);
 NSString *SpliceKitLiveCamOutputDirectory(void);

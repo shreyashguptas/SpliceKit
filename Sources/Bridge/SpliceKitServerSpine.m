@@ -81,12 +81,12 @@ NSDictionary *SpliceKit_handleSpineGetItems(NSDictionary *params) {
                     info[@"name"] = name ?: @"";
                 }
                 if ([item respondsToSelector:@selector(duration)]) {
-                    SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+                    CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
                     info[@"duration"] = SpliceKit_serializeCMTime(d);
                 }
                 if (canGetRange) {
                     @try {
-                        SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                        CMTimeRange range = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                             spine, erSel, item);
                         info[@"startTime"] = SpliceKit_serializeCMTime(range.start);
                     } @catch (NSException *e) {}

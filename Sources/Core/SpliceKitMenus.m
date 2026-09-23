@@ -14,6 +14,7 @@
 #import "SpliceKitURLImport.h"
 #import "SpliceKitMKV.h"
 #import "SpliceKitVP9.h"
+#import "SpliceKitProcess.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -258,17 +259,13 @@
                     @"otio.adapters.write_to_file(timeline, dst_path)\n"
                     @"print('OK')\n";
 
-                NSTask *task = [[NSTask alloc] init];
-                task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
-                task.arguments = @[@"python3", @"-c", pyScript, tmpFcpxml, outPath];
-                NSPipe *outPipe = [NSPipe pipe];
-                NSPipe *errPipe = [NSPipe pipe];
-                task.standardOutput = outPipe;
-                task.standardError = errPipe;
-
+                int status = -1;
+                NSData *outData = nil, *errData = nil;
                 NSError *err = nil;
-                [task launchAndReturnError:&err];
-                if (err) {
+                SpliceKitProcessOutcome outcome = SpliceKit_runProcess(@"/usr/bin/env",
+                    @[@"python3", @"-c", pyScript, tmpFcpxml, outPath], nil, SpliceKitProcessOptionsNone, 0,
+                    &status, &outData, &errData, &err);
+                if (outcome != SpliceKitProcessExited) {
                     SpliceKit_log(@"[OTIO] Export launch error: %@", err);
                     [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
                     dispatch_async(dispatch_get_main_queue(), ^{
@@ -280,14 +277,12 @@
                     });
                     return;
                 }
-                [task waitUntilExit];
-
-                NSString *stdoutStr = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-                NSString *stderrStr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
+                NSString *stdoutStr = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
+                NSString *stderrStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
 
                 [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
 
-                if (task.terminationStatus != 0 || ![stdoutStr containsString:@"OK"]) {
+                if (status != 0 || ![stdoutStr containsString:@"OK"]) {
                     SpliceKit_log(@"[OTIO] Export error: %@", stderrStr);
                     dispatch_async(dispatch_get_main_queue(), ^{
                         NSAlert *alert = [[NSAlert alloc] init];
@@ -419,17 +414,13 @@
                 @"    fh.write(xml)\n"
                 @"print('OK')\n";
 
-            NSTask *task = [[NSTask alloc] init];
-            task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
-            task.arguments = @[@"python3", @"-c", pyScript, inPath, tmpPath];
-            NSPipe *outPipe = [NSPipe pipe];
-            NSPipe *errPipe = [NSPipe pipe];
-            task.standardOutput = outPipe;
-            task.standardError = errPipe;
-
+            int status = -1;
+            NSData *outData = nil, *errData = nil;
             NSError *launchErr = nil;
-            [task launchAndReturnError:&launchErr];
-            if (launchErr) {
+            SpliceKitProcessOutcome outcome = SpliceKit_runProcess(@"/usr/bin/env",
+                @[@"python3", @"-c", pyScript, inPath, tmpPath], nil, SpliceKitProcessOptionsNone, 0,
+                &status, &outData, &errData, &launchErr);
+            if (outcome != SpliceKitProcessExited) {
                 SpliceKit_log(@"[OTIO] Import launch error: %@", launchErr.localizedDescription);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     NSAlert *alert = [[NSAlert alloc] init];
@@ -442,11 +433,10 @@
                 return;
             }
 
-            [task waitUntilExit];
-            NSString *stdoutStr = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-            NSString *stderrStr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
+            NSString *stdoutStr = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
+            NSString *stderrStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
 
-            if (task.terminationStatus != 0 || ![stdoutStr containsString:@"OK"]) {
+            if (status != 0 || ![stdoutStr containsString:@"OK"]) {
                 [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
                 SpliceKit_log(@"[OTIO] Import conversion error: %@", stderrStr);
                 dispatch_async(dispatch_get_main_queue(), ^{

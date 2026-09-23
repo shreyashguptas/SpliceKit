@@ -53,8 +53,6 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
                                                                    SpliceKitURLImportSharedNormalizedDirectory());
     [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
 
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:ffmpeg];
     // Explicit per-stream mapping keeps subtitle/attachment streams out of the
     // MP4 mux. MKV files regularly ship with subrip subtitles and font
     // attachments that the ISO BMFF muxer can't handle.
@@ -97,26 +95,21 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
         [arguments addObjectsFromArray:@[@"-bsf:v", settsArg]];
     }
     [arguments addObjectsFromArray:@[@"-movflags", @"+faststart", outputPath]];
-    task.arguments = arguments;
-
     SpliceKit_log(@"[VP9Import] ffmpeg remux args: %@", [arguments componentsJoinedByString:@" "]);
 
-    NSPipe *pipe = [NSPipe pipe];
-    task.standardOutput = pipe;
-    task.standardError = pipe;
-
+    int status = -1;
+    NSData *logData = nil;
     NSError *launchError = nil;
-    if (![task launchAndReturnError:&launchError]) {
+    if (SpliceKit_runProcess(ffmpeg, arguments, nil, SpliceKitProcessMergeStderr, 0,
+                             &status, &logData, NULL, &launchError) != SpliceKitProcessExited) {
         if (outError) {
             *outError = launchError.localizedDescription ?: @"Could not launch ffmpeg for VP9 timestamp normalization.";
         }
         return nil;
     }
 
-    NSData *logData = [[pipe fileHandleForReading] readDataToEndOfFile];
-    [task waitUntilExit];
     NSString *ffmpegLog = SpliceKitURLImportTrimmedString(SpliceKitURLImportStringFromData(logData));
-    if (task.terminationStatus != 0) {
+    if (status != 0) {
         if (outError) {
             *outError = ffmpegLog.length > 0 ? ffmpegLog : @"ffmpeg failed while rewriting VP9 timestamps.";
         }

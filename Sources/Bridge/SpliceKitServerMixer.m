@@ -64,7 +64,7 @@ id SpliceKit_getClipEffectStack(id clip) {
 // FCP stores audio effects in a separate effectStack accessed via audioEffectsForIdentifier:
 // (not the main effectStack which is for video effects).
 // Mixer state for volume reads — set before calling readVolume
-static SpliceKit_CMTime sMixerPlayheadTime = {0, 0, 17, 0}; // default: kCMTimeIndefinite
+static CMTime sMixerPlayheadTime = {0, 0, 17, 0}; // default: kCMTimeIndefinite
 static id sMixerContainer = nil; // primaryObject for containerToLocalTime conversion
 
 static BOOL SpliceKit_refreshMixerTimelineState(void) {
@@ -80,11 +80,11 @@ static BOOL SpliceKit_refreshMixerTimelineState(void) {
     } @catch (NSException *e) {}
     if (!sequence) return NO;
 
-    SpliceKit_CMTime playhead = {0, 1, 0, 0};
+    CMTime playhead = {0, 1, 0, 0};
     @try {
         SEL playheadSel = @selector(playheadTime);
         if ([timeline respondsToSelector:playheadSel]) {
-            playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, playheadSel);
+            playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, playheadSel);
         }
     } @catch (NSException *e) {}
 
@@ -104,12 +104,12 @@ static BOOL SpliceKit_refreshMixerTimelineState(void) {
 }
 
 // Convert absolute timeline time to clip-local time for keyframe reads
-static SpliceKit_CMTime SpliceKit_clipLocalTime(id clip, SpliceKit_CMTime absTime, id container) {
+static CMTime SpliceKit_clipLocalTime(id clip, CMTime absTime, id container) {
     if (!clip || !container) return absTime;
     @try {
         SEL sel = NSSelectorFromString(@"containerToLocalTime:container:");
         if ([clip respondsToSelector:sel]) {
-            return ((SpliceKit_CMTime (*)(id, SEL, SpliceKit_CMTime, id))STRET_MSG)(
+            return ((CMTime (*)(id, SEL, CMTime, id))STRET_MSG)(
                 clip, sel, absTime, container);
         }
     } @catch (NSException *e) {}
@@ -122,7 +122,7 @@ BOOL SpliceKit_mixerWriteAutomationPoint(id clip, id channel, double value) {
     if (!clip || !channel) return NO;
     if (!SpliceKit_refreshMixerTimelineState()) return NO;
 
-    SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
+    CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
     BOOL beganOperation = NO;
 
     @try {
@@ -177,7 +177,7 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
                         if (volChan) {
                             out[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
                             // Convert playhead time to clip-local time for keyframe reads
-                            SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
+                            CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
                             double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                             out[@"volumeLinear"] = @(linear);
                             out[@"volumeDB"] = SpliceKit_mixerJSONDBNumberFromLinear(linear, -96.0);
@@ -196,7 +196,7 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
             if ([effectStack respondsToSelector:volSel]) {
                 id volChan = ((id (*)(id, SEL))objc_msgSend)(effectStack, volSel);
                 if (volChan) {
-                    SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
+                    CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
                     double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                     out[@"volumeLinear"] = @(linear);
                     out[@"volumeDB"] = SpliceKit_mixerJSONDBNumberFromLinear(linear, -96.0);
@@ -472,7 +472,7 @@ static BOOL SpliceKit_mixerTryReadEffectiveRange(id primaryObj, SEL erSel, id it
                                                  double *outStartSec, double *outEndSec) {
     if (!primaryObj || !item || !erSel || !outStartSec || !outEndSec) return NO;
     @try {
-        SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+        CMTimeRange range = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
             primaryObj, erSel, item);
         if (range.start.timescale <= 0 || range.duration.timescale <= 0) return NO;
         double startSec = (double)range.start.value / range.start.timescale;
@@ -1604,11 +1604,11 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             }
 
             // Get playhead time
-            SpliceKit_CMTime playhead = {0, 1, 0, 0};
+            CMTime playhead = {0, 1, 0, 0};
             if ([timeline respondsToSelector:@selector(playheadTime)]) {
-                playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+                playhead = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
             }
-            double playheadSec = (playhead.timescale > 0) ? (double)playhead.value / playhead.timescale : 0;
+            double playheadSec = SpliceKit_secondsFromTime(playhead);
             BOOL transportPlaying = NO;
             double transportRate = 0.0;
             double frameRate = 0.0;
@@ -1632,12 +1632,9 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 transportPlaying = ((BOOL (*)(id, SEL))objc_msgSend)(timeline, isPlayingSel);
             }
 
-            SEL frameDurationSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:frameDurationSel]) {
-                SpliceKit_CMTime frameDuration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, frameDurationSel);
-                if (frameDuration.timescale > 0 && frameDuration.value > 0) {
-                    frameRate = (double)frameDuration.timescale / frameDuration.value;
-                }
+            CMTime frameDuration = SpliceKit_sequenceFrameDuration(sequence);
+            if (frameDuration.timescale > 0 && frameDuration.value > 0) {
+                frameRate = (double)frameDuration.timescale / frameDuration.value;
             }
 
             id timelinePlayer = nil;
@@ -1667,7 +1664,7 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 if (toolSkimming) {
                     SEL skimmingTimeSel = NSSelectorFromString(@"skimmingTime");
                     if ([timeline respondsToSelector:skimmingTimeSel]) {
-                        SpliceKit_CMTime skimTime = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, skimmingTimeSel);
+                        CMTime skimTime = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, skimmingTimeSel);
                         if (skimTime.timescale > 0) {
                             activeTimeSec = (double)skimTime.value / skimTime.timescale;
                         }

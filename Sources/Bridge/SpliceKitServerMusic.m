@@ -203,8 +203,8 @@ static NSString *SpliceKit_flexMusicConstant(const char *symbolName) {
 }
 
 // Helper: build a CMTime from seconds at timescale 600
-static SpliceKit_CMTime SpliceKit_cmtimeFromSeconds(double seconds) {
-    SpliceKit_CMTime t;
+static CMTime SpliceKit_cmtimeFromSeconds(double seconds) {
+    CMTime t;
     t.value = (int64_t)(seconds * 600.0);
     t.timescale = 600;
     t.flags = 1; // kCMTimeFlags_Valid
@@ -212,23 +212,8 @@ static SpliceKit_CMTime SpliceKit_cmtimeFromSeconds(double seconds) {
     return t;
 }
 
-// Helper: convert CMTime to double seconds
-double SpliceKit_cmtimeToSeconds(SpliceKit_CMTime t) {
-    if (t.timescale <= 0) return 0.0;
-    return (double)t.value / (double)t.timescale;
-}
-
-static NSString *SpliceKit_escapeXMLString(NSString *value) {
-    NSString *escaped = value ?: @"";
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
-    return escaped;
-}
-
 static NSString *SpliceKit_fcpxmlTimeStringForFrameCount(long long frameCount,
-                                                         SpliceKit_CMTime frameDuration) {
+                                                         CMTime frameDuration) {
     if (frameCount <= 0) return @"0s";
     long long value = frameCount * frameDuration.value;
     return [NSString stringWithFormat:@"%lld/%ds", value, frameDuration.timescale];
@@ -237,7 +222,7 @@ static NSString *SpliceKit_fcpxmlTimeStringForFrameCount(long long frameCount,
 static NSString *SpliceKit_buildRandomClipAssemblyFCPXML(NSArray<NSMutableDictionary *> *plan,
                                                          NSString *projectName,
                                                          NSString *eventName,
-                                                         SpliceKit_CMTime frameDuration,
+                                                         CMTime frameDuration,
                                                          NSString *songMediaURL,
                                                          long long totalDurationFrames,
                                                          NSString **errorOut) {
@@ -278,8 +263,8 @@ static NSString *SpliceKit_buildRandomClipAssemblyFCPXML(NSArray<NSMutableDictio
     NSString *formatId = [NSString stringWithFormat:@"fmt_%@", uid];
     NSString *frameDurationString = SpliceKit_fcpxmlTimeStringForFrameCount(1, frameDuration);
     NSString *sequenceDurationString = SpliceKit_fcpxmlTimeStringForFrameCount(totalDurationFrames, frameDuration);
-    NSString *escapedProject = SpliceKit_escapeXMLString(projectName ?: @"Beat Random Cut");
-    NSString *escapedEvent = SpliceKit_escapeXMLString(eventName.length > 0 ? eventName : @"SpliceKit Tests");
+    NSString *escapedProject = SpliceKit_escapeXML(projectName ?: @"Beat Random Cut");
+    NSString *escapedEvent = SpliceKit_escapeXML(eventName.length > 0 ? eventName : @"SpliceKit Tests");
 
     NSMutableString *xml = [NSMutableString string];
     [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"];
@@ -294,14 +279,14 @@ static NSString *SpliceKit_buildRandomClipAssemblyFCPXML(NSArray<NSMutableDictio
         [xml appendFormat:@"        <asset id=\"%@\" name=\"%@\" hasVideo=\"1\" format=\"%@\" hasAudio=\"1\" videoSources=\"1\" audioSources=\"1\" audioChannels=\"2\" audioRate=\"48000\">\n",
                           res[@"id"], res[@"id"], formatId];
         [xml appendFormat:@"            <media-rep kind=\"original-media\" src=\"%@\"/>\n",
-                          SpliceKit_escapeXMLString(res[@"url"])];
+                          SpliceKit_escapeXML(res[@"url"])];
         [xml appendString:@"        </asset>\n"];
     }
 
     if (songMediaURL.length > 0) {
         [xml appendString:@"        <asset id=\"song_audio\" name=\"Music\" hasAudio=\"1\" audioSources=\"1\" audioChannels=\"2\" audioRate=\"48000\">\n"];
         [xml appendFormat:@"            <media-rep kind=\"original-media\" src=\"%@\"/>\n",
-                          SpliceKit_escapeXMLString(songMediaURL)];
+                          SpliceKit_escapeXML(songMediaURL)];
         [xml appendString:@"        </asset>\n"];
     }
 
@@ -319,7 +304,7 @@ static NSString *SpliceKit_buildRandomClipAssemblyFCPXML(NSArray<NSMutableDictio
         long long durationFrames = [entry[@"durationFrames"] longLongValue];
         NSString *offsetString = SpliceKit_fcpxmlTimeStringForFrameCount(offsetFrames, frameDuration);
         NSString *durationString = SpliceKit_fcpxmlTimeStringForFrameCount(durationFrames, frameDuration);
-        NSString *clipName = SpliceKit_escapeXMLString(entry[@"clipName"] ?: @"Clip");
+        NSString *clipName = SpliceKit_escapeXML(entry[@"clipName"] ?: @"Clip");
         BOOL addSongChild = (!attachedSong && songMediaURL.length > 0);
 
         if ([entry[@"status"] isEqualToString:@"gap"]) {
@@ -391,15 +376,15 @@ static NSArray *SpliceKit_copyBrowserClipsForEvent(id event) {
     return SpliceKit_browserClipsOfEvent(event);
 }
 
-static SpliceKit_CMTimeRange SpliceKit_clipRangeForItem(id item) {
-    SpliceKit_CMTimeRange clipRange = {0};
+static CMTimeRange SpliceKit_clipRangeForItem(id item) {
+    CMTimeRange clipRange = {0};
     if (!item) return clipRange;
 
     if ([item respondsToSelector:@selector(clippedRange)]) {
-        clipRange = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, @selector(clippedRange));
+        clipRange = ((CMTimeRange (*)(id, SEL))STRET_MSG)(item, @selector(clippedRange));
     } else if ([item respondsToSelector:@selector(duration)]) {
-        SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
-        clipRange.start = (SpliceKit_CMTime){0, dur.timescale > 0 ? dur.timescale : 6000, 1, 0};
+        CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        clipRange.start = (CMTime){0, dur.timescale > 0 ? dur.timescale : 6000, 1, 0};
         clipRange.duration = dur;
     }
 
@@ -500,7 +485,7 @@ static id SpliceKit_normalizeSourceObjectForInsertion(id sourceObject) {
 }
 
 static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBrowserClip,
-                                                                    SpliceKit_CMTimeRange clipRange,
+                                                                    CMTimeRange clipRange,
                                                                     BOOL preferAudio) {
     NSMutableDictionary *diag = [NSMutableDictionary dictionary];
     diag[@"ok"] = @NO;
@@ -586,7 +571,7 @@ static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBro
         return diag;
     }
 
-    id mediaRange = ((id (*)(id, SEL, SpliceKit_CMTimeRange, id))objc_msgSend)(
+    id mediaRange = ((id (*)(id, SEL, CMTimeRange, id))objc_msgSend)(
         (id)rangeObjClass, rangeAndObjSel, clipRange, insertionSource);
     if (!mediaRange) {
         diag[@"error"] = @"Failed to build source media range";
@@ -594,10 +579,10 @@ static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBro
     }
 
     NSArray *ranges = @[mediaRange];
-    SpliceKit_CMTime zero = {0, clipRange.duration.timescale > 0 ? clipRange.duration.timescale : 6000, 1, 0};
+    CMTime zero = {0, clipRange.duration.timescale > 0 ? clipRange.duration.timescale : 6000, 1, 0};
     SEL revealSel = NSSelectorFromString(@"revealObject:andRange:atPlayhead:");
     if ([organizer respondsToSelector:revealSel]) {
-        ((BOOL (*)(id, SEL, id, SpliceKit_CMTimeRange, SpliceKit_CMTime))objc_msgSend)(
+        ((BOOL (*)(id, SEL, id, CMTimeRange, CMTime))objc_msgSend)(
             organizer, revealSel, insertionSource, clipRange, zero);
     }
     SEL revealRangesSel = NSSelectorFromString(@"revealMediaRanges:");
@@ -757,14 +742,7 @@ id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName) {
 static BOOL SpliceKit_loadSequenceInActiveEditor(id sequence) {
     if (!sequence) return NO;
 
-    id app = ((id (*)(id, SEL))objc_msgSend)(
-        objc_getClass("NSApplication"), @selector(sharedApplication));
-    id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-    if (!delegate) return NO;
-
-    SEL containerSel = @selector(activeEditorContainer);
-    if (![delegate respondsToSelector:containerSel]) return NO;
-    id editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, containerSel);
+    id editorContainer = SpliceKit_getEditorContainer();
     if (!editorContainer) return NO;
 
     SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
@@ -774,10 +752,10 @@ static BOOL SpliceKit_loadSequenceInActiveEditor(id sequence) {
     return YES;
 }
 
-static SpliceKit_CMTime SpliceKit_makeCMTimeWithTimescale(double seconds, int32_t timescale) {
+static CMTime SpliceKit_makeCMTimeWithTimescale(double seconds, int32_t timescale) {
     if (!isfinite(seconds)) seconds = 0.0;
     if (timescale <= 0) timescale = 6000;
-    return (SpliceKit_CMTime){
+    return (CMTime){
         .value = (int64_t)llround(seconds * (double)timescale),
         .timescale = timescale,
         .flags = 1,
@@ -785,8 +763,8 @@ static SpliceKit_CMTime SpliceKit_makeCMTimeWithTimescale(double seconds, int32_
     };
 }
 
-static SpliceKit_CMTime SpliceKit_addSecondsToCMTime(SpliceKit_CMTime base, double seconds) {
-    double baseSeconds = (base.timescale > 0) ? ((double)base.value / (double)base.timescale) : 0.0;
+static CMTime SpliceKit_addSecondsToCMTime(CMTime base, double seconds) {
+    double baseSeconds = SpliceKit_secondsFromTime(base);
     int32_t timescale = base.timescale > 0 ? base.timescale : 6000;
     return SpliceKit_makeCMTimeWithTimescale(baseSeconds + seconds, timescale);
 }
@@ -877,7 +855,7 @@ static NSDictionary *SpliceKit_performPreparedMediaEdit(id timeline,
                                                         BOOL backTimed,
                                                         NSString *trackType,
                                                         BOOL useExplicitTime,
-                                                        SpliceKit_CMTime explicitTime) {
+                                                        CMTime explicitTime) {
     NSMutableDictionary *diag = [NSMutableDictionary dictionary];
     diag[@"ok"] = @NO;
     diag[@"editKind"] = @(editKind);
@@ -987,7 +965,7 @@ static NSDictionary *SpliceKit_performPreparedMediaEdit(id timeline,
             diag[@"error"] = @"Timeline does not support explicit-time pasteboard insertion";
             return diag;
         }
-        ((void (*)(id, SEL, id, SpliceKit_CMTime, int, BOOL, BOOL, id, id, id))objc_msgSend)(
+        ((void (*)(id, SEL, id, CMTime, int, BOOL, BOOL, id, id, id))objc_msgSend)(
             timeline,
             addSel,
             pasteboardName,
@@ -1082,12 +1060,9 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SpliceKit_CMTime frameDuration = {100, 2400, 1, 0};
-            SEL frameDurationSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:frameDurationSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, frameDurationSel);
-                if (fd.value > 0 && fd.timescale > 0) frameDuration = fd;
-            }
+            CMTime frameDuration = {100, 2400, 1, 0};
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.value > 0 && fd.timescale > 0) frameDuration = fd;
 
             NSArray *rootItems = SpliceKit_mixerArrayFromContainer(
                 ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems))) ?: @[];
@@ -1213,7 +1188,7 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                                      @"with beat_sync_blade or blade_at_times instead."};
                 return;
             }
-            SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceItem);
+            CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceItem);
 
             double sourceStartSec = 0.0;
             double sourceEndSec = 0.0;
@@ -1325,8 +1300,8 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                     id poolClip = browserClip ?: clip;
                     double poolDurationSec = durationSec;
                     if (browserClip && [browserClip respondsToSelector:@selector(duration)]) {
-                        SpliceKit_CMTime bDur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(browserClip, @selector(duration));
-                        double bDurSec = SpliceKit_cmtimeToSeconds(bDur);
+                        CMTime bDur = ((CMTime (*)(id, SEL))STRET_MSG)(browserClip, @selector(duration));
+                        double bDurSec = SpliceKit_secondsFromTime(bDur);
                         if (bDurSec > poolDurationSec) poolDurationSec = bDurSec;
                     }
 
@@ -1370,20 +1345,20 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
 
                         double durationSec = 0.0;
                         if ([clip respondsToSelector:@selector(duration)]) {
-                            SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
-                            durationSec = SpliceKit_cmtimeToSeconds(duration);
+                            CMTime duration = ((CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
+                            durationSec = SpliceKit_secondsFromTime(duration);
                         } else if ([clip respondsToSelector:NSSelectorFromString(@"clippedRange")]) {
-                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                            CMTimeRange range = ((CMTimeRange (*)(id, SEL))STRET_MSG)(
                                 clip, NSSelectorFromString(@"clippedRange"));
-                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                            durationSec = SpliceKit_secondsFromTime(range.duration);
                         } else if ([clip respondsToSelector:NSSelectorFromString(@"unclippedRange")]) {
-                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                            CMTimeRange range = ((CMTimeRange (*)(id, SEL))STRET_MSG)(
                                 clip, NSSelectorFromString(@"unclippedRange"));
-                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                            durationSec = SpliceKit_secondsFromTime(range.duration);
                         } else if ([clip respondsToSelector:NSSelectorFromString(@"mediaRange")]) {
-                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                            CMTimeRange range = ((CMTimeRange (*)(id, SEL))STRET_MSG)(
                                 clip, NSSelectorFromString(@"mediaRange"));
-                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                            durationSec = SpliceKit_secondsFromTime(range.duration);
                         }
                         if (durationSec <= 0.050) continue;
 
@@ -1787,7 +1762,7 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                         continue;
                     }
 
-                    SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceClip);
+                    CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceClip);
                     int32_t segmentTimescale = sourceClipRange.start.timescale > 0
                         ? sourceClipRange.start.timescale
                         : (sourceClipRange.duration.timescale > 0
@@ -1795,7 +1770,7 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                             : (frameDuration.timescale > 0 ? frameDuration.timescale : 6000));
                     double inSeconds = [entry[@"inFrames"] longLongValue] * frameSeconds;
                     double durationSeconds = [entry[@"durationFrames"] longLongValue] * frameSeconds;
-                    SpliceKit_CMTimeRange segmentRange = sourceClipRange;
+                    CMTimeRange segmentRange = sourceClipRange;
                     segmentRange.start = SpliceKit_addSecondsToCMTime(sourceClipRange.start, inSeconds);
                     segmentRange.duration = SpliceKit_makeCMTimeWithTimescale(durationSeconds, segmentTimescale);
 
@@ -1838,7 +1813,7 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                 int32_t songTimescale = sourceClipRange.duration.timescale > 0
                     ? sourceClipRange.duration.timescale
                     : (frameDuration.timescale > 0 ? frameDuration.timescale : 6000);
-                SpliceKit_CMTimeRange songInsertRange = sourceClipRange;
+                CMTimeRange songInsertRange = sourceClipRange;
                 songInsertRange.duration = SpliceKit_makeCMTimeWithTimescale(targetSongSeconds, songTimescale);
 
                 songAudioPrep = SpliceKit_prepareBrowserClipSourceForInsertion(sourceInsertObject, songInsertRange, YES) ?: @{};
@@ -1846,7 +1821,7 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                     songAudioError = [songAudioPrep[@"error"] isKindOfClass:[NSString class]]
                         ? songAudioPrep[@"error"] : @"Could not prepare the source song for insertion";
                 } else {
-                    SpliceKit_CMTime zero = SpliceKit_makeCMTimeWithTimescale(0.0, frameDuration.timescale);
+                    CMTime zero = SpliceKit_makeCMTimeWithTimescale(0.0, frameDuration.timescale);
                     songAudioEdit = SpliceKit_performPreparedMediaEdit(
                         buildTimeline,
                         3,
@@ -1861,11 +1836,11 @@ NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
                     } else {
                         SEL setPlayheadSel = NSSelectorFromString(@"setPlayheadTime:");
                         if ([buildTimeline respondsToSelector:setPlayheadSel]) {
-                            ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(buildTimeline, setPlayheadSel, zero);
+                            ((void (*)(id, SEL, CMTime))objc_msgSend)(buildTimeline, setPlayheadSel, zero);
                         }
                         SEL commitSel = NSSelectorFromString(@"setCommittedPlayheadTime:");
                         if ([buildTimeline respondsToSelector:commitSel]) {
-                            ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(buildTimeline, commitSel, zero);
+                            ((void (*)(id, SEL, CMTime))objc_msgSend)(buildTimeline, commitSel, zero);
                         }
                     }
                 }
@@ -2066,8 +2041,8 @@ NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params) {
                     // Duration
                     SEL durSel = NSSelectorFromString(@"naturalDuration");
                     if ([song respondsToSelector:durSel]) {
-                        SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(song, durSel);
-                        info[@"durationSeconds"] = @(SpliceKit_cmtimeToSeconds(dur));
+                        CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(song, durSel);
+                        info[@"durationSeconds"] = @(SpliceKit_secondsFromTime(dur));
                     }
 
                     // Filter
@@ -2211,13 +2186,13 @@ NSDictionary *SpliceKit_handleFlexMusicGetSong(NSDictionary *params) {
             // Durations
             SEL natDurSel = NSSelectorFromString(@"naturalDuration");
             if ([song respondsToSelector:natDurSel]) {
-                SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(song, natDurSel);
-                info[@"naturalDurationSeconds"] = @(SpliceKit_cmtimeToSeconds(dur));
+                CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(song, natDurSel);
+                info[@"naturalDurationSeconds"] = @(SpliceKit_secondsFromTime(dur));
             }
             SEL minDurSel = NSSelectorFromString(@"minimumDuration");
             if ([song respondsToSelector:minDurSel]) {
-                SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(song, minDurSel);
-                info[@"minimumDurationSeconds"] = @(SpliceKit_cmtimeToSeconds(dur));
+                CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(song, minDurSel);
+                info[@"minimumDurationSeconds"] = @(SpliceKit_secondsFromTime(dur));
             }
             SEL idealSel = NSSelectorFromString(@"idealDurations");
             if ([song respondsToSelector:idealSel]) {
@@ -2279,7 +2254,7 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
                 return;
             }
 
-            SpliceKit_CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
+            CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
 
             // Get options for duration - try FFAnchoredFlexMusicObject first
             id options = nil;
@@ -2287,7 +2262,7 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
             if (ffFlexObj) {
                 SEL optSel = NSSelectorFromString(@"optionsForDuration:");
                 if ([ffFlexObj respondsToSelector:optSel]) {
-                    options = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    options = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         (id)ffFlexObj, optSel, durTime);
                 }
             }
@@ -2306,14 +2281,14 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
             id rendition = nil;
             SEL rendSel = NSSelectorFromString(@"renditionForDuration:withOptions:");
             if ([song respondsToSelector:rendSel]) {
-                rendition = ((id (*)(id, SEL, SpliceKit_CMTime, id))objc_msgSend)(
+                rendition = ((id (*)(id, SEL, CMTime, id))objc_msgSend)(
                     song, rendSel, durTime, options);
             }
             if (!rendition) {
                 // Try simpler renditionForDuration:
                 SEL rendSel2 = NSSelectorFromString(@"renditionForDuration:");
                 if ([song respondsToSelector:rendSel2]) {
-                    rendition = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    rendition = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         song, rendSel2, durTime);
                 }
             }
@@ -2330,8 +2305,8 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
             // Get fitted duration from rendition
             SEL rendDurSel = NSSelectorFromString(@"duration");
             if ([rendition respondsToSelector:rendDurSel]) {
-                SpliceKit_CMTime rd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(rendition, rendDurSel);
-                timing[@"fittedDurationSeconds"] = @(SpliceKit_cmtimeToSeconds(rd));
+                CMTime rd = ((CMTime (*)(id, SEL))STRET_MSG)(rendition, rendDurSel);
+                timing[@"fittedDurationSeconds"] = @(SpliceKit_secondsFromTime(rd));
             }
 
             // Extract timed metadata using identifier constants
@@ -2353,8 +2328,8 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
                 for (id item in (NSArray *)items) {
                     SEL timeSel = NSSelectorFromString(@"time");
                     if ([item respondsToSelector:timeSel]) {
-                        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, timeSel);
-                        [times addObject:@(SpliceKit_cmtimeToSeconds(t))];
+                        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(item, timeSel);
+                        [times addObject:@(SpliceKit_secondsFromTime(t))];
                     }
                 }
                 return times;
@@ -2373,11 +2348,11 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
                     SEL initRendSel = NSSelectorFromString(@"initWithSongRendition:clippedRange:");
                     if ([ffTimingClass instancesRespondToSelector:initRendSel]) {
                         // Full range
-                        SpliceKit_CMTime start = {0, 600, 1, 0};
-                        SpliceKit_CMTimeRange fullRange = {start, durTime};
+                        CMTime start = {0, 600, 1, 0};
+                        CMTimeRange fullRange = {start, durTime};
 
                         id tmObj = ((id (*)(id, SEL))objc_msgSend)((id)ffTimingClass, @selector(alloc));
-                        tmObj = ((id (*)(id, SEL, id, SpliceKit_CMTimeRange))objc_msgSend)(
+                        tmObj = ((id (*)(id, SEL, id, CMTimeRange))objc_msgSend)(
                             tmObj, initRendSel, rendition, fullRange);
 
                         if (tmObj) {
@@ -2394,8 +2369,8 @@ NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params) {
                                         for (id item in (NSArray *)metaItems) {
                                             SEL timeSel2 = NSSelectorFromString(@"time");
                                             if ([item respondsToSelector:timeSel2]) {
-                                                SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, timeSel2);
-                                                [times addObject:@(SpliceKit_cmtimeToSeconds(t))];
+                                                CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(item, timeSel2);
+                                                [times addObject:@(SpliceKit_secondsFromTime(t))];
                                             }
                                         }
                                         if (times.count > 0) timing[keys[i]] = times;
@@ -2468,7 +2443,7 @@ NSDictionary *SpliceKit_handleFlexMusicRender(NSDictionary *params) {
                 return;
             }
 
-            SpliceKit_CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
+            CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
 
             // Get rendition
             id rendition = nil;
@@ -2478,20 +2453,20 @@ NSDictionary *SpliceKit_handleFlexMusicRender(NSDictionary *params) {
             if (ffFlexObj) {
                 SEL optSel = NSSelectorFromString(@"optionsForDuration:");
                 if ([ffFlexObj respondsToSelector:optSel]) {
-                    options = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    options = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         (id)ffFlexObj, optSel, durTime);
                 }
             }
             if (!options) options = @{};
 
             if ([song respondsToSelector:rendSel]) {
-                rendition = ((id (*)(id, SEL, SpliceKit_CMTime, id))objc_msgSend)(
+                rendition = ((id (*)(id, SEL, CMTime, id))objc_msgSend)(
                     song, rendSel, durTime, options);
             }
             if (!rendition) {
                 SEL rendSel2 = NSSelectorFromString(@"renditionForDuration:");
                 if ([song respondsToSelector:rendSel2]) {
-                    rendition = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    rendition = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         song, rendSel2, durTime);
                 }
             }
@@ -2628,9 +2603,9 @@ NSDictionary *SpliceKit_handleFlexMusicAddToTimeline(NSDictionary *params) {
                         if (sequence) {
                             SEL durSel = NSSelectorFromString(@"duration");
                             if ([sequence respondsToSelector:durSel]) {
-                                SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(
+                                CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(
                                     sequence, durSel);
-                                durationSeconds = SpliceKit_cmtimeToSeconds(d);
+                                durationSeconds = SpliceKit_secondsFromTime(d);
                             }
                         }
                     }
@@ -2660,7 +2635,7 @@ NSDictionary *SpliceKit_handleFlexMusicAddToTimeline(NSDictionary *params) {
                 return;
             }
 
-            SpliceKit_CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
+            CMTime durTime = SpliceKit_cmtimeFromSeconds(durationSeconds);
 
             // Get song name for FCPXML
             NSString *songName = @"FlexMusic";
@@ -2677,19 +2652,19 @@ NSDictionary *SpliceKit_handleFlexMusicAddToTimeline(NSDictionary *params) {
             if (ffFlexObj) {
                 SEL optSel = NSSelectorFromString(@"optionsForDuration:");
                 if ([ffFlexObj respondsToSelector:optSel]) {
-                    options = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    options = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         (id)ffFlexObj, optSel, durTime) ?: @{};
                 }
             }
             SEL rendSel = NSSelectorFromString(@"renditionForDuration:withOptions:");
             if ([song respondsToSelector:rendSel]) {
-                rendition = ((id (*)(id, SEL, SpliceKit_CMTime, id))objc_msgSend)(
+                rendition = ((id (*)(id, SEL, CMTime, id))objc_msgSend)(
                     song, rendSel, durTime, options);
             }
             if (!rendition) {
                 SEL rendSel2 = NSSelectorFromString(@"renditionForDuration:");
                 if ([song respondsToSelector:rendSel2]) {
-                    rendition = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    rendition = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         song, rendSel2, durTime);
                 }
             }
@@ -2895,9 +2870,9 @@ NSDictionary *SpliceKit_handleMontageAnalyze(NSDictionary *params) {
                         // Duration
                         double durationSec = 0;
                         if ([clip respondsToSelector:@selector(duration)]) {
-                            SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(
+                            CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(
                                 clip, @selector(duration));
-                            durationSec = SpliceKit_cmtimeToSeconds(d);
+                            durationSec = SpliceKit_secondsFromTime(d);
                             info[@"duration"] = SpliceKit_serializeCMTime(d);
                             info[@"durationSeconds"] = @(durationSec);
                         }
@@ -3352,9 +3327,9 @@ NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
 
                         double durationSec = 0;
                         if ([clip respondsToSelector:@selector(duration)]) {
-                            SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(
+                            CMTime d = ((CMTime (*)(id, SEL))STRET_MSG)(
                                 clip, @selector(duration));
-                            durationSec = SpliceKit_cmtimeToSeconds(d);
+                            durationSec = SpliceKit_secondsFromTime(d);
                         }
                         info[@"durationSeconds"] = @(durationSec);
 
@@ -3410,7 +3385,7 @@ NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
                 return;
             }
 
-            SpliceKit_CMTime durTime = SpliceKit_cmtimeFromSeconds(montageDuration);
+            CMTime durTime = SpliceKit_cmtimeFromSeconds(montageDuration);
 
             id rendition = nil;
             id options = @{};
@@ -3418,19 +3393,19 @@ NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
             if (ffFlexObj) {
                 SEL optSel = NSSelectorFromString(@"optionsForDuration:");
                 if ([ffFlexObj respondsToSelector:optSel]) {
-                    options = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    options = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         (id)ffFlexObj, optSel, durTime) ?: @{};
                 }
             }
             SEL rendSel = NSSelectorFromString(@"renditionForDuration:withOptions:");
             if ([song respondsToSelector:rendSel]) {
-                rendition = ((id (*)(id, SEL, SpliceKit_CMTime, id))objc_msgSend)(
+                rendition = ((id (*)(id, SEL, CMTime, id))objc_msgSend)(
                     song, rendSel, durTime, options);
             }
             if (!rendition) {
                 SEL rendSel2 = NSSelectorFromString(@"renditionForDuration:");
                 if ([song respondsToSelector:rendSel2]) {
-                    rendition = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                    rendition = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                         song, rendSel2, durTime);
                 }
             }
@@ -3443,8 +3418,8 @@ NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
             double fittedDuration = montageDuration;
             SEL rendDurSel = NSSelectorFromString(@"duration");
             if ([rendition respondsToSelector:rendDurSel]) {
-                SpliceKit_CMTime rd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(rendition, rendDurSel);
-                fittedDuration = SpliceKit_cmtimeToSeconds(rd);
+                CMTime rd = ((CMTime (*)(id, SEL))STRET_MSG)(rendition, rendDurSel);
+                fittedDuration = SpliceKit_secondsFromTime(rd);
                 if (fittedDuration > 0) montageDuration = fittedDuration;
             }
 
@@ -3463,8 +3438,8 @@ NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
                 for (id item in (NSArray *)items) {
                     SEL timeSel = NSSelectorFromString(@"time");
                     if ([item respondsToSelector:timeSel]) {
-                        SpliceKit_CMTime t = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, timeSel);
-                        double sec = SpliceKit_cmtimeToSeconds(t);
+                        CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(item, timeSel);
+                        double sec = SpliceKit_secondsFromTime(t);
                         if (sec > 0 && sec < montageDuration) [times addObject:@(sec)];
                     }
                 }

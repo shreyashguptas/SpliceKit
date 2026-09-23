@@ -117,8 +117,8 @@ NSDictionary *SpliceKit_listHandles(void) {
 
 #pragma mark - Type Helpers
 
-NSDictionary *SpliceKit_serializeCMTime(SpliceKit_CMTime t) {
-    double seconds = (t.timescale > 0) ? (double)t.value / t.timescale : 0;
+NSDictionary *SpliceKit_serializeCMTime(CMTime t) {
+    double seconds = SpliceKit_secondsFromTime(t);
     return @{@"value": @(t.value), @"timescale": @(t.timescale), @"seconds": @(seconds)};
 }
 
@@ -169,8 +169,8 @@ id SpliceKit_serializeReturnValue(NSInvocation *invocation, BOOL returnHandle) {
     }
     // CMTime struct
     if (strstr(retType, "CMTime") || (retType[0] == '{' && strstr(retType, "qiIq"))) {
-        SpliceKit_CMTime val;
-        if ([[invocation methodSignature] methodReturnLength] == sizeof(SpliceKit_CMTime)) {
+        CMTime val;
+        if ([[invocation methodSignature] methodReturnLength] == sizeof(CMTime)) {
             [invocation getReturnValue:&val];
             return @{@"result": SpliceKit_serializeCMTime(val)};
         }

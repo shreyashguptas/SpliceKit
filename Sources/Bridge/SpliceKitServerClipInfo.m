@@ -460,10 +460,10 @@ static double SpliceKit_clipInfoFrameTime(double clipStart, double clipEnd, BOOL
 // nothing to subtract the origin from, so callers take the file start as 0 and say so
 // -- subtracting the origin from a 0 that was never read is what placed every clip
 // with a start timecode tens of thousands of seconds before its file (QA run 2).
-static BOOL SpliceKit_readSourceStart(NSArray *targets, SpliceKit_CMTime *outTime, NSString **outSelector) {
+static BOOL SpliceKit_readSourceStart(NSArray *targets, CMTime *outTime, NSString **outSelector) {
     if (outSelector) *outSelector = @"none";
     for (id target in targets) {
-        SpliceKit_CMTimeRange clipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        CMTimeRange clipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         if (SpliceKit_tryReadCMTimeRangeSelector(target, @"clippedRange", &clipped)) {
             if (outTime) *outTime = clipped.start;
             if (outSelector) *outSelector = @"clippedRange";
@@ -472,7 +472,7 @@ static BOOL SpliceKit_readSourceStart(NSArray *targets, SpliceKit_CMTime *outTim
     }
     for (NSString *name in @[@"trimStartTime", @"trimmedOffset"]) {
         for (id target in targets) {
-            SpliceKit_CMTime t = {0, 0, 0, 0};
+            CMTime t = {0, 0, 0, 0};
             if (SpliceKit_tryReadCMTimeSelector(target, name, &t)) {
                 if (outTime) *outTime = t;
                 if (outSelector) *outSelector = name;
@@ -493,7 +493,7 @@ static BOOL SpliceKit_readSourceStart(NSArray *targets, SpliceKit_CMTime *outTim
 static double SpliceKit_sourceStartInMediaTime(NSArray *targets, double sourceStart, double *outFactor) {
     if (outFactor) *outFactor = 1.0;
     if (targets.count < 2) return sourceStart;
-    SpliceKit_CMTimeRange outer = {{0, 0, 0, 0}, {0, 0, 0, 0}}, inner = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    CMTimeRange outer = {{0, 0, 0, 0}, {0, 0, 0, 0}}, inner = {{0, 0, 0, 0}, {0, 0, 0, 0}};
     if (!SpliceKit_tryReadCMTimeRangeSelector(targets.firstObject, @"unclippedRange", &outer) ||
         !SpliceKit_tryReadCMTimeRangeSelector(targets.lastObject, @"unclippedRange", &inner)) {
         return sourceStart;
@@ -541,7 +541,7 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
             mediaURL = SpliceKit_clipInfoMediaURL(item, &representation, &urlSource);
         }
 
-        SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
+        CMTime sourceStart = {0, 0, 0, 0};
         NSString *sourceStartSelector = @"none";
         BOOL haveSourceStart = SpliceKit_readSourceStart(targets, &sourceStart, &sourceStartSelector);
         double sourceStartSeconds = haveSourceStart ? SpliceKit_secondsFromTime(sourceStart) : 0.0;
@@ -550,7 +550,7 @@ NSDictionary *SpliceKit_audioSourceForItem(id item) {
             sourceStartSeconds = SpliceKit_sourceStartInMediaTime(targets, sourceStartSeconds, &rateConform);
         }
         if (rateConform != 1.0) out[@"rateConformFactor"] = @(rateConform);
-        SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         NSString *mediaOriginSelector = @"none";
         double mediaOriginSeconds = 0.0;
         for (id target in [[targets reverseObjectEnumerator] allObjects]) {
@@ -647,7 +647,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *resolveError = nil;
             id item = SpliceKit_handleResolveTimelineClip(handle, primaryObj, &range, &resolveError);
             if (!item) {
@@ -799,7 +799,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
             // see SpliceKit_readSourceStart) and where the source media starts
             // (unclippedRange.start, media component first). Not read for a container:
             // its clippedRange / unclippedRange describe its own inner timeline.
-            SpliceKit_CMTime sourceStart = {0, 0, 0, 0};
+            CMTime sourceStart = {0, 0, 0, 0};
             NSString *sourceStartSelector = @"none";
             BOOL haveSourceStart = noSingleSource ? NO
                 : SpliceKit_readSourceStart(probeTargets, &sourceStart, &sourceStartSelector);
@@ -810,7 +810,7 @@ NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params) {
                 sourceStartSeconds = SpliceKit_sourceStartInMediaTime(probeTargets, sourceStartSeconds, &rateConform);
             }
             if (rateConform != 1.0) local[@"rateConformFactor"] = @(rateConform);
-            SpliceKit_CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            CMTimeRange unclipped = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *mediaOriginSelector = @"none";
             mediaOriginSeconds = 0.0;
             if (!noSingleSource) {
@@ -1123,7 +1123,7 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SpliceKit_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+            CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
             NSString *resolveError = nil;
             id item = SpliceKit_handleResolveTimelineClip(handle, primaryObj, &range, &resolveError);
             if (!item) {
@@ -1146,12 +1146,9 @@ NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params) {
                                                               frameTimeParam, &clamped);
 
             // Half a frame is the restore tolerance (setPlayheadTime: truncates to a frame unit).
-            SpliceKit_CMTime frameDuration = {100, 3000, 1, 0};
-            SEL fdSel = NSSelectorFromString(@"frameDuration");
-            if ([sequence respondsToSelector:fdSel]) {
-                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
-                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
-            }
+            CMTime frameDuration = {100, 3000, 1, 0};
+            CMTime fd = SpliceKit_sequenceFrameDuration(sequence);
+            if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
             double halfFrame = MAX(0.001, SpliceKit_secondsFromTime(frameDuration)) / 2.0;
 
             // Built locally and published to `out` only at an exit, so a 20 s
@@ -1455,8 +1452,8 @@ NSDictionary *SpliceKit_handleSetRange(NSDictionary *params) {
             double endVal = [endSec doubleValue];
 
             // Build CMTimes
-            SpliceKit_CMTime startTime = SpliceKit_buildCMTime(startVal, timeline);
-            SpliceKit_CMTime endTime = SpliceKit_buildCMTime(endVal, timeline);
+            CMTime startTime = SpliceKit_buildCMTime(startVal, timeline);
+            CMTime endTime = SpliceKit_buildCMTime(endVal, timeline);
 
             // Seek to start, mark in
             BOOL inOk = SpliceKit_seekAndMark(timeline, startTime, @"setRangeStart:");
@@ -1519,20 +1516,20 @@ static NSArray *SpliceKit_collectExportableClips(id primaryObj, NSSet *selectedS
         if (selectedSet && ![selectedSet containsObject:item]) continue;
 
         @try {
-            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+            CMTimeRange range = ((CMTimeRange (*)(id, SEL, id))STRET_MSG)(
                 primaryObj, erSel, item);
             NSString *name = @"Untitled";
             if ([item respondsToSelector:@selector(displayName)]) {
                 id n = ((id (*)(id, SEL))objc_msgSend)(item, @selector(displayName));
                 if (n) name = n;
             }
-            SpliceKit_CMTime endTime = SpliceKit_endTimeForRange(range);
+            CMTime endTime = SpliceKit_endTimeForRange(range);
             [clips addObject:@{
                 @"name": name,
                 @"startTime": SpliceKit_serializeCMTime(range.start),
                 @"endTime": SpliceKit_serializeCMTime(endTime),
-                @"startCMTime": [NSValue valueWithBytes:&range.start objCType:@encode(SpliceKit_CMTime)],
-                @"endCMTime": [NSValue valueWithBytes:&endTime objCType:@encode(SpliceKit_CMTime)],
+                @"startCMTime": [NSValue valueWithBytes:&range.start objCType:@encode(CMTime)],
+                @"endCMTime": [NSValue valueWithBytes:&endTime objCType:@encode(CMTime)],
             }];
         } @catch (NSException *e) { /* skip */ }
     }
@@ -1549,8 +1546,8 @@ static NSString *sBatchExportFileName = nil;
 static BOOL sBatchExportActive = NO;
 static IMP sOrigShowSharePanel = NULL;
 static NSInteger sBatchExportPendingCount = 0; // tracks async exports still running
-static SpliceKit_CMTime sBatchExportClipStart;
-static SpliceKit_CMTime sBatchExportClipEnd;
+static CMTime sBatchExportClipStart;
+static CMTime sBatchExportClipEnd;
 
 // Swizzle NSWorkspace openURL: to suppress auto-open of exported files
 static IMP sOrigOpenURL = NULL;
@@ -1670,9 +1667,9 @@ static void SpliceKit_swizzled_showSharePanel(id self, SEL _cmd, id sources, id 
                 if (timeObjClass) {
                     SEL initWithTimeSel = NSSelectorFromString(@"timeObjectWithCMTime:");
                     if ([(id)timeObjClass respondsToSelector:initWithTimeSel]) {
-                        id startObj = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                        id startObj = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                             (id)timeObjClass, initWithTimeSel, sBatchExportClipStart);
-                        id endObj = ((id (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(
+                        id endObj = ((id (*)(id, SEL, CMTime))objc_msgSend)(
                             (id)timeObjClass, initWithTimeSel, sBatchExportClipEnd);
                         if (startObj && endObj) {
                             ((void (*)(id, SEL, id, id))objc_msgSend)(sourceToUse, setInOutSel, startObj, endObj);
@@ -1877,7 +1874,7 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params) {
             // No undo group: mark in/out + share export are not timeline model edits; nothing meaningful registers on the undo stack.
             for (NSUInteger i = 0; i < clips.count; i++) {
                 NSDictionary *clipInfo = clips[i];
-                SpliceKit_CMTime startCMTime, endCMTime;
+                CMTime startCMTime, endCMTime;
                 [clipInfo[@"startCMTime"] getValue:&startCMTime];
                 [clipInfo[@"endCMTime"] getValue:&endCMTime];
 
@@ -2029,12 +2026,7 @@ NSDictionary *SpliceKit_handleTimelineGetState(NSDictionary *params) {
             // Get playhead time (CMTime struct - value/timescale/flags/epoch)
             SEL ptSel = @selector(playheadTime);
             if ([timeline respondsToSelector:ptSel]) {
-                // CMTime is {value:int64, timescale:int32, flags:uint32, epoch:int64}
-                // Total 24 bytes. We need to use objc_msgSend_stret or check struct return
-                typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } CMTime;
-                CMTime t;
-                // On arm64, small structs are returned in registers
-                t = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, ptSel);
+                CMTime t = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, ptSel);
                 state[@"playheadTime"] = @{
                     @"value": @(t.value),
                     @"timescale": @(t.timescale),

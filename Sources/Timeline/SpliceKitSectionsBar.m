@@ -11,19 +11,11 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitTime.h"
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-
-// On ARM64, large structs still return via objc_msgSend (hidden pointer param).
-#if defined(__arm64__)
-#define SEC_STRET objc_msgSend
-#else
-#define SEC_STRET objc_msgSend_stret
-#endif
-
-typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } SEC_CMTime;
 
 #pragma mark - Section Model
 
@@ -161,7 +153,7 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
     if (!_timelineView) return 0.05;
     SEL sel = NSSelectorFromString(@"timePerPixel");
     if (![_timelineView respondsToSelector:sel]) return 0.05;
-    SEC_CMTime tpp = ((SEC_CMTime (*)(id, SEL))SEC_STRET)(_timelineView, sel);
+    CMTime tpp = ((CMTime (*)(id, SEL))STRET_MSG)(_timelineView, sel);
     return (tpp.timescale > 0) ? (double)tpp.value / tpp.timescale : 0.05;
 }
 

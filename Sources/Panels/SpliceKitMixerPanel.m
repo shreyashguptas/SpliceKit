@@ -11,16 +11,7 @@
 #import <math.h>
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
-
-// CMTime struct (matches FCP's internal layout)
-typedef struct { long long value; int timescale; unsigned int flags; long long epoch; } SKMixer_CMTime;
-typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTimeRange;
-
-#if defined(__arm64__) || defined(__aarch64__)
-  #define SK_STRET_MSG objc_msgSend
-#else
-  #define SK_STRET_MSG objc_msgSend_stret
-#endif
+#import "SpliceKitTime.h"
 
 static const NSInteger kSpliceKitMixerMaxFaders = 12;
 static const CGFloat kSpliceKitMixerFaderWidth = 92.0;

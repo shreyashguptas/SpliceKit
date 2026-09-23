@@ -25,9 +25,6 @@
 #import <objc/message.h>
 #import "SpliceKitTranscriptPanel+Private.h"
 
-// x86_64 ABI requires objc_msgSend_stret for struct returns > 16 bytes.
-// ARM64 returns all structs through objc_msgSend (no _stret variant exists).
-
 // FCP doesn't link against Speech.framework, so we load it at runtime.
 // This avoids a hard dependency — if the framework isn't available (unlikely
 // on macOS, but still), we just fall back to other engines.
@@ -188,10 +185,6 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 // so we can read struct return values from objc_msgSend without linking CoreMedia.
 //
 
-double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
-    return (t.timescale > 0) ? (double)t.value / t.timescale : 0;
-}
-
 @implementation SpliceKitTranscriptPanel
 
 #pragma mark - Singleton
@@ -276,7 +269,7 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 - (id)currentSequence {
     __block id sequence = nil;
     SpliceKit_executeOnMainThread(^{
-        id timeline = [self getActiveTimelineModule];
+        id timeline = SpliceKit_getActiveTimelineModule();
         if ([timeline respondsToSelector:@selector(sequence)]) {
             sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
         }
@@ -1215,7 +1208,7 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) {
                 result = @{@"error": @"No active timeline"};
                 return;
@@ -1457,7 +1450,7 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) {
                 result = @{@"error": @"No active timeline"};
                 return;
@@ -1571,7 +1564,7 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     SpliceKit_executeOnMainThread(^{
         @try {
-            id timeline = [self getActiveTimelineModule];
+            id timeline = SpliceKit_getActiveTimelineModule();
             if (!timeline) return;
 
             id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
@@ -1703,46 +1696,24 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - FCP Integration Helpers
-// These reach into FCP's runtime to get the active timeline module and move the
-// playhead. The chain is: NSApp -> delegate -> activeEditorContainer -> timelineModule.
-
-- (id)getEditorContainer {
-    id app = ((id (*)(id, SEL))objc_msgSend)(
-        objc_getClass("NSApplication"), @selector(sharedApplication));
-    id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
-    if (!delegate) return nil;
-
-    SEL aecSel = @selector(activeEditorContainer);
-    if (![delegate respondsToSelector:aecSel]) return nil;
-    return ((id (*)(id, SEL))objc_msgSend)(delegate, aecSel);
-}
-
-- (id)getActiveTimelineModule {
-    id container = [self getEditorContainer];
-    if (!container) return nil;
-
-    SEL tmSel = NSSelectorFromString(@"timelineModule");
-    if ([container respondsToSelector:tmSel]) {
-        return ((id (*)(id, SEL))objc_msgSend)(container, tmSel);
-    }
-    return nil;
-}
+// The timeline is SpliceKit_getActiveTimelineModule() (the focused one when the Dual
+// Timeline is open), the same one every bridge command edits.
 
 /// Moves the playhead to an exact time (in seconds) by constructing a CMTime and
 /// calling setPlayheadTime: on the timeline module. The timescale is read from
 /// the sequence's frame duration so we snap to exact frame boundaries.
 - (void)setPlayheadToTime:(double)seconds {
-    id timeline = [self getActiveTimelineModule];
+    id timeline = SpliceKit_getActiveTimelineModule();
     if (!timeline) return;
 
     int32_t timescale = 600;
     if ([timeline respondsToSelector:@selector(sequenceFrameDuration)]) {
-        SpliceKitTranscript_CMTime fd = ((SpliceKitTranscript_CMTime (*)(id, SEL))STRET_MSG)(
+        CMTime fd = ((CMTime (*)(id, SEL))STRET_MSG)(
             timeline, @selector(sequenceFrameDuration));
         if (fd.timescale > 0) timescale = fd.timescale;
     }
 
-    SpliceKitTranscript_CMTime cmTime = {
+    CMTime cmTime = {
         .value = (int64_t)(seconds * timescale),
         .timescale = timescale,
         .flags = 1,
@@ -1751,7 +1722,7 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     SEL setPlayheadSel = NSSelectorFromString(@"setPlayheadTime:");
     if ([timeline respondsToSelector:setPlayheadSel]) {
-        ((void (*)(id, SEL, SpliceKitTranscript_CMTime))objc_msgSend)(timeline, setPlayheadSel, cmTime);
+        ((void (*)(id, SEL, CMTime))objc_msgSend)(timeline, setPlayheadSel, cmTime);
     }
 }
 

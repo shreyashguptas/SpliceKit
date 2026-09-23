@@ -16,12 +16,6 @@
 #import <errno.h>
 #import "SpliceKitURLImport+Private.h"
 
-#if defined(__x86_64__)
-#define SPLICEKIT_URLIMPORT_STRET_MSG objc_msgSend_stret
-#else
-#define SPLICEKIT_URLIMPORT_STRET_MSG objc_msgSend
-#endif
-
 static NSString * const SpliceKitURLImportStateQueued = @"queued";
 static NSString * const SpliceKitURLImportStateResolving = @"resolving";
 static NSString * const SpliceKitURLImportStateDownloading = @"downloading";
@@ -134,16 +128,6 @@ NSString *SpliceKitURLImportSanitizeFilename(NSString *input) {
 
     if (joined.length == 0) return @"Imported Clip";
     return joined;
-}
-
-NSString *SpliceKitURLImportEscapeXML(NSString *input) {
-    NSString *s = SpliceKitURLImportString(input);
-    s = [s stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
-    s = [s stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
-    s = [s stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
-    s = [s stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
-    s = [s stringByReplacingOccurrencesOfString:@"'" withString:@"&apos;"];
-    return s;
 }
 
 static NSString *SpliceKitURLImportCMTimeString(CMTime time, NSString *fallback) {
@@ -263,21 +247,13 @@ static NSString *SpliceKitURLImportExecutablePathFromLoginShell(NSString *name) 
     NSString *command = [NSString stringWithFormat:@"command -v %@ 2>/dev/null || which %@ 2>/dev/null",
                          trimmedName, trimmedName];
     for (NSString *shellPath in shells) {
-        NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:shellPath];
-        task.arguments = @[@"-lc", command];
-
-        NSPipe *pipe = [NSPipe pipe];
-        task.standardOutput = pipe;
-        task.standardError = pipe;
-
-        NSError *launchError = nil;
-        if (![task launchAndReturnError:&launchError]) {
+        // Output is drained while the shell runs (a login shell's profile can print more
+        // than a pipe holds, which blocked the old wait-then-read forever).
+        NSData *data = nil;
+        if (SpliceKit_runProcess(shellPath, @[@"-lc", command], nil, SpliceKitProcessMergeStderr, 0,
+                                 NULL, &data, NULL, NULL) != SpliceKitProcessExited) {
             continue;
         }
-
-        [task waitUntilExit];
-        NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
         NSString *output = SpliceKitURLImportStringFromData(data);
         NSArray<NSString *> *lines = [output componentsSeparatedByCharactersInSet:
             [NSCharacterSet newlineCharacterSet]];

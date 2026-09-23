@@ -16,12 +16,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-
-#if defined(__x86_64__)
-#define STRET_MSG objc_msgSend_stret
-#else
-#define STRET_MSG objc_msgSend
-#endif
+#import "SpliceKitTime.h"
+#import "SpliceKitProcess.h"
 
 @interface SpliceKitTranscriptPanel (TextViewCallbacks)
 - (void)handleClickAtCharIndex:(NSUInteger)charIdx;
@@ -37,9 +33,6 @@
 @property (nonatomic) BOOL isDragging;
 @property (nonatomic) NSPoint dragOrigin;
 @end
-
-typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } SpliceKitTranscript_CMTime;
-typedef struct { SpliceKitTranscript_CMTime start; SpliceKitTranscript_CMTime duration; } SpliceKitTranscript_CMTimeRange;
 
 @interface SpliceKitTranscriptPanel () <NSTextViewDelegate, NSWindowDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) NSPanel *panel;
@@ -129,7 +122,6 @@ extern NSString *const FCPAttrSilenceIndex;
 extern NSString *const FCPAttrSpeakerName;
 extern NSString *const FCPAttrSegmentStartIndex;
 extern NSString *const FCPAttrSegmentEndIndex;
-double CMTimeToSeconds(SpliceKitTranscript_CMTime t);
 
 #pragma GCC visibility pop
 
@@ -141,8 +133,6 @@ double CMTimeToSeconds(SpliceKitTranscript_CMTime t);
 - (void)assignSpeakers;
 + (NSString *)audioProblemForFileAtPath:(NSString *)path;
 - (NSDictionary *)deleteTimelineRange:(double)deleteStart end:(double)deleteEnd;
-- (id)getEditorContainer;
-- (id)getActiveTimelineModule;
 - (void)setPlayheadToTime:(double)seconds;
 @end
 

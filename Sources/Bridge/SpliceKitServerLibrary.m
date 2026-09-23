@@ -286,7 +286,9 @@ NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params) {
                 result = @{@"error": @"No activeEditorContainer"};
                 return;
             }
-            id editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, aecSel);
+            // The focused timeline when the Dual Timeline is open (the one the
+            // bridge's timeline commands then act on).
+            id editorContainer = SpliceKit_getEditorContainer();
             if (!editorContainer) {
                 result = @{@"error": @"Editor container is nil"};
                 return;
@@ -365,7 +367,7 @@ NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *params) {
             }
 
             // Get playhead time
-            SpliceKit_CMTime playhead = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(
+            CMTime playhead = ((CMTime (*)(id, SEL))STRET_MSG)(
                 timeline, @selector(playheadTime));
 
             // Get all items including connected clips (anchoredItems)
@@ -383,7 +385,7 @@ NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *params) {
             // primary storyline and their absolute range), so this tool and that one agree
             // about the same timeline. The earlier direct scan read anchoredItems as an
             // NSArray, which FCP does not hand back for every clip, and found nothing.
-            double playheadSec = playhead.timescale > 0 ? (double)playhead.value / (double)playhead.timescale : 0.0;
+            double playheadSec = SpliceKit_secondsFromTime(playhead);
             NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @100000,
                                                                              @"connected_limit": @100000,
                                                                              @"include_markers": @NO,

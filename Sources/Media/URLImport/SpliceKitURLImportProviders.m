@@ -30,9 +30,7 @@ static NSDictionary *SpliceKitURLImportProviderMetadata(NSString *ytDLP,
         return nil;
     }
 
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:ytDLP];
-    task.arguments = @[
+    NSArray *arguments = @[
         @"--skip-download",
         @"--no-playlist",
         @"--no-warnings",
@@ -40,22 +38,21 @@ static NSDictionary *SpliceKitURLImportProviderMetadata(NSString *ytDLP,
         url.absoluteString ?: @""
     ];
 
-    NSPipe *pipe = [NSPipe pipe];
-    task.standardOutput = pipe;
-    task.standardError = pipe;
-
+    // Output is drained while yt-dlp runs (waiting for exit first blocked forever once
+    // it wrote more than a pipe holds).
+    int status = -1;
+    NSData *data = nil;
     NSError *launchError = nil;
-    if (![task launchAndReturnError:&launchError]) {
+    if (SpliceKit_runProcess(ytDLP, arguments, nil, SpliceKitProcessMergeStderr, 0,
+                             &status, &data, NULL, &launchError) != SpliceKitProcessExited) {
         if (outError) {
             *outError = launchError.localizedDescription ?: @"Could not launch yt-dlp metadata check.";
         }
         return nil;
     }
 
-    [task waitUntilExit];
-    NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
     NSString *output = SpliceKitURLImportTrimmedString(SpliceKitURLImportStringFromData(data));
-    if (task.terminationStatus != 0) {
+    if (status != 0) {
         if (outError) {
             *outError = output.length > 0
                 ? output

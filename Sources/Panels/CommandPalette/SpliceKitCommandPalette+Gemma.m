@@ -58,41 +58,26 @@
     // Fallback: shell out to find python3 on the user's PATH
     // Use login shell so .zprofile / .bash_profile PATH additions are picked up
     NSString *shell = [NSProcessInfo processInfo].environment[@"SHELL"] ?: @"/bin/zsh";
-    NSTask *which = [[NSTask alloc] init];
-    which.executableURL = [NSURL fileURLWithPath:shell];
-    which.arguments = @[@"-l", @"-c", @"which python3"];
-    NSPipe *pipe = [NSPipe pipe];
-    which.standardOutput = pipe;
-    which.standardError = [NSPipe pipe];
-    @try {
-        [which launch];
-        [which waitUntilExit];
-        if (which.terminationStatus == 0) {
-            NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
-            NSString *path = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            path = [path stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (path.length > 0 && [fm isExecutableFileAtPath:path]) return path;
-        }
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Gemma] Shell which python3 failed: %@", e.reason);
+    int whichStatus = -1;
+    NSData *data = nil;
+    NSError *whichError = nil;
+    SpliceKitProcessOutcome outcome = SpliceKit_runProcess(shell, @[@"-l", @"-c", @"which python3"], nil,
+        SpliceKitProcessOptionsNone, 0, &whichStatus, &data, NULL, &whichError);
+    if (outcome != SpliceKitProcessExited) {
+        SpliceKit_log(@"[Gemma] Shell which python3 failed: %@", whichError.localizedDescription);
+    } else if (whichStatus == 0) {
+        NSString *path = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        path = [path stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (path.length > 0 && [fm isExecutableFileAtPath:path]) return path;
     }
     return nil;
 }
 
 // Check if mlx_lm is installed for the given python
 - (BOOL)isMLXLMInstalledForPython:(NSString *)pythonPath {
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:pythonPath];
-    task.arguments = @[@"-c", @"import mlx_lm"];
-    task.standardOutput = [NSPipe pipe];
-    task.standardError = [NSPipe pipe];
-    @try {
-        [task launch];
-        [task waitUntilExit];
-        return task.terminationStatus == 0;
-    } @catch (NSException *e) {
-        return NO;
-    }
+    int status = -1;
+    return SpliceKit_runProcess(pythonPath, @[@"-c", @"import mlx_lm"], nil, SpliceKitProcessOptionsNone, 0,
+                                &status, NULL, NULL, NULL) == SpliceKitProcessExited && status == 0;
 }
 
 // Install mlx-lm via pip. Tries normal install first, then --user, then --break-system-packages.
@@ -107,30 +92,26 @@
     ];
 
     for (NSArray *args in argSets) {
-        NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:pythonPath];
-        task.arguments = args;
-        NSPipe *outPipe = [NSPipe pipe];
-        NSPipe *errPipe = [NSPipe pipe];
-        task.standardOutput = outPipe;
-        task.standardError = errPipe;
-        @try {
-            SpliceKit_log(@"[Gemma] Trying: %@ %@", pythonPath, [args componentsJoinedByString:@" "]);
-            [task launch];
-            [task waitUntilExit];
-            if (task.terminationStatus == 0) {
-                SpliceKit_log(@"[Gemma] pip install succeeded with: %@", [args componentsJoinedByString:@" "]);
-                return YES;
-            }
-            NSData *errData = [errPipe.fileHandleForReading readDataToEndOfFile];
-            NSString *errStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
-            SpliceKit_log(@"[Gemma] pip install failed (status %d): %@", task.terminationStatus, errStr);
-
-            // If error is "externally managed" (PEP 668), continue to next strategy
-            // If error is something else, try next strategy anyway
-        } @catch (NSException *e) {
-            SpliceKit_log(@"[Gemma] pip install exception: %@", e.reason);
+        SpliceKit_log(@"[Gemma] Trying: %@ %@", pythonPath, [args componentsJoinedByString:@" "]);
+        // pip's output is drained while it runs (it easily outgrows a pipe, which blocked
+        // the old wait-then-read forever).
+        int status = -1;
+        NSData *errData = nil;
+        NSError *launchError = nil;
+        if (SpliceKit_runProcess(pythonPath, args, nil, SpliceKitProcessOptionsNone, 0,
+                                 &status, NULL, &errData, &launchError) != SpliceKitProcessExited) {
+            SpliceKit_log(@"[Gemma] pip install exception: %@", launchError.localizedDescription);
+            continue;
         }
+        if (status == 0) {
+            SpliceKit_log(@"[Gemma] pip install succeeded with: %@", [args componentsJoinedByString:@" "]);
+            return YES;
+        }
+        NSString *errStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
+        SpliceKit_log(@"[Gemma] pip install failed (status %d): %@", status, errStr);
+
+        // If error is "externally managed" (PEP 668), continue to next strategy
+        // If error is something else, try next strategy anyway
     }
 
     return NO;
@@ -154,15 +135,8 @@
 
 // Kill any existing mlx_lm.server process that we didn't start
 - (void)killOrphanedMLXServer {
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/pkill"];
-    task.arguments = @[@"-f", @"mlx_lm.server"];
-    task.standardOutput = [NSPipe pipe];
-    task.standardError = [NSPipe pipe];
-    @try {
-        [task launch];
-        [task waitUntilExit];
-    } @catch (NSException *e) {}
+    SpliceKit_runProcess(@"/usr/bin/pkill", @[@"-f", @"mlx_lm.server"], nil, SpliceKitProcessOptionsNone, 0,
+                         NULL, NULL, NULL, NULL);
     // Give it a moment to release the port
     [NSThread sleepForTimeInterval:1.0];
 }
@@ -208,24 +182,18 @@ static NSString *SpliceKit_tailLogFile(NSString *path, NSUInteger maxBytes) {
 
     // Verify it's a real Python (not a stub that prompts Xcode CLT install)
     {
-        NSTask *verify = [[NSTask alloc] init];
-        verify.executableURL = [NSURL fileURLWithPath:python];
-        verify.arguments = @[@"--version"];
-        NSPipe *outPipe = [NSPipe pipe];
-        verify.standardOutput = outPipe;
-        verify.standardError = [NSPipe pipe];
-        @try {
-            [verify launch];
-            [verify waitUntilExit];
-            if (verify.terminationStatus != 0) {
-                return @"Python 3 found but not functional. Install via: brew install python3";
-            }
-            NSData *data = [outPipe.fileHandleForReading readDataToEndOfFile];
-            NSString *version = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            SpliceKit_log(@"[Gemma] Python version: %@", [version stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
-        } @catch (NSException *e) {
-            return [NSString stringWithFormat:@"Python 3 failed to run: %@", e.reason];
+        int verifyStatus = -1;
+        NSData *data = nil;
+        NSError *verifyError = nil;
+        if (SpliceKit_runProcess(python, @[@"--version"], nil, SpliceKitProcessOptionsNone, 0,
+                                 &verifyStatus, &data, NULL, &verifyError) != SpliceKitProcessExited) {
+            return [NSString stringWithFormat:@"Python 3 failed to run: %@", verifyError.localizedDescription];
         }
+        if (verifyStatus != 0) {
+            return @"Python 3 found but not functional. Install via: brew install python3";
+        }
+        NSString *version = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        SpliceKit_log(@"[Gemma] Python version: %@", [version stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
     }
 
     // Check / install mlx-lm

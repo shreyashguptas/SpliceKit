@@ -9,6 +9,9 @@ Timeline/SpliceKitDualTimeline.m
 Timeline/SpliceKitDualTimelineDrag.m
 Core/SpliceKitRuntime.m
 Core/SpliceKitSwizzle.m
+Core/SpliceKitTime.m
+Core/SpliceKitProcess.m
+Core/SpliceKitStrings.m
 Audio/SpliceKitAudioBusDiagnostics.m
 Media/SpliceKitMediaExtensionGuard.m
 Media/SpliceKitVP9.mm

@@ -12,6 +12,7 @@
 
 #import "SpliceKitTranscriptDiagnostics.h"
 #import "SpliceKit.h"
+#import "SpliceKitProcess.h"
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
 #import <sys/sysctl.h>
@@ -148,25 +149,20 @@ void SpliceKitTranscriptDiag_logBinaryInfo(NSString *binaryPath) {
     }
 
     // Codesign check
-    NSTask *csTask = [[NSTask alloc] init];
-    csTask.launchPath = @"/usr/bin/codesign";
-    csTask.arguments = @[@"-vvv", binaryPath];
-    NSPipe *csPipe = [NSPipe pipe];
-    csTask.standardOutput = csPipe;
-    csTask.standardError = csPipe;
-    @try {
-        [csTask launch];
-        [csTask waitUntilExit];
-        NSData *csOut = [csPipe.fileHandleForReading readDataToEndOfFile];
+    int csStatus = -1;
+    NSData *csOut = nil;
+    NSError *csError = nil;
+    if (SpliceKit_runProcess(@"/usr/bin/codesign", @[@"-vvv", binaryPath], nil, SpliceKitProcessMergeStderr, 0,
+                             &csStatus, &csOut, NULL, &csError) == SpliceKitProcessExited) {
         NSString *csStr = [[NSString alloc] initWithData:csOut encoding:NSUTF8StringEncoding];
-        if (csTask.terminationStatus == 0) {
+        if (csStatus == 0) {
             SpliceKit_log(@"[TranscriptDiag]   Codesign: valid");
         } else {
             SpliceKit_log(@"[TranscriptDiag]   Codesign: %@",
                           [csStr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
         }
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[TranscriptDiag]   Codesign check failed: %@", e.reason);
+    } else {
+        SpliceKit_log(@"[TranscriptDiag]   Codesign check failed: %@", csError.localizedDescription);
     }
 
     SpliceKit_log(@"[TranscriptDiag] ───────────────────────────────────────────");

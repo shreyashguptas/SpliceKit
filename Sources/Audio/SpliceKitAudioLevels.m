@@ -33,9 +33,9 @@
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitAudioLevels.h"
+#import "SpliceKitProcess.h"
 #import <objc/message.h>
 #import <math.h>
-#import <signal.h>
 
 static const double kSKALFloorDb = -100.0;
 
@@ -106,78 +106,33 @@ static NSArray<NSNumber *> *SKAL_numberArray(id value, NSUInteger limit) {
 #pragma mark - Helper binary
 
 NSString *SpliceKit_findAudioLevelsHelper(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
-
-    // Developer override (the environment Final Cut Pro was launched with).
-    NSString *override = [[NSProcessInfo processInfo] environment][@"SPLICEKIT_AUDIO_LEVELS_PATH"];
-    if (override.length > 0) [candidates addObject:override];
-
-    // 1. Inside the patched app's SpliceKit.framework (make install / make deploy put it there).
-    NSString *fwResources = [[[NSBundle mainBundle] bundlePath]
-        stringByAppendingPathComponent:@"Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/audio-levels"];
-    [candidates addObject:fwResources];
-
-    // 2. The same per-user locations the silence detector is looked up in.
-    NSString *home = NSHomeDirectory();
-    [candidates addObjectsFromArray:@[
-        [home stringByAppendingPathComponent:@"Applications/SpliceKit/tools/audio-levels"],
-        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/audio-levels"],
-        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/build/audio-levels"],
-    ]];
-    for (NSString *p in candidates) {
-        if ([fm isExecutableFileAtPath:p]) return p;
-    }
-    return nil;
+    // SPLICEKIT_AUDIO_LEVELS_PATH (the environment Final Cut Pro was launched with) first,
+    // then the framework's Resources and the per-user tool locations.
+    return SpliceKit_findHelperTool(@"audio-levels", @"SPLICEKIT_AUDIO_LEVELS_PATH");
 }
 
-// Run the helper and parse its JSON. Both pipes are drained concurrently before
-// waiting for exit (a large JSON on stdout would otherwise fill the pipe and hang).
+// Run the helper and parse its JSON (SpliceKit_runProcess drains both pipes while it runs,
+// so a large JSON on stdout cannot fill the pipe and hang).
 static NSDictionary *SKAL_runHelper(NSString *helper, NSArray<NSString *> *arguments,
                                     NSTimeInterval timeout, NSString **errorOut) {
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:helper];
-    task.arguments = arguments;
-    NSPipe *outPipe = [NSPipe pipe];
-    NSPipe *errPipe = [NSPipe pipe];
-    task.standardOutput = outPipe;
-    task.standardError = errPipe;
-    task.standardInput = [NSFileHandle fileHandleWithNullDevice];
-
+    int status = -1;
+    NSData *outData = nil, *errData = nil;
     NSError *launchError = nil;
-    if (![task launchAndReturnError:&launchError]) {
+    SpliceKitProcessOutcome outcome = SpliceKit_runProcess(helper, arguments, nil, SpliceKitProcessNullStdin,
+                                                           timeout, &status, &outData, &errData, &launchError);
+    if (outcome == SpliceKitProcessLaunchFailed) {
         if (errorOut) *errorOut = [NSString stringWithFormat:@"could not launch %@: %@", helper,
                                    launchError.localizedDescription ?: @"unknown error"];
         return nil;
     }
-
-    NSFileHandle *outHandle = outPipe.fileHandleForReading;
-    NSFileHandle *errHandle = errPipe.fileHandleForReading;
-    __block NSData *outData = nil;
-    __block NSData *errData = nil;
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
-    // The error-returning reads never throw (readDataToEndOfFile can raise on a GCD thread,
-    // where nothing would catch it).
-    dispatch_group_async(group, queue, ^{ outData = [outHandle readDataToEndOfFileAndReturnError:NULL] ?: [NSData data]; });
-    dispatch_group_async(group, queue, ^{ errData = [errHandle readDataToEndOfFileAndReturnError:NULL] ?: [NSData data]; });
-
-    long timedOut = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)));
-    if (timedOut != 0) {
-        [task terminate];
-        long stillRunning = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
-        if (stillRunning != 0) {
-            kill(task.processIdentifier, SIGKILL);       // wedged in a decoder: do not leak the readers
-            dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
-        }
+    if (outcome == SpliceKitProcessTimedOut) {
         if (errorOut) *errorOut = [NSString stringWithFormat:@"audio-levels did not finish within %.0f s", timeout];
         return nil;
     }
-    [task waitUntilExit];
 
     NSString *errText = errData.length > 0
         ? ([[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] ?: @"") : @"";
-    if (task.terminationStatus != 0) {
+    if (status != 0) {
         // The helper prefixes real failures with "Error:"; notes (a fallback taken) come first.
         NSString *reason = nil;
         for (NSString *line in [errText componentsSeparatedByString:@"\n"]) {
@@ -185,7 +140,7 @@ static NSDictionary *SKAL_runHelper(NSString *helper, NSArray<NSString *> *argum
         }
         if (!reason) reason = [[errText componentsSeparatedByString:@"\n"] firstObject] ?: @"";
         if (errorOut) *errorOut = reason.length > 0 ? reason
-            : [NSString stringWithFormat:@"audio-levels exited with status %d", task.terminationStatus];
+            : [NSString stringWithFormat:@"audio-levels exited with status %d", status];
         return nil;
     }
     NSError *jsonError = nil;
