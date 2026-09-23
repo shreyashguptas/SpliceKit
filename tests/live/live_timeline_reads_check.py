@@ -740,8 +740,7 @@ def audio_check(st):
     if "error" in one:
         print(f"FAIL  {one['error']}")
         if "helper not found" in one["error"]:
-            print("      the audio-levels helper is missing: re-run `make install` (step 3c builds it) or "
-                  "`swiftc -O -o build/audio-levels tools/audio-levels.swift`")
+            print("      the audio-levels helper is missing: re-run `make deploy`, which builds and installs it")
         return 1, 1
     clips = one.get("clips") or []
     entry = clips[0] if clips else {}

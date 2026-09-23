@@ -48,55 +48,6 @@ err()   { echo -e "${RED}[X]${NC} $*"; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 step()  { echo -e "\n${CYAN}${BOLD}=== $* ===${NC}"; }
 
-detect_sign_identity() {
-    /usr/bin/security find-identity -v -p codesigning 2>/dev/null | \
-        awk '
-            /"Apple Development:/ { print $2; exit }
-            /"Developer ID Application:/ && developer == "" { developer = $2 }
-            /[0-9]+\) [0-9A-F]+ "/ && first == "" { first = $2 }
-            END {
-                if (developer != "") print developer;
-                else if (first != "") print first;
-            }'
-}
-
-sign_if_present() {
-    local identity="$1"
-    local path="$2"
-    shift 2
-
-    if [[ ! -e "$path" ]]; then
-        return 0
-    fi
-
-    if ! codesign --force --options runtime --sign "$identity" "$@" "$path"; then
-        return 1
-    fi
-}
-
-sign_modded_app() {
-    local identity="$1"
-
-    # Existing modded copies can already contain custom nested code from prior
-    # SpliceKit installs. Sign those first so the top-level app seal doesn't
-    # fail with "code object is not signed at all" on rebuild / no-copy flows.
-    xattr -cr "$MODDED_APP" 2>/dev/null || true
-
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; then
-        return 1
-    fi
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"; then
-        return 1
-    fi
-
-    if ! codesign --force --options runtime --sign "$identity" "$MODDED_APP/Contents/Frameworks/SpliceKit.framework"; then
-        return 1
-    fi
-    if ! codesign --force --options runtime --sign "$identity" --entitlements "$ENTITLEMENTS" "$MODDED_APP"; then
-        return 1
-    fi
-}
-
 # ============================================================
 # Help
 # ============================================================
@@ -357,168 +308,9 @@ else
 fi
 
 # ============================================================
-# Step 2: Build SpliceKit dylib
+# Step 2: Inject LC_LOAD_DYLIB
 # ============================================================
-step "Step 2: Building SpliceKit dylib"
-
-BUILD_DIR="$REPO_DIR/build"
-mkdir -p "$BUILD_DIR"
-
-# Read canonical source list from Sources/SOURCES.txt
-SOURCES=()
-while IFS= read -r line; do
-    [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-    SOURCES+=("$REPO_DIR/Sources/$line")
-done < "$REPO_DIR/Sources/SOURCES.txt"
-
-# Build Lua 5.4.7 static library if vendored sources exist
-LUA_DIR="$REPO_DIR/vendor/lua-5.4.7/src"
-LUA_LIB="$BUILD_DIR/liblua.a"
-LUA_FLAGS=""
-if [ -d "$LUA_DIR" ]; then
-    info "Building Lua 5.4.7 static library..."
-    mkdir -p "$BUILD_DIR/lua_obj"
-    for src in "$LUA_DIR"/*.c; do
-        base="$(basename "$src" .c)"
-        [ "$base" = "lua" ] && continue
-        [ "$base" = "luac" ] && continue
-        clang -arch arm64 -arch x86_64 -mmacosx-version-min=14.0 \
-            -DLUA_USE_MACOSX -O2 -Wall -c "$src" -o "$BUILD_DIR/lua_obj/$base.o"
-    done
-    libtool -static -o "$LUA_LIB" "$BUILD_DIR"/lua_obj/*.o
-    LUA_FLAGS="-I $LUA_DIR $LUA_LIB"
-    log "Built: $LUA_LIB"
-fi
-
-# The version string bridge_status and the log report, from the same file the
-# Makefile and the Xcode project read. Without the define the header's fallback
-# ("unversioned") is compiled in, which is how installs used to report a stale
-# number.
-SPLICEKIT_VERSION="$(tr -d ' \n' < "$REPO_DIR/VERSION" 2>/dev/null || true)"
-VERSION_FLAGS=()
-if [ -n "$SPLICEKIT_VERSION" ]; then
-    VERSION_FLAGS=("-DSPLICEKIT_VERSION=\"$SPLICEKIT_VERSION\"")
-    info "Compiling ${#SOURCES[@]} source files (SpliceKit $SPLICEKIT_VERSION)..."
-else
-    warn "VERSION not readable; the dylib will report its version as 'unversioned'"
-    info "Compiling ${#SOURCES[@]} source files..."
-fi
-clang -arch arm64 -arch x86_64 \
-    -mmacosx-version-min=14.0 \
-    -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices \
-    -fobjc-arc -fmodules -Wno-deprecated-declarations \
-    ${VERSION_FLAGS[@]+"${VERSION_FLAGS[@]}"} \
-    -undefined dynamic_lookup -dynamiclib \
-    -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit \
-    -I "$REPO_DIR/Sources" \
-    "${SOURCES[@]}" $LUA_FLAGS \
-    -o "$BUILD_DIR/SpliceKit" 2>&1
-
-log "Built: $(file "$BUILD_DIR/SpliceKit" | grep -o 'universal.*')"
-
-# ============================================================
-# Step 3: Create framework bundle
-# ============================================================
-step "Step 3: Installing SpliceKit framework"
-
-FW_DIR="$MODDED_APP/Contents/Frameworks/SpliceKit.framework"
-rm -rf "$FW_DIR"
-mkdir -p "$FW_DIR/Versions/A/Resources"
-
-# Copy dylib
-cp "$BUILD_DIR/SpliceKit" "$FW_DIR/Versions/A/SpliceKit"
-
-# Create symlinks. Use -n so repeated patch runs replace the symlink itself
-# instead of following it into Versions/A and creating recursive loops.
-cd "$FW_DIR/Versions" && ln -sfn A Current
-cd "$FW_DIR" && ln -sfn Versions/Current/SpliceKit SpliceKit
-cd "$FW_DIR" && ln -sfn Versions/Current/Resources Resources
-
-# Create Info.plist
-cat > "$FW_DIR/Versions/A/Resources/Info.plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key><string>com.splicekit.SpliceKit</string>
-    <key>CFBundleName</key><string>SpliceKit</string>
-    <key>CFBundleVersion</key><string>2.0.0</string>
-    <key>CFBundleShortVersionString</key><string>2.0.0</string>
-    <key>CFBundlePackageType</key><string>FMWK</string>
-    <key>CFBundleExecutable</key><string>SpliceKit</string>
-</dict>
-</plist>
-PLIST
-
-log "Framework installed"
-
-# ============================================================
-# Step 3b: Transcription helper binaries
-#
-# The transcript panel's Parakeet engine shells out to a Swift CLI rather than
-# linking the ASR stack into the injected dylib. Step 3 wipes and recreates the
-# framework, so it has to be re-installed on every run — including --rebuild.
-# Without it the panel reports a missing binary and transcribes nothing.
-#
-# Builds are cached in build/, so this is a no-op once warm. The caption panel's
-# Whisper engines are opt-in (--all) and not built here.
-#
-# Never fatal: a failed ASR build costs one engine, not the whole patch.
-# ============================================================
-step "Step 3b: Installing transcription helpers"
-
-if ! "$REPO_DIR/Scripts/build-transcribers.sh" --framework "$FW_DIR"; then
-    warn "Some transcription helpers are unavailable — see the messages above."
-    warn "Everything else in Final Cut Pro still works; re-run 'make install' to retry."
-fi
-
-# ============================================================
-# Step 3c: Audio helper binaries
-#
-# timeline.getAudioLevels (the MCP tool get_audio_levels) and the command
-# palette's silence remover shell out to small Swift CLIs, because decoding
-# audio with AVFoundation inside Final Cut Pro's process deadlocks. The dylib
-# looks for them in the framework's Resources first. Built with the swiftc
-# that ships with the Command Line Tools; cached in build/. Never fatal here
-# (Final Cut Pro works without them), but install.sh checks the framework for
-# them afterwards, names any that are missing in its final banner and exits
-# non-zero, so a failed helper build is not hidden behind "Verified".
-# ============================================================
-step "Step 3c: Installing audio helpers"
-
-if command -v swiftc >/dev/null 2>&1; then
-    for helper in audio-levels silence-detector; do
-        src="$REPO_DIR/tools/$helper.swift"
-        out="$BUILD_DIR/$helper"
-        [ -f "$src" ] || continue
-        if [ ! -x "$out" ] || [ "$src" -nt "$out" ]; then
-            if swiftc -O -suppress-warnings -o "$out" "$src" 2>"$BUILD_DIR/$helper-build.log"; then
-                # Ad-hoc sign like build-transcribers.sh does: an unsigned Mach-O inside the
-                # framework's Resources makes the framework's own signature fail to verify.
-                codesign --force --sign - "$out" >/dev/null 2>&1 || true
-                log "Built: $out"
-            else
-                warn "Could not build $helper with $(command -v swiftc) ($(swiftc --version 2>&1 | head -1))."
-                warn "  Compiler output (also in $BUILD_DIR/$helper-build.log):"
-                head -20 "$BUILD_DIR/$helper-build.log" | sed 's/^/    /'
-                warn "  get_audio_levels / the silence remover will report $helper as missing until this builds."
-                continue
-            fi
-        fi
-        if cp "$out" "$FW_DIR/Versions/A/Resources/$helper"; then
-            log "Installed: $helper"
-        else
-            warn "Could not copy $helper into the framework; its features will report it as missing."
-        fi
-    done
-else
-    warn "swiftc not found: audio-levels and silence-detector were not built (get_audio_levels will report the helper as missing)."
-fi
-
-# ============================================================
-# Step 4: Inject LC_LOAD_DYLIB
-# ============================================================
-step "Step 4: Injecting dylib into FCP binary"
+step "Step 2: Injecting dylib into FCP binary"
 
 BINARY="$MODDED_APP/Contents/MacOS/Final Cut Pro"
 
@@ -561,15 +353,14 @@ else
 fi
 
 # ============================================================
-# Step 4b: Bundle metadata
+# Step 3: Bundle metadata
 #
-# Every Info.plist write has to happen BEFORE signing. Code signing seals
-# Contents/Info.plist, so editing it afterwards leaves the app reporting
+# Every Info.plist write has to happen BEFORE signing (Step 4). Code signing
+# seals Contents/Info.plist, so editing it afterwards leaves the app reporting
 # "invalid Info.plist (plist or signature have been modified)" and macOS
-# refuses to launch it. These edits used to live in Step 6, after the signing
-# step, which meant the patcher always finished with a broken signature.
+# refuses to launch it. The privacy usage descriptions are set by make deploy.
 # ============================================================
-step "Step 4b: Configuring bundle metadata"
+step "Step 3: Configuring bundle metadata"
 
 PLIST="$MODDED_APP/Contents/Info.plist"
 
@@ -579,13 +370,6 @@ plist_set() {
         || /usr/libexec/PlistBuddy -c "Add :$key string '$value'" "$PLIST" 2>/dev/null \
         || true
 }
-
-# Speech and microphone usage descriptions for transcript + command palette dictation.
-plist_set NSSpeechRecognitionUsageDescription \
-    "SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro."
-plist_set NSMicrophoneUsageDescription \
-    "SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro."
-log "Speech recognition and microphone permissions configured"
 
 # Retitle the copy when --app-name was given, so it is distinguishable from the
 # stock app in Finder, the Dock and the menu bar. CFBundleIdentifier is left
@@ -617,84 +401,37 @@ if [[ -n "$APP_NAME_OVERRIDE" ]]; then
 fi
 
 # ============================================================
-# Step 5: Create entitlements and re-sign
+# Step 4: Build, install and sign SpliceKit
+#
+# `make deploy` is the one build: the dylib, the helper CLIs, the plugin
+# bundles, the Lua scripts, then re-signing with entitlements.plist. The
+# Info.plist edits above have to happen first, because the signature seals
+# Info.plist. Deploy wipes and recreates the framework, so it runs on every
+# patch, including --rebuild.
 # ============================================================
-step "Step 5: Re-signing (this takes a moment)"
+step "Step 4: Building, installing and signing SpliceKit"
 
-# Create entitlements
-ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
-cat > "$ENTITLEMENTS" << 'ENT'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key><false/>
-    <key>com.apple.security.cs.disable-library-validation</key><true/>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
-    <key>com.apple.security.get-task-allow</key><true/>
-</dict>
-</plist>
-ENT
-
-# Only sign the SpliceKit framework (ours) and the main app bundle.
-# Apple's own frameworks must keep their original signatures or internal
-# integrity checks (e.g. ProAppSupport +[PCApp isiMovie]) abort on launch.
-SIGN_IDENTITY="$(detect_sign_identity || true)"
-if [[ -n "$SIGN_IDENTITY" ]]; then
-    info "Using signing identity: $SIGN_IDENTITY"
-else
-    SIGN_IDENTITY="-"
-    info "No local codesigning identity found; falling back to ad-hoc signing (higher risk of macOS launch/security blocks)"
-fi
-
-info "Signing main application..."
-if ! sign_modded_app "$SIGN_IDENTITY"; then
-    if [[ "$SIGN_IDENTITY" == "-" ]]; then
-        err "Signing failed"
-        exit 1
-    fi
-
-    warn "Developer signing failed; retrying with ad-hoc signature (higher risk of macOS launch/security blocks)"
-    sign_modded_app "-"
-    SIGN_IDENTITY="-"
-fi
-
-# Verify
-VERIFY_OUT=$(codesign --verify --verbose "$MODDED_APP" 2>&1)
-if echo "$VERIFY_OUT" | grep -q "valid on disk"; then
-    log "Signature valid"
-elif echo "$VERIFY_OUT" | grep -q "satisfies"; then
-    log "Signature valid"
-else
-    # Mixed signatures (Apple + ad-hoc) may report issues but the app can
-    # still launch with library validation disabled via entitlements.
-    log "Signature note: $VERIFY_OUT"
-fi
-
-# Verify entitlements applied
-if codesign -d --entitlements - "$MODDED_APP" 2>&1 | grep -q "disable-library-validation"; then
-    log "Entitlements applied (no sandbox, library validation disabled)"
-else
-    err "Entitlements not applied correctly"
+if ! make -C "$REPO_DIR" deploy MODDED_APP="$MODDED_APP"; then
+    err "make deploy failed — see the output above"
     exit 1
 fi
 
 # ============================================================
-# Step 6: Set up NSUserDefaults
+# Step 5: Set up NSUserDefaults
 # ============================================================
-step "Step 6: Configuring defaults"
+step "Step 5: Configuring defaults"
 
 defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null || true
 defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
 log "CloudContent defaults set"
 
-# NOTE: Info.plist edits belong in Step 4b, before signing. Writing to the
-# bundle here would invalidate the signature made in Step 5.
+# NOTE: Info.plist edits belong in Step 3, before signing. Writing to the
+# bundle here would invalidate the signature made in Step 4.
 
 # ============================================================
-# Step 7: Create MCP config
+# Step 6: Create MCP config
 # ============================================================
-step "Step 7: Setting up MCP server"
+step "Step 6: Setting up MCP server"
 
 MCP_SERVER="$REPO_DIR/mcp/server.py"
 

@@ -79,7 +79,7 @@ done
 
 MODDED_APP="$DEST_DIR/${APP_NAME%.app}.app"
 
-# The audio helpers the patcher's step 3c builds (swiftc) into the framework:
+# The audio helpers `make deploy` (run by the patcher) builds into the framework:
 # audio-levels (get_audio_levels) and silence-detector (the silence remover).
 # Prints the names of the ones that are not in the patched app, one per line;
 # prints nothing when both are installed.
@@ -623,9 +623,8 @@ esac
 if [[ -n "$HELPERS_MISSING" ]]; then
 cat <<EOF
 
-NOT installed: the audio helper(s) $HELPERS_MISSING did not build (patcher step 3c:
-the compiler output is above and in $REPO_DIR/build/<helper>-build.log, or swiftc
-was not found), so get_audio_levels (and the silence remover, for silence-detector)
+NOT installed: the audio helper(s) $HELPERS_MISSING did not build (make deploy:
+the compiler output is above, or swiftc was not found), so get_audio_levels (and the silence remover, for silence-detector)
 will report the helper as missing. Fix the build (swiftc comes with the Command Line
 Tools: xcode-select --install), then re-run:  make install
 EOF

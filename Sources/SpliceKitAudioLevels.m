@@ -251,10 +251,9 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params) {
 
     NSString *helper = SpliceKit_findAudioLevelsHelper();
     if (!helper) {
-        return @{@"error": @"audio-levels helper not found. `make install` builds it (step 3c, swiftc from the "
-                           @"Command Line Tools) into the patched app's SpliceKit.framework/Versions/A/Resources and "
-                           @"says so in its final banner when that failed (log: build/audio-levels-build.log). By hand: "
-                           @"`make tools`, then copy build/audio-levels there or to ~/Applications/SpliceKit/tools/."};
+        return @{@"error": @"audio-levels helper not found. `make install` (or `make deploy`) builds it with "
+                           @"swiftc from the Command Line Tools into the patched app's "
+                           @"SpliceKit.framework/Versions/A/Resources and says so when that failed."};
     }
 
     NSDictionary *state = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @1000,
