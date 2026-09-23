@@ -16,6 +16,17 @@ from ..bridge import _call_or_error, _err, _fmt, bridge
 # deadlocks inside FCP's hardened runtime). Returns beat/bar/section
 # timestamps for syncing video cuts to music.
 
+def _helper_failure(result) -> str:
+    """Why a helper CLI failed: stderr when it wrote any, else the JSON {"error": ...}
+    the audio helpers print on stdout (e.g. "No audio tracks in file")."""
+    if result.stderr.strip():
+        return result.stderr.strip()
+    try:
+        return str(json.loads(result.stdout).get("error") or result.stdout.strip())
+    except (ValueError, AttributeError):
+        return result.stdout.strip() or f"exit status {result.returncode}"
+
+
 @splicekit_tool("detect_beats", READ)
 def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0,
                  limit: int = 16) -> str:
@@ -58,7 +69,7 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
-            return f"Error: beat-detector failed: {result.stderr}"
+            return f"Error: beat-detector failed: {_helper_failure(result)}"
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as e:
@@ -126,6 +137,7 @@ def _find_structure_analyzer():
     return None
 
 
+
 def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
                              min_bpm: float = 60.0, max_bpm: float = 200.0) -> dict:
     """Run structure-analyzer and return parsed JSON dict (or dict with 'error' key)."""
@@ -138,7 +150,7 @@ def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
-            return {"error": f"structure-analyzer failed: {result.stderr}"}
+            return {"error": f"structure-analyzer failed: {_helper_failure(result)}"}
         return json.loads(result.stdout)
     except subprocess.TimeoutExpired:
         return {"error": "structure-analyzer timed out"}

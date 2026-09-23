@@ -50,7 +50,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
 
             // Get frame rate
             if ([timelineModule respondsToSelector:@selector(sequenceFrameDuration)]) {
-            CMTime fd;
+                CMTime fd;
                 NSMethodSignature *sig = [timelineModule methodSignatureForSelector:@selector(sequenceFrameDuration)];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                 [inv setTarget:timelineModule];
@@ -65,7 +65,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
             // Get playhead time
             SEL currentTimeSel = NSSelectorFromString(@"currentSequenceTime");
             if ([timelineModule respondsToSelector:currentTimeSel]) {
-            CMTime t;
+                CMTime t;
                 NSMethodSignature *sig = [timelineModule methodSignatureForSelector:currentTimeSel];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                 [inv setTarget:timelineModule];
@@ -89,7 +89,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
 
             // Get clip timeline start and duration
             if ([selectedClip respondsToSelector:@selector(timelineStartTime)]) {
-            CMTime t;
+                CMTime t;
                 NSMethodSignature *sig = [selectedClip methodSignatureForSelector:@selector(timelineStartTime)];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                 [inv setTarget:selectedClip];
@@ -99,7 +99,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
                 if (t.timescale > 0) clipStart = (double)t.value / t.timescale;
             }
             if ([selectedClip respondsToSelector:@selector(duration)]) {
-            CMTime t;
+                CMTime t;
                 NSMethodSignature *sig = [selectedClip methodSignatureForSelector:@selector(duration)];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                 [inv setTarget:selectedClip];
@@ -111,7 +111,7 @@ NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
 
             // Get trim offset
             if ([selectedClip respondsToSelector:NSSelectorFromString(@"trimStartTime")]) {
-            CMTime t;
+                CMTime t;
                 SEL tsSel = NSSelectorFromString(@"trimStartTime");
                 NSMethodSignature *sig = [selectedClip methodSignatureForSelector:tsSel];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
