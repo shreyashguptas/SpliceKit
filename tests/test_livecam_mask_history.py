@@ -6,13 +6,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "Sources" / "SpliceKitLiveCam.m"
+# SpliceKitLiveCam.m and the files split out of it (SpliceKitLiveCam*.m).
+SOURCES = sorted((ROOT / "Sources").rglob("SpliceKitLiveCam*.m"))
 SOAK_SOURCE = ROOT / "tests" / "livecam_mask_history_soak.m"
+
+
+def read_livecam_source():
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 class LiveCamMaskHistoryTests(unittest.TestCase):
     def test_production_history_is_materialized_and_bounded(self):
-        source = SOURCE.read_text(encoding="utf-8")
+        source = read_livecam_source()
 
         self.assertIn("materializedMaskForHistory", source)
         self.assertIn("CVPixelBufferPoolCreatePixelBufferWithAuxAttributes", source)
@@ -23,14 +28,14 @@ class LiveCamMaskHistoryTests(unittest.TestCase):
         self.assertIn("@autoreleasepool", source)
 
     def test_reused_vision_mask_skips_duplicate_refinement(self):
-        source = SOURCE.read_text(encoding="utf-8")
+        source = read_livecam_source()
 
         self.assertIn("params.sourceGeneration == self.previousMaskSourceGeneration", source)
         self.assertIn("return self.previousMaskForBlend;", source)
         self.assertIn("inferenceFrameInterval", source)
 
     def test_selected_capture_resolution_is_enforced(self):
-        source = SOURCE.read_text(encoding="utf-8")
+        source = read_livecam_source()
 
         self.assertIn("SpliceKitLiveCamSessionPresetForResolution", source)
         self.assertIn("AVCaptureSessionPreset1280x720", source)

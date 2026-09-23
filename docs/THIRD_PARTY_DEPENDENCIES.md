@@ -20,17 +20,17 @@ lists every remaining outbound path and who starts it.
 
 ## Build time
 
-The small audio helpers (`tools/audio-levels.swift` for `get_audio_levels`,
-`tools/silence-detector.swift` for the silence remover) are single files compiled
+The small audio helpers (`helpers/audio-levels.swift` for `get_audio_levels`,
+`helpers/silence-detector.swift` for the silence remover) are single files compiled
 with the `swiftc` that ships with the Command Line Tools; they use only Apple's
 AVFoundation and Accelerate frameworks and fetch nothing. The rest of this section
 is about the transcription helpers.
 
-Fetched by SwiftPM when `Scripts/build-transcribers.sh` compiles the helper
+Fetched by SwiftPM when `scripts/build-transcribers.sh` compiles the helper
 CLIs. Pinned to exact revisions in each package's `Package.resolved`, so the
 versions do not drift between machines or over time.
 
-### tools/parakeet-transcriber — transcript panel, Parakeet engine
+### helpers/parakeet-transcriber — transcript panel, Parakeet engine
 
 **One dependency. No transitive packages. No prebuilt binaries.**
 
@@ -40,7 +40,7 @@ versions do not drift between machines or over time.
 
 FluidAudio 0.13.6 declares `dependencies: []`, so that table is the whole tree.
 
-**Why the pin is exact.** `tools/parakeet-transcriber/Sources/main.swift` only
+**Why the pin is exact.** `helpers/parakeet-transcriber/Sources/main.swift` only
 compiles against 0.13.6, and fails on both sides of it:
 
 | Version | Problem |
@@ -56,7 +56,7 @@ transcript panel just reported "rerun the SpliceKit patcher app or copy the
 binary manually to ..." for a binary that had never been built.
 
 `Package.resolved` is committed next to it (`.gitignore` carries a
-`!tools/*/Package.resolved` exception) so a new Mac resolves the same revision.
+`!helpers/*/Package.resolved` exception) so a new Mac resolves the same revision.
 
 **The keychain prompt.** A first build makes macOS ask whether "a Swift package
 wants to use your confidential information stored in github.com in your
@@ -65,7 +65,7 @@ credential before cloning. FluidAudio is public, so **Deny** is correct and the
 fetch proceeds anonymously (it logs a harmless
 `Failed to find credentials for 'https://github.com' in keychain: status -128`).
 
-### tools/whisper-transcriber — caption panel, Whisper engines
+### helpers/whisper-transcriber — caption panel, Whisper engines
 
 | Dependency | Source | Version | Licence |
 | --- | --- | --- | --- |
@@ -76,7 +76,7 @@ larger than Parakeet's, and the caption panel is a separate feature from the
 transcript panel, so it is opt-in:
 
 ```sh
-./Scripts/build-transcribers.sh --all      # or --only whisper-transcriber
+./scripts/build-transcribers.sh --all      # or --only whisper-transcriber
 ```
 
 Its version is still declared as `from: "0.9.0"`, which floats. If you enable
@@ -114,16 +114,16 @@ access; no audio, transcript or project data leaves the machine.
 | --- | --- |
 | `~/Library/Application Support/FluidAudio/Models/` | Parakeet + diarization models |
 | `~/Library/Application Support/SpliceKit/tools/` | the built helper binaries |
-| `<patched FCP>.app/.../SpliceKit.framework/Versions/A/Resources/` | the same binaries, travelling with the app |
+| `<patched FCP>.app/Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/` | the same binaries, travelling with the app |
 | `build/*-transcriber` | the cached build output re-used across installs |
-| `tools/*/.build/` | SwiftPM checkouts and artifacts |
+| `helpers/*/.build/` | SwiftPM checkouts and artifacts |
 
 ### Removing everything
 
 ```sh
 rm -rf ~/Library/Application\ Support/FluidAudio          # downloaded models
 rm -rf ~/Library/Application\ Support/SpliceKit/tools     # helper binaries
-rm -rf tools/*/.build build/*-transcriber                 # build state
+rm -rf helpers/*/.build build/*-transcriber                 # build state
 ```
 
 Final Cut Pro keeps working; the Parakeet and Whisper engines revert to
@@ -134,7 +134,7 @@ reporting that they are unavailable. The FCP Native engine needs none of this.
 Versions are pinned. To take a newer FluidAudio or WhisperKit:
 
 ```sh
-cd tools/parakeet-transcriber && swift package update
+cd helpers/parakeet-transcriber && swift package update
 cd ../.. && make transcribers
 ```
 
@@ -153,9 +153,8 @@ is left.
 
 | Path | Where | Goes to |
 | --- | --- | --- |
-| JSON-RPC bridge inside Final Cut Pro | `Sources/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
-| MCP server, `Scripts/splicekit_client.py`, `tools/splicekit-watchdog.py`, `tools/fcp_runtime_export.py`, the mixer app, the Loupedeck haptics plugin | `mcp/server.py` and the named files, `Plugins/LogiHaptics/.../FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
-| Command palette helper scripts | the Swift helper that the Apple Intelligence engines spawn, and the Gemma engine's port probe | 127.0.0.1:9876 and 127.0.0.1:8080 |
+| JSON-RPC bridge inside Final Cut Pro | `Sources/Bridge/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
+| MCP server, `scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/splicekit_mcp/config.py` and the named files, `plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
 | Test suites | `tests/` | a fake bridge on 127.0.0.1 |
 
 ### Only when you start it inside Final Cut Pro
@@ -163,26 +162,25 @@ is left.
 | Feature | What happens | Goes to |
 | --- | --- | --- |
 | Transcript / caption panels, Parakeet or Whisper engine | model download on first use (table above); recognition is on-device | huggingface.co |
-| Transcript panel, Apple Speech engine | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` set on every request (`Sources/SpliceKitTranscriptPanel.m`), so recognition stays on this Mac where macOS supports it | Apple framework, on-device |
-| Command palette, Apple Intelligence engines (the default) | Apple's FoundationModels framework (Apple's on-device model); SpliceKit adds no network call of its own beyond the loopback bridge | Apple frameworks |
-| Command palette, "Gemma 4" engine | talks to an `mlx_lm.server` on this Mac at http://localhost:8080; if `mlx-lm` is missing it runs `pip install mlx-lm`, and the server downloads the model (`unsloth/gemma-4-E4B-it-UD-MLX-4bit` unless `SpliceKitGemmaModel` says otherwise) on first start; selecting the engine and sending a query is the consent, there is no second prompt | PyPI, huggingface.co, then loopback |
+| Transcript panel, Apple Speech engine | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` set on every request (`Sources/Panels/Transcript/SpliceKitTranscriptPanel.m`), so recognition stays on this Mac where macOS supports it | Apple framework, on-device |
+| Command palette, voice dictation | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` (`Sources/Panels/CommandPalette/SpliceKitCommandPalette+Dictation.m`); the text only fills the search field | Apple framework, on-device |
 | URL import | downloads the URL you pasted: direct media links with `NSURLSession`, YouTube/Vimeo through `yt-dlp` and `ffmpeg` found on PATH (or `SPLICEKIT_YTDLP_PATH` / `SPLICEKIT_FFMPEG_PATH`); `make url-import-tools` only symlinks binaries already on PATH and prints a `brew install` hint otherwise; it downloads nothing | the site you gave it |
 
 ### Only during installation (`make install`)
 
-Homebrew and Python sit behind a yes/no prompt; `Scripts/install.sh` answers
+Homebrew and Python sit behind a yes/no prompt; `scripts/install.sh` answers
 yes for you with `--yes`, or when it is not run from a terminal (a pipe, CI).
 The other rows have no prompt of their own: they run when what they fetch is
 missing, as part of the one-command install.
 
 | Step | Command | Goes to |
 | --- | --- | --- |
-| Homebrew, if missing (prompted) | `Scripts/install.sh` | raw.githubusercontent.com (Homebrew's installer), then Homebrew's own mirrors |
+| Homebrew, if missing (prompted) | `scripts/install.sh` | raw.githubusercontent.com (Homebrew's installer), then Homebrew's own mirrors |
 | Python 3.10+, if missing (prompted) | `brew install python@3.13` | Homebrew |
-| MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` | PyPI |
-| `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`), GUI patcher (`curl`) | github.com/tyilo/insert_dylib |
+| MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` (`mcp`, plus `opentimelineio` and `otio-fcpx-xml-adapter` for the OTIO tools) | PyPI |
+| `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`) | github.com/tyilo/insert_dylib |
 | Transcriber helpers, if they need rebuilding | SwiftPM (tables above) | github.com (FluidAudio, WhisperKit) |
-| Optional OTIO tools | `pip install opentimelineio ...`, only if you run it | PyPI |
+| Optional EDL adapter | `pip install otio-cmx3600-adapter` into the MCP virtualenv, only if you run it (needed for `.edl` in `export_otio` / `import_otio`) | PyPI |
 
 ### Links that open your browser
 
@@ -194,5 +192,5 @@ when you click it. Nothing is fetched until then.
 Removed from this fork, with their configuration and call sites: the Sentry
 SDK and its stubs (dylib and patcher), the Sparkle update feed (`SUFeedURL`,
 `appcast.xml`, "Check for Updates"), the patcher's "Share Logs" upload to
-filebin.net, and `release.sh` (dSYM upload, feed signing). The GitHub Pages
-site under `docs/` has no analytics script.
+filebin.net, `release.sh` (dSYM upload, feed signing), and the GitHub Pages
+site.

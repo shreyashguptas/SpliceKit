@@ -12,118 +12,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module  # noqa: E402
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
+from support.payloads import cmtime, detailed_state, markers_response  # noqa: E402
 
 
-def _cmtime(seconds, timescale=600):
-    return {"value": int(round(seconds * timescale)), "timescale": timescale, "seconds": seconds}
-
-
-def _detailed_state():
-    """A getDetailedState-shaped payload: two spine clips, a music bed on lane -1,
-    a title on lane 1, one chapter marker and one to-do marker."""
-    return {
-        "sequenceName": "Demo Edit",
-        "sequenceClass": "FFAnchoredSequence",
-        "playheadTime": _cmtime(2.0),
-        "duration": _cmtime(12.0),
-        "frameRate": 24.0,
-        "itemCount": 2,
-        "selectedCount": 2,
-        "items": [
-            {
-                "index": 0, "class": "FFAnchoredMediaComponent", "name": "Interview A",
-                "duration": _cmtime(6.0), "lane": 0, "mediaType": 1, "selected": True,
-                "handle": "obj_1", "startTime": _cmtime(0.0), "endTime": _cmtime(6.0),
-                "hasVideo": True, "hasAudio": True,
-            },
-            {
-                "index": 1, "class": "FFAnchoredMediaComponent", "name": "Interview B",
-                "duration": _cmtime(6.0), "lane": 0, "mediaType": 1, "selected": False,
-                "handle": "obj_2", "startTime": _cmtime(6.0), "endTime": _cmtime(12.0),
-                "hasVideo": True, "hasAudio": True,
-            },
-        ],
-        "connectedItems": [
-            {
-                "class": "FFAnchoredTitle", "name": "Lower Third", "duration": _cmtime(3.0),
-                "lane": 1, "effectiveLane": 1, "mediaType": 1, "selected": True, "handle": "obj_11",
-                "parentHandle": "obj_2", "parentIndex": 1, "depth": 0, "relation": "anchored",
-                "hasVideo": True, "hasAudio": False, "isConnectedStoryline": False,
-                "isGap": False, "isTransition": False,
-                "startTime": _cmtime(7.0), "endTime": _cmtime(10.0), "timeSource": "effectiveRange",
-            },
-            {
-                "class": "FFAnchoredMediaComponent", "name": "Music Bed", "duration": _cmtime(12.0),
-                "lane": -1, "effectiveLane": -1, "mediaType": 2, "selected": False, "handle": "obj_10",
-                "parentHandle": "obj_1", "parentIndex": 0, "depth": 0, "relation": "anchored",
-                "hasVideo": False, "hasAudio": True, "isConnectedStoryline": False,
-                "isGap": False, "isTransition": False,
-                "startTime": _cmtime(0.0), "endTime": _cmtime(12.0), "timeSource": "effectiveRange",
-            },
-        ],
-        "connectedCount": 2,
-        "markers": [
-            {
-                "handle": "obj_20", "class": "FFAnchoredChapterMarker", "name": "Chapter 1",
-                "kind": "chapter", "time": _cmtime(6.0), "timeSource": "effectiveRange",
-                "parentHandle": "obj_2",
-            },
-            {
-                "handle": "obj_21", "class": "FFAnchoredMarker", "name": "Fix audio",
-                "kind": "todo", "completed": False, "time": _cmtime(1.5),
-                "timeSource": "effectiveRange", "parentHandle": "obj_1",
-            },
-        ],
-        "markerCount": 2,
-        "markerTotal": 2,
-        "markerSources": {
-            "markersInTimeRange": 2,
-            "anchoredWalk": 2,
-            "sequenceRespondsToMarkersInTimeRange": True,
-        },
-    }
-
-
-def _markers_response(kind=None):
-    state = _detailed_state()
-    markers = state["markers"]
-    if kind:
-        markers = [m for m in markers if m["kind"] == kind]
-    out = {
-        "sequenceName": state["sequenceName"],
-        "playheadTime": state["playheadTime"],
-        "duration": state["duration"],
-        "frameRate": state["frameRate"],
-        "markers": markers,
-        "markerCount": len(markers),
-        "markerSources": state["markerSources"],
-    }
-    if kind:
-        out["kind"] = kind
-    return out
-
-
-class TimelineReadToolTests(unittest.TestCase):
+class TimelineReadToolTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
         cls.tools = {tool["name"]: tool for tool in cls.module.mcp.tools}
 
-    def _install_bridge(self, responder):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
-            return responder(method, params)
-
-        self.module.bridge.call = fake_call
-        return calls
-
     # (a) full render + param forwarding
     def test_get_timeline_clips_renders_all_sections_and_forwards_params(self):
-        calls = self._install_bridge(lambda method, params: _detailed_state())
+        calls = self._install_bridge(lambda method, params: detailed_state())
 
         out = self.module.get_timeline_clips(limit=50)
 
@@ -164,16 +65,16 @@ class TimelineReadToolTests(unittest.TestCase):
 
     def test_connected_table_prefers_effective_lane_for_nested_anchors(self):
         def responder(method, params):
-            state = _detailed_state()
+            state = detailed_state()
             # A title anchored to the connected B-roll: raw lane 1 relative to its
             # parent, effective lane 2 relative to the spine.
             state["connectedItems"].append({
-                "class": "FFAnchoredTitle", "name": "Nested Title", "duration": _cmtime(2.0),
+                "class": "FFAnchoredTitle", "name": "Nested Title", "duration": cmtime(2.0),
                 "lane": 1, "effectiveLane": 2, "mediaType": 1, "selected": False,
                 "handle": "obj_12", "parentHandle": "obj_11", "parentIndex": 1, "depth": 1,
                 "relation": "anchored", "hasVideo": True, "hasAudio": False,
                 "isConnectedStoryline": False, "isGap": False, "isTransition": False,
-                "startTime": _cmtime(8.0), "endTime": _cmtime(10.0), "timeSource": "effectiveRange",
+                "startTime": cmtime(8.0), "endTime": cmtime(10.0), "timeSource": "effectiveRange",
             })
             state["connectedCount"] = 3
             return state
@@ -186,7 +87,7 @@ class TimelineReadToolTests(unittest.TestCase):
         self.assertIn(" 1 ", nested_row)
 
     def test_get_timeline_clips_marks_reference_and_compound_clips(self):
-        state = _detailed_state()
+        state = detailed_state()
         state["items"][0]["isReferenceClip"] = True
         state["connectedItems"][0]["isCompound"] = True
         self._install_bridge(lambda method, params: state)
@@ -198,12 +99,12 @@ class TimelineReadToolTests(unittest.TestCase):
         self.assertIn("[reference clip] = FCP's own isReferenceClip flag: a compound clip (verified on 12.3)", out)
         self.assertIn("get_clip_info reports no single source media file for it and get_audio_levels skips it", out)
         # no legend when nothing is a container
-        self._install_bridge(lambda method, params: _detailed_state())
+        self._install_bridge(lambda method, params: detailed_state())
         self.assertNotIn("[reference clip]", self.module.get_timeline_clips())
 
     def test_get_timeline_clips_prints_walk_errors_as_warnings(self):
         def responder(method, params):
-            state = _detailed_state()
+            state = detailed_state()
             state["connectedItemsError"] = "boom connected"
             state["markersError"] = "boom markers"
             return state
@@ -216,7 +117,7 @@ class TimelineReadToolTests(unittest.TestCase):
     # (b) opt-out forwards False and omits sections
     def test_get_timeline_clips_can_omit_connected_and_markers(self):
         def responder(method, params):
-            state = _detailed_state()
+            state = detailed_state()
             for key in ("connectedItems", "connectedCount", "markers", "markerCount",
                         "markerTotal", "markerSources"):
                 state.pop(key, None)
@@ -239,7 +140,7 @@ class TimelineReadToolTests(unittest.TestCase):
 
     # (c) list_markers forwarding + rendering
     def test_list_markers_forwards_kind_and_renders_table(self):
-        calls = self._install_bridge(lambda method, params: _markers_response(params.get("kind")))
+        calls = self._install_bridge(lambda method, params: markers_response(params.get("kind")))
 
         out_all = self.module.list_markers()
         out_chapter = self.module.list_markers(kind="chapter")
@@ -287,7 +188,7 @@ class TimelineReadToolTests(unittest.TestCase):
 
     # (d) selected connected items
     def test_get_selected_clips_includes_selected_connected_items(self):
-        self._install_bridge(lambda method, params: _detailed_state())
+        self._install_bridge(lambda method, params: detailed_state())
 
         out = json.loads(self.module.get_selected_clips())
 
@@ -302,7 +203,7 @@ class TimelineReadToolTests(unittest.TestCase):
 
     # (e) verify_action snapshot
     def test_verify_action_includes_connected_and_marker_counts(self):
-        self._install_bridge(lambda method, params: _detailed_state())
+        self._install_bridge(lambda method, params: detailed_state())
 
         out = json.loads(self.module.verify_action("after edit"))
 

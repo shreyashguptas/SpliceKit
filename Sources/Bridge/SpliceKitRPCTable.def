@@ -1,0 +1,312 @@
+// SpliceKitRPCTable.def -- the built-in JSON-RPC methods, one row each.
+//
+// The single list of built-in RPC names. SpliceKitServer.m includes it to build the
+// dispatch table (name -> handler), SpliceKitBridgeMetadata.m to build sBuiltinMetadata
+// (what bridge.describe returns and what the busy/modal guard reads), and
+// scripts/gen_bridge_params.py reads it to find each method's handler.
+//
+//   SK_RPC(name, handler, safety, summary)
+//     name     C string literal, the RPC method name
+//     handler  NSDictionary *handler(NSDictionary *params), or NULL for a method that
+//              SpliceKit_handleRequest dispatches explicitly (it wraps the handler's
+//              result or computes it inline); the row then only carries its metadata
+//     safety   @"safe" | @"state_dependent" | @"modal" | @"destructive" | @"system"
+//              (see SpliceKitBridgeMetadata.m; when in doubt, state_dependent)
+//     summary  NSString literal, one line for bridge.describe
+//
+// To add an RPC: write the handler function (declare it in SpliceKitServerInternal.h,
+// or SpliceKitServerHandlers.h if other files call it too),
+// add one row here, then run `python3 scripts/gen_bridge_params.py` so bridge.describe
+// lists the parameters it reads.
+//
+// Prefix routes (audioBusDiagnostics.*) and plugin methods registered with
+// SpliceKit_registerPluginMethod (bridge.*, events.*, async.*) are not listed here.
+//
+// No include guard: this file is meant to be included several times, each time with
+// its own definition of SK_RPC.
+
+// system.* namespace
+SK_RPC("system.version", SpliceKit_handleSystemVersion, @"safe", @"SpliceKit + FCP version info.")
+SK_RPC("system.getClasses", SpliceKit_handleSystemGetClasses, @"safe", @"Enumerate ObjC classes in the process.")
+SK_RPC("system.getMethods", SpliceKit_handleSystemGetMethods, @"safe", @"List methods on a class.")
+SK_RPC("system.callMethod", SpliceKit_handleSystemCallMethod, @"system", @"Invoke an ObjC selector — can crash on bad selectors.")
+SK_RPC("system.swizzle", SpliceKit_handleSystemSwizzle, @"system", @"Swap method implementations.")
+SK_RPC("system.getProperties", SpliceKit_handleSystemGetProperties, @"safe", @"List properties on a class.")
+SK_RPC("system.getProtocols", SpliceKit_handleSystemGetProtocols, @"safe", @"List protocol conformances.")
+SK_RPC("system.getSuperchain", SpliceKit_handleSystemGetSuperchain, @"safe", @"Walk the inheritance chain.")
+SK_RPC("system.getIvars", SpliceKit_handleSystemGetIvars, @"safe", @"List ivars with byte offsets.")
+SK_RPC("system.callMethodWithArgs", SpliceKit_handleCallMethodWithArgs, @"system", @"Invoke an ObjC selector with typed args.")
+
+// object.* namespace
+SK_RPC("object.get", SpliceKit_handleObjectGet, @"system", @"Resolve an object handle.")
+SK_RPC("object.release", SpliceKit_handleObjectRelease, @"system", @"Release an object handle.")
+SK_RPC("object.list", SpliceKit_handleObjectList, @"safe", @"List active object handles.")
+SK_RPC("object.getProperty", SpliceKit_handleGetProperty, @"safe", @"Read a property via KVC.")
+SK_RPC("object.setProperty", SpliceKit_handleSetProperty, @"destructive", @"Write a property via KVC.")
+
+// timeline.* namespace
+// Dispatched explicitly in SpliceKit_handleRequest (result passed through SpliceKit_annotatePendingDialog).
+SK_RPC("timeline.action", NULL, @"state_dependent", @"Run a timeline action via responder chain. Needs a loaded project.")
+SK_RPC("timeline.directAction", SpliceKit_handleDirectTimelineAction, @"state_dependent", @"Call action* selector directly on timeline module.")
+SK_RPC("timeline.getState", SpliceKit_handleTimelineGetState, @"safe", @"Read basic timeline state (name, duration).")
+SK_RPC("timeline.getDetailedState", SpliceKit_handleTimelineGetDetailedState, @"safe", @"Snapshot spine clips, connected clips (anchoredItems), markers, handles, selection.")
+SK_RPC("timeline.getMarkers", SpliceKit_handleTimelineGetMarkers, @"safe", @"List markers with time, kind, name, completion, handle.")
+SK_RPC("timeline.setRange", SpliceKit_handleSetRange, @"state_dependent", @"Set in/out range selection.")
+SK_RPC("timeline.addMarkers", SpliceKit_handleBatchAddMarkers, @"destructive", @"Batch-add markers at times.")
+SK_RPC("timeline.bladeAtTimes", SpliceKit_handleBladeAtTimes, @"destructive", @"Batch-blade at multiple times.")
+SK_RPC("timeline.trimClipsToBeats", SpliceKit_handleTrimClipsToBeats, @"destructive", @"Trim clips to a beat grid.")
+SK_RPC("timeline.assembleRandomClipsToBeats", SpliceKit_handleAssembleRandomClipsToBeats, @"destructive", @"Build beat-synced cut from browser pool.")
+SK_RPC("timeline.batchActions", SpliceKit_handleBatchActions, @"destructive", @"Run a sequence of timeline+playback actions.")
+SK_RPC("timeline.batchExport", SpliceKit_handleBatchExport, @"destructive", @"Export each clip via Share.")
+SK_RPC("timeline.selectItems", SpliceKit_handleTimelineSelectItems, @"state_dependent", @"Select timeline items by handle (replace/add/remove); never moves the playhead.")
+SK_RPC("timeline.trimClip", SpliceKit_handleTimelineTrimClip, @"destructive", @"Ripple-trim one edit point of a clip by handle, by delta or to an absolute time.")
+SK_RPC("timeline.getClipInfo", SpliceKit_handleTimelineGetClipInfo, @"safe", @"Clip information by handle: Info inspector fields (name, notes, roles, source media file and its media representation) plus SpliceKit extras (timeline placement, effects, title text, markers, transcript words, a frame from the source media file).")
+SK_RPC("timeline.getAudioLevels", SpliceKit_handleTimelineGetAudioLevels, @"safe", @"Peak and RMS audio levels (dBFS) over time for one clip, a list of clips or every clip with audio on the timeline (at most 100 per call), mapped to timeline seconds, with the silence at each clip's start and end, the slices at full scale and, for neighbouring primary-storyline clips that were both analysed, the level jump at the cut between them (a transition on the cut is reported instead); decoded from the source media files by the audio-levels helper, so FCP's volume, fades, effects, retiming and the mix are not applied.")
+SK_RPC("timeline.captureClipFrame", SpliceKit_handleTimelineCaptureClipFrame, @"state_dependent", @"Captures the clip as rendered in the Viewer; moves the playhead and restores it.")
+SK_RPC("timeline.beginEdit", SpliceKit_handleTimelineBeginEdit, @"state_dependent", @"Open one undoable action on the sequence; edits until endEdit become one undo step.")
+SK_RPC("timeline.endEdit", SpliceKit_handleTimelineEndEdit, @"state_dependent", @"Close the open undoable action (actionEnd:save:error:) so the group is one undo step.")
+
+// spine.* namespace
+SK_RPC("spine.getItems", SpliceKit_handleSpineGetItems, @"safe", @"Read spine-level items from primary storyline.")
+SK_RPC("spine.reorder", SpliceKit_handleSpineReorder, @"destructive", @"Move items within the spine.")
+
+// playback.* namespace
+SK_RPC("playback.action", SpliceKit_handlePlayback, @"state_dependent", @"Play/pause/step/shuttle.")
+SK_RPC("playback.seekToTime", SpliceKit_handlePlaybackSeek, @"state_dependent", @"Jump playhead to time (seconds).")
+SK_RPC("playback.getPosition", SpliceKit_handlePlaybackGetPosition, @"safe", @"Read playhead position + playing state.")
+SK_RPC("playback.setRate", SpliceKit_handlePlaybackSetRate, @"state_dependent", @"Set playback rate (negative for reverse).")
+SK_RPC("playback.shuttle", SpliceKit_handlePlaybackShuttle, @"state_dependent", @"Smooth shuttle at variable speed.")
+
+// fcpxml.* namespace
+SK_RPC("fcpxml.importStatus", SpliceKit_handleFCPXMLImportStatus, @"safe", @"State of async FCPXML import jobs, plus FCP's on-screen windows while one runs (read off the main thread).")
+SK_RPC("fcpxml.import", SpliceKit_handleFCPXMLImport, @"destructive", @"Import FCPXML from xml or a file path (new project or into current); async=true returns a job id.")
+SK_RPC("fcpxml.pasteImport", SpliceKit_handlePasteboardImportXML, @"destructive", @"Paste FCPXML from clipboard.")
+SK_RPC("otio.toFCPXML", SpliceKit_handleOTIOToFCPXML, @"safe", @"Convert OTIO to FCPXML in memory.")
+
+// effects.* namespace
+SK_RPC("effects.list", SpliceKit_handleEffectList, @"safe", @"List all effects on current clip.")
+SK_RPC("effects.getClipEffects", SpliceKit_handleGetClipEffects, @"safe", @"Effects on selected clip with handles.")
+
+// transcript.* namespace
+SK_RPC("transcript.open", SpliceKit_handleTranscriptOpen, @"destructive", @"Transcribe timeline or file (long-running).")
+SK_RPC("transcript.close", SpliceKit_handleTranscriptClose, @"state_dependent", @"Close transcript panel.")
+SK_RPC("transcript.getState", SpliceKit_handleTranscriptGetState, @"safe", @"Read transcript words/silences/speakers.")
+SK_RPC("transcript.deleteWords", SpliceKit_handleTranscriptDeleteWords, @"destructive", @"Delete timeline segments by word range.")
+SK_RPC("transcript.moveWords", SpliceKit_handleTranscriptMoveWords, @"destructive", @"Reorder timeline segments.")
+SK_RPC("transcript.search", SpliceKit_handleTranscriptSearch, @"safe", @"Search transcript text.")
+SK_RPC("transcript.deleteSilences", SpliceKit_handleTranscriptDeleteSilences, @"destructive", @"Ripple-delete pauses.")
+// Dispatched explicitly in SpliceKit_handleRequest (computed inline).
+SK_RPC("transcript.clear", NULL, @"destructive", @"Clears transcript text and on-disk cache for the panel.")
+SK_RPC("transcript.setSilenceThreshold", SpliceKit_handleTranscriptSetSilenceThreshold, @"state_dependent", @"Recomputes silence markers at a new threshold.")
+SK_RPC("transcript.setSpeaker", SpliceKit_handleTranscriptSetSpeaker, @"state_dependent", @"Labels speaker on a word range in the transcript panel.")
+SK_RPC("transcript.setEngine", SpliceKit_handleTranscriptSetEngine, @"state_dependent", @"Switches the transcript recognition engine.")
+
+// captions.* namespace
+SK_RPC("captions.open", SpliceKit_handleCaptionsOpen, @"state_dependent", @"Open caption panel.")
+SK_RPC("captions.close", SpliceKit_handleCaptionsClose, @"state_dependent", @"Close caption panel.")
+SK_RPC("captions.getState", SpliceKit_handleCaptionsGetState, @"safe", @"Read caption pipeline state.")
+SK_RPC("captions.getStyles", SpliceKit_handleCaptionsGetStyles, @"safe", @"List caption style presets.")
+SK_RPC("captions.setStyle", SpliceKit_handleCaptionsSetStyle, @"state_dependent", @"Apply a caption style.")
+SK_RPC("captions.setGrouping", SpliceKit_handleCaptionsSetGrouping, @"state_dependent", @"Sets caption word-grouping mode for generation.")
+SK_RPC("captions.generate", SpliceKit_handleCaptionsGenerate, @"destructive", @"Generate and paste captions onto timeline.")
+SK_RPC("captions.exportSRT", SpliceKit_handleCaptionsExportSRT, @"safe", @"Write SRT file.")
+SK_RPC("captions.exportTXT", SpliceKit_handleCaptionsExportTXT, @"safe", @"Write plain text file.")
+SK_RPC("captions.setWords", SpliceKit_handleCaptionsSetWords, @"state_dependent", @"Supplies transcript words to the caption pipeline.")
+SK_RPC("captions.verify", SpliceKit_handleCaptionsVerify, @"safe", @"Inspect titles to verify caption text.")
+SK_RPC("captions.cleanup", SpliceKit_handleCaptionsCleanup, @"destructive", @"Removes temporary caption projects from the library.")
+
+// native captions (FFAnchoredCaption objects in caption lane)
+SK_RPC("nativeCaptions.generate", SpliceKit_handleNativeCaptionsGenerate, @"destructive", @"Creates FFAnchoredCaption objects on the caption lane.")
+SK_RPC("nativeCaptions.verify", SpliceKit_handleNativeCaptionsVerify, @"safe", @"Inspects native captions against expected text.")
+SK_RPC("nativeCaptions.remove", SpliceKit_handleNativeCaptionsRemove, @"destructive", @"Deletes caption items from the open sequence (native or Motion-title pipeline).")
+
+// scene detection
+SK_RPC("scene.detect", SpliceKit_handleDetectSceneChanges, @"safe", @"Detect scene changes in timeline.")
+
+// effects browse/apply
+SK_RPC("effects.listAvailable", SpliceKit_handleEffectsListAvailable, @"safe", @"Browse library of installed effects.")
+SK_RPC("effects.apply", SpliceKit_handleEffectsApply, @"destructive", @"Apply an effect to the selected clip.")
+SK_RPC("titles.insert", SpliceKit_handleTitleInsert, @"destructive", @"Inserts a Motion title on the timeline at the playhead.")
+SK_RPC("stabilize.subject", SpliceKit_handleSubjectStabilize, @"destructive", @"Tracks a subject and writes position keyframes on the selected clip.")
+
+// transitions.* namespace
+SK_RPC("transitions.list", SpliceKit_handleTransitionsList, @"safe", @"Lists installed transition effects.")
+SK_RPC("transitions.apply", SpliceKit_handleTransitionsApply, @"destructive", @"Applies a transition at the current edit point.")
+
+// command.* namespace (command palette)
+SK_RPC("command.show", SpliceKit_handleCommandShow, @"state_dependent", @"Opens the in-app command palette window.")
+SK_RPC("command.hide", SpliceKit_handleCommandHide, @"state_dependent", @"Closes the command palette.")
+SK_RPC("command.search", SpliceKit_handleCommandSearch, @"safe", @"Fuzzy-searches available commands without executing them.")
+SK_RPC("command.execute", SpliceKit_handleCommandExecute, @"state_dependent", @"Runs a palette command by id.")
+
+// liveCam.* namespace
+SK_RPC("liveCam.show", SpliceKit_handleLiveCamShow, @"state_dependent", @"Opens the Live Cam floating panel.")
+SK_RPC("liveCam.hide", SpliceKit_handleLiveCamHide, @"state_dependent", @"Closes the Live Cam panel.")
+SK_RPC("liveCam.status", SpliceKit_handleLiveCamStatus, @"safe", @"Reports Live Cam panel and capture state.")
+
+// dualTimeline.* namespace
+SK_RPC("dualTimeline.status", SpliceKit_handleDualTimelineStatus, @"safe", @"Reports dual-timeline panel state.")
+SK_RPC("dualTimeline.open", SpliceKit_handleDualTimelineOpen, @"state_dependent", @"Opens the secondary timeline editor.")
+SK_RPC("dualTimeline.syncRoot", SpliceKit_handleDualTimelineSyncRoot, @"state_dependent", @"Syncs root sequence between primary and secondary.")
+SK_RPC("dualTimeline.openSelectedInSecondary", SpliceKit_handleDualTimelineOpenSelectedInSecondary, @"state_dependent", @"Opens the selected compound/reference clip in the secondary timeline.")
+SK_RPC("dualTimeline.focus", SpliceKit_handleDualTimelineFocus, @"state_dependent", @"Moves keyboard focus between primary and secondary timelines.")
+SK_RPC("dualTimeline.close", SpliceKit_handleDualTimelineClose, @"state_dependent", @"Closes the secondary timeline.")
+SK_RPC("dualTimeline.togglePanel", SpliceKit_handleDualTimelineTogglePanel, @"state_dependent", @"Shows or hides the dual-timeline panel.")
+
+// browser.* namespace
+SK_RPC("browser.listClips", SpliceKit_handleBrowserListClips, @"safe", @"Clips in the browser (the active library's event clips): name, event, duration, handle.")
+SK_RPC("browser.appendClip", SpliceKit_handleBrowserAppendClip, @"destructive", @"browser.placeClip with edit=append: paste a browser clip at the end of the primary storyline (the effect of Append E).")
+SK_RPC("browser.insertClip", SpliceKit_handleBrowserInsertClip, @"destructive", @"browser.placeClip with edit=insert: paste a browser clip at the playhead (the effect of Insert W).")
+SK_RPC("browser.connectClip", SpliceKit_handleBrowserConnectClip, @"destructive", @"browser.placeClip with edit=connect: paste a browser clip as a connected clip at the playhead (the effect of Connect Q).")
+SK_RPC("browser.placeClip", SpliceKit_handleBrowserPlaceClipEdit, @"destructive", @"Place a browser clip, or a range of it (inSeconds/outSeconds from the clip's first frame), through FCP's pasteboard: edit=insert pastes at the playhead (the effect of Insert W), connect pastes as a connected clip (the effect of Connect Q, backtimed optional), append pastes at the end of the primary storyline (the effect of Append E); atSeconds moves the playhead first. The timeline is re-read before and after: placed, alsoNew, rangeHonored, positionVerified (within two frames). dryRun resolves without editing; the pasteboard is replaced.")
+SK_RPC("media.importFile", SpliceKit_handleMediaImportFile, @"modal", @"Imports a media file into the active event (may show import UI).")
+SK_RPC("media.removeClip", SpliceKit_handleMediaRemoveClip, @"destructive", @"Removes a source clip from an event's browser. The media file on disk is untouched.")
+
+// menu.* namespace
+SK_RPC("menu.execute", SpliceKit_handleMenuExecute, @"modal", @"Execute a menu item by path. May open dialogs.")
+SK_RPC("menu.list", SpliceKit_handleMenuList, @"safe", @"List menu items at a path.")
+
+// inspector.* namespace
+SK_RPC("inspector.get", SpliceKit_handleInspectorGet, @"safe", @"Read inspector properties of selected clip.")
+SK_RPC("inspector.set", SpliceKit_handleInspectorSet, @"destructive", @"Write an inspector property.")
+SK_RPC("inspector.getTitle", SpliceKit_handleInspectorGetTitle, @"safe", @"Read text/font from selected title.")
+
+// view.* namespace
+SK_RPC("view.toggle", SpliceKit_handleViewToggle, @"state_dependent", @"Show/hide a panel (inspector, scopes, etc.).")
+SK_RPC("view.workspace", SpliceKit_handleWorkspace, @"state_dependent", @"Switch workspace layout.")
+
+// roles.* namespace
+SK_RPC("roles.assign", SpliceKit_handleRolesAssign, @"destructive", @"Assigns a video or audio role on the selected clip.")
+
+// mixer.* namespace
+SK_RPC("mixer.getState", SpliceKit_handleMixerGetState, @"safe", @"Reads role faders, mutes, solos, and bus effects for the open timeline.")
+SK_RPC("mixer.setVolume", SpliceKit_handleMixerSetVolume, @"state_dependent", @"Sets a role or clip fader level.")
+SK_RPC("mixer.setSolo", SpliceKit_handleMixerSetSolo, @"state_dependent", @"Solo or unsolo a role.")
+SK_RPC("mixer.setMute", SpliceKit_handleMixerSetMute, @"state_dependent", @"Mute or unmute a role.")
+SK_RPC("mixer.applyBusEffect", SpliceKit_handleMixerApplyBusEffect, @"destructive", @"Inserts a managed bus effect on a role.")
+SK_RPC("mixer.openBusEffect", SpliceKit_handleMixerOpenBusEffect, @"state_dependent", @"Opens the bus effect editor for a role.")
+SK_RPC("mixer.setBusEffectEnabled", SpliceKit_handleMixerSetBusEffectEnabled, @"state_dependent", @"Enables or disables a managed bus effect.")
+SK_RPC("mixer.removeBusEffect", SpliceKit_handleMixerRemoveBusEffect, @"destructive", @"Removes a managed bus effect from a role.")
+SK_RPC("mixer.volumeBegin", SpliceKit_handleMixerVolumeBegin, @"state_dependent", @"Begins a grouped volume drag on the mixer.")
+SK_RPC("mixer.volumeEnd", SpliceKit_handleMixerVolumeEnd, @"state_dependent", @"Ends a grouped volume drag on the mixer.")
+SK_RPC("mixer.setAllVolumes", SpliceKit_handleMixerSetAllVolumes, @"state_dependent", @"Sets fader levels for every role at once.")
+
+// audioBusDiagnostics.* is a prefix route, dispatched explicitly in SpliceKit_handleRequest.
+
+// share.* namespace
+SK_RPC("share.export", SpliceKit_handleShareExport, @"modal", @"Triggers File > Share (opens the share sheet).")
+
+// project.* namespace
+// Dispatched explicitly in SpliceKit_handleRequest (result passed through SpliceKit_annotateCreateActionFilePanelPending).
+SK_RPC("project.create", NULL, @"modal", @"Starts new project creation (may show a save panel).")
+// Dispatched explicitly in SpliceKit_handleRequest (result passed through SpliceKit_annotateCreateActionFilePanelPending).
+SK_RPC("project.createEvent", NULL, @"modal", @"Starts new event creation (may show a save panel).")
+// Dispatched explicitly in SpliceKit_handleRequest (result passed through SpliceKit_annotateCreateActionFilePanelPending).
+SK_RPC("project.createLibrary", NULL, @"modal", @"Starts new library creation (may show a save panel).")
+SK_RPC("project.open", SpliceKit_handleProjectOpen, @"state_dependent", @"Loads a project by name in the active library.")
+
+// urlImport.* namespace
+SK_RPC("urlImport.start", SpliceKitURLImport_start, @"state_dependent", @"Begins a background URL import job.")
+SK_RPC("urlImport.import", SpliceKitURLImport_importSync, @"destructive", @"Imports remote media into the library synchronously.")
+SK_RPC("urlImport.status", SpliceKitURLImport_status, @"safe", @"Reports progress of an in-flight URL import.")
+SK_RPC("urlImport.cancel", SpliceKitURLImport_cancel, @"state_dependent", @"Cancels a running URL import.")
+
+// timeline lane selection
+SK_RPC("timeline.selectClipInLane", SpliceKit_handleSelectClipAtPlayheadLane, @"state_dependent", @"Selects the connected clip on a storyline lane at the playhead.")
+
+// viewer capture
+SK_RPC("viewer.capture", SpliceKit_handleCaptureViewer, @"safe", @"Captures the viewer window to a PNG file.")
+
+// timeline capture
+SK_RPC("timeline.capture", SpliceKit_handleCaptureTimeline, @"safe", @"Captures the timeline window to a PNG file.")
+
+// inspector capture
+SK_RPC("inspector.capture", SpliceKit_handleCaptureInspector, @"safe", @"Captures the inspector window to a PNG file.")
+
+// fcpxml export (programmatic, no dialog)
+SK_RPC("fcpxml.export", SpliceKit_handleFCPXMLExport, @"destructive", @"Writes the active sequence to an FCPXML file on disk.")
+
+// tool.* namespace
+SK_RPC("tool.select", SpliceKit_handleToolSelect, @"state_dependent", @"Switches the active timeline tool (blade, trim, etc.).")
+
+// dialog.* namespace
+SK_RPC("dialog.detect", SpliceKit_handleDialogDetect, @"safe", @"Lists open dialogs, buttons, fields, and checkboxes.")
+SK_RPC("dialog.click", SpliceKit_handleDialogClick, @"state_dependent", @"Clicks a dialog button by title or index.")
+SK_RPC("dialog.fill", SpliceKit_handleDialogFill, @"state_dependent", @"Types into a dialog text field.")
+SK_RPC("dialog.checkbox", SpliceKit_handleDialogCheckbox, @"state_dependent", @"Toggles a dialog checkbox.")
+SK_RPC("dialog.popup", SpliceKit_handleDialogPopup, @"state_dependent", @"Chooses an item from a dialog pop-up.")
+SK_RPC("dialog.dismiss", SpliceKit_handleDialogDismiss, @"state_dependent", @"Dismisses the front dialog via default or cancel.")
+
+// viewer.* namespace
+SK_RPC("viewer.getZoom", SpliceKit_handleViewerGetZoom, @"safe", @"Reads viewer canvas zoom level.")
+SK_RPC("viewer.setZoom", SpliceKit_handleViewerSetZoom, @"state_dependent", @"Sets viewer canvas zoom level.")
+
+// backgroundRender.* namespace
+SK_RPC("backgroundRender.status", SpliceKit_handleBackgroundRenderStatus, @"safe", @"Reads background render queue state.")
+SK_RPC("backgroundRender.control", SpliceKit_handleBackgroundRenderControl, @"state_dependent", @"Starts, stops, or pauses background rendering.")
+
+// options.* namespace
+SK_RPC("options.get", SpliceKit_handleOptionsGet, @"safe", @"Reads SpliceKit/FCP behavioral option flags.")
+SK_RPC("options.set", SpliceKit_handleOptionsSet, @"system", @"Writes SpliceKit/FCP behavioral option flags.")
+
+// beats.* namespace
+SK_RPC("beats.detect", SpliceKit_handleBeatsDetect, @"safe", @"Runs beat detection on an audio file path (no timeline change).")
+
+// flexmusic.* namespace
+SK_RPC("flexmusic.listSongs", SpliceKit_handleFlexMusicListSongs, @"safe", @"Lists FlexMusic songs in the library.")
+SK_RPC("flexmusic.getSong", SpliceKit_handleFlexMusicGetSong, @"safe", @"Reads metadata for one FlexMusic song.")
+SK_RPC("flexmusic.getTiming", SpliceKit_handleFlexMusicGetTiming, @"safe", @"Reads beat/bar timing metadata for a song.")
+SK_RPC("flexmusic.renderToFile", SpliceKit_handleFlexMusicRender, @"destructive", @"Renders a FlexMusic mix to an audio file on disk.")
+SK_RPC("flexmusic.addToTimeline", SpliceKit_handleFlexMusicAddToTimeline, @"destructive", @"Places FlexMusic audio on the timeline.")
+
+// montage.* namespace
+SK_RPC("montage.analyzeClips", SpliceKit_handleMontageAnalyze, @"safe", @"Scores browser clips for montage assembly (read-only).")
+SK_RPC("montage.planEdit", SpliceKit_handleMontagePlan, @"safe", @"Builds a montage edit plan without applying it.")
+SK_RPC("montage.assemble", SpliceKit_handleMontageAssemble, @"destructive", @"Executes a montage plan on the timeline.")
+SK_RPC("montage.auto", SpliceKit_handleMontageAuto, @"destructive", @"Analyzes, plans, and assembles a montage in one call.")
+
+// sections.* namespace (custom timeline bar)
+SK_RPC("sections.show", SpliceKit_handleSectionsShow, @"state_dependent", @"Shows the custom sections bar overlay.")
+SK_RPC("sections.hide", SpliceKit_handleSectionsHide, @"state_dependent", @"Hides the custom sections bar overlay.")
+SK_RPC("sections.get", SpliceKit_handleSectionsGet, @"safe", @"Lists sections on the timeline bar.")
+
+// structure.* namespace
+SK_RPC("structure.generateCaptions", SpliceKit_serverStructureGenerateCaptions, @"destructive", @"Generates structure caption titles on the timeline.")
+SK_RPC("structure.remove", SpliceKit_serverStructureRemove, @"destructive", @"Removes generated structure items.")
+// Not a visibility toggle: with blocks on the timeline this is structure.remove,
+// the same SB_removeStoryline call, and the blocks do not come back on a second call.
+SK_RPC("structure.toggle", SpliceKit_handleStructureToggle, @"destructive", @"Removes the structure block storyline when one is on the timeline, or generates it when sections are passed. Not a visibility toggle.")
+
+// debug.* namespace
+SK_RPC("debug.getConfig", SpliceKit_handleDebugGetConfig, @"safe", @"Reads FCP debug and log configuration keys.")
+SK_RPC("debug.setConfig", SpliceKit_handleDebugSetConfig, @"system", @"Sets a FCP debug or log configuration key.")
+SK_RPC("debug.resetConfig", SpliceKit_handleDebugResetConfig, @"system", @"Resets debug configuration groups to defaults.")
+SK_RPC("debug.enablePreset", SpliceKit_handleDebugEnablePreset, @"system", @"Applies a named debug flag preset.")
+SK_RPC("debug.startFramerateMonitor", SpliceKit_handleDebugStartFramerateMonitor, @"system", @"Starts HMDFramerate logging to the system log.")
+SK_RPC("debug.stopFramerateMonitor", SpliceKit_handleDebugStopFramerateMonitor, @"system", @"Stops HMDFramerate logging.")
+SK_RPC("debug.dumpRuntimeMetadata", SpliceKit_handleDumpRuntimeMetadata, @"safe", @"Exports ObjC runtime metadata JSON (read-only introspection).")
+SK_RPC("debug.listLoadedImages", SpliceKit_handleListLoadedImages, @"safe", @"Lists Mach-O images loaded in the process.")
+SK_RPC("debug.getImageSections", SpliceKit_handleGetImageSections, @"safe", @"Reads ObjC class/selector sections from a binary.")
+SK_RPC("debug.getImageSymbols", SpliceKit_handleGetImageSymbols, @"safe", @"Lists demangled symbols from a loaded image.")
+SK_RPC("debug.getNotificationNames", SpliceKit_handleGetNotificationNames, @"safe", @"Discovers notification-related classes and names.")
+
+// debug tools: tracing, watching, crash handling, threads, eval, plugins, notifications
+SK_RPC("debug.traceMethod", SpliceKit_handleDebugTraceMethod, @"system", @"Install a method trace.")
+SK_RPC("debug.watch", SpliceKit_handleDebugWatch, @"system", @"Watch a keypath for changes.")
+SK_RPC("debug.crashHandler", SpliceKit_handleDebugCrashHandler, @"system", @"Install/query crash handler.")
+SK_RPC("debug.threads", SpliceKit_handleDebugThreads, @"safe", @"Inspect process threads.")
+SK_RPC("debug.eval", SpliceKit_handleDebugEval, @"system", @"Evaluate an ObjC keypath chain.")
+SK_RPC("debug.loadPlugin", SpliceKit_handleDebugLoadPlugin, @"system", @"Hot-load a dylib/bundle into FCP.")
+SK_RPC("debug.observeNotification", SpliceKit_handleDebugObserveNotification, @"system", @"Subscribe to NSNotification events.")
+SK_RPC("debug.breakpoint", SpliceKit_handleDebugBreakpoint, @"system", @"Install a method breakpoint (pauses FCP).")
+
+// lua.* namespace — embedded Lua scripting engine
+SK_RPC("lua.execute", SpliceKit_handleLuaExecute, @"system", @"Runs Lua source in the embedded VM (full FCP access).")
+SK_RPC("lua.executeFile", SpliceKit_handleLuaExecuteFile, @"system", @"Runs a Lua file in the embedded VM.")
+SK_RPC("lua.reset", SpliceKit_handleLuaReset, @"system", @"Resets the Lua VM state.")
+SK_RPC("lua.getState", SpliceKit_handleLuaGetState, @"safe", @"Reads Lua VM globals and loaded modules.")
+SK_RPC("lua.watch", SpliceKit_handleLuaWatch, @"system", @"Registers a filesystem watch on a Lua script path.")
+
+// plugin.* namespace — plugin introspection
+SK_RPC("plugin.listMethods", SpliceKit_handlePluginListMethods, @"safe", @"Lists dynamically registered plugin RPC methods.")
+SK_RPC("plugin.list", SpliceKit_handlePluginList, @"safe", @"Lists loaded SpliceKit plugins.")

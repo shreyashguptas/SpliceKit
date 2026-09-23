@@ -1,127 +1,41 @@
 #!/usr/bin/env python3
-import importlib.util
-import json
+import re
 import sys
-import types
 import unittest
 from pathlib import Path
 
 
-# Wire spellings of the ToolAnnotations fields (what an MCP client receives).
-_ANNOTATION_ALIASES = {
-    "read_only_hint": "readOnlyHint",
-    "destructive_hint": "destructiveHint",
-    "idempotent_hint": "idempotentHint",
-    "open_world_hint": "openWorldHint",
-    "title": "title",
-}
+# The fake SDK and the loader live in tests/support/server_loader.py; they are imported
+# here under their old names because the other test files import them from this module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from support.server_loader import (  # noqa: E402,F401
+    FakeMCPServer,
+    FakeToolAnnotations,
+    FakeToolError,
+    load_server_module,
+    package_module,
+    set_package_global,
+)
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
 
 
-class FakeToolAnnotations(dict):
-    """Stands in for mcp.types.ToolAnnotations (mcp 2.x): built with snake_case keyword
-    arguments like the real model, readable by the tests under the camelCase names the
-    real model serializes to (model_dump(by_alias=True))."""
-
-    def __init__(self, **kwargs):
-        unknown = set(kwargs) - set(_ANNOTATION_ALIASES)
-        if unknown:
-            raise TypeError(f"unexpected ToolAnnotations fields: {sorted(unknown)}")
-        super().__init__({_ANNOTATION_ALIASES[k]: v for k, v in kwargs.items()})
-
-    def model_dump(self, by_alias=True, exclude_none=True):
-        return dict(self)
-
-
-class FakeToolError(Exception):
-    """Stands in for mcp.server.mcpserver.exceptions.ToolError."""
+# The keys set_inspector_property accepts, which its docstring must name.
+INSPECTOR_SET_KEYS = (
+    "opacity",
+    "positionX",
+    "positionY",
+    "positionZ",
+    "scaleX",
+    "scaleY",
+    "rotation",
+    "anchorX",
+    "anchorY",
+    "volume",
+    "handle:",
+)
 
 
-class FakeMCPServer:
-    """Stands in for mcp.server.mcpserver.MCPServer (mcp 2.x): records every tool,
-    resource and prompt registration so the tests can inspect them without the SDK."""
-
-    def __init__(self, name=None, title=None, description=None, instructions=None,
-                 website_url=None, icons=None, version="", **kwargs):
-        self.name = name
-        self.instructions = instructions
-        self.version = version
-        self.tools = []
-        self.resources = []
-        self.prompts = []
-        self._tool_manager = types.SimpleNamespace(list_tools=lambda: [])
-
-    def tool(self, name=None, title=None, description=None, annotations=None, **kwargs):
-        def decorator(func):
-            self.tools.append(
-                {
-                    "name": name or func.__name__,
-                    "annotations": dict(annotations or {}),
-                    "func": func,
-                }
-            )
-            return func
-
-        return decorator
-
-    def resource(self, uri, **kwargs):
-        def decorator(func):
-            self.resources.append({"uri": uri, "func": func, **kwargs})
-            return func
-        return decorator
-
-    def prompt(self, **kwargs):
-        def decorator(func):
-            self.prompts.append({"func": func, **kwargs})
-            return func
-        return decorator
-
-
-# Kept under the old name for tests written against it.
-FakeFastMCP = FakeMCPServer
-
-
-def load_server_module():
-    repo_root = Path(__file__).resolve().parents[1]
-    module_path = repo_root / "mcp" / "server.py"
-
-    # The layout of the mcp 2.x package that mcp/server.py imports from. The fake
-    # mcpserver module has no Image attribute on purpose: the server treats a missing
-    # Image helper as "return text instead of inline images" and the tests rely on that.
-    fake_mcp = types.ModuleType("mcp")
-    fake_mcp_server = types.ModuleType("mcp.server")
-    fake_mcpserver = types.ModuleType("mcp.server.mcpserver")
-    fake_mcpserver.MCPServer = FakeMCPServer
-    fake_types = types.ModuleType("mcp.types")
-    fake_types.ToolAnnotations = FakeToolAnnotations
-    fake_exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
-    fake_exceptions.ToolError = FakeToolError
-
-    injected_modules = {
-        "mcp": fake_mcp,
-        "mcp.server": fake_mcp_server,
-        "mcp.server.mcpserver": fake_mcpserver,
-        "mcp.server.mcpserver.exceptions": fake_exceptions,
-        "mcp.types": fake_types,
-    }
-    previous_modules = {name: sys.modules.get(name) for name in injected_modules}
-
-    try:
-        sys.modules.update(injected_modules)
-
-        spec = importlib.util.spec_from_file_location("splicekit_mcp_server_under_test", module_path)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        for name, previous in previous_modules.items():
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
-
-
-class MCPToolAnnotationTests(unittest.TestCase):
+class MCPToolAnnotationTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
@@ -211,13 +125,10 @@ class MCPToolAnnotationTests(unittest.TestCase):
             self.assertFalse(annotations["openWorldHint"], name)
 
     def test_scene_split_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             return {"method": method, "params": params}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         self.module.mark_scene_changes(threshold=0.2, sample_interval=0.25)
         self.module.blade_scene_changes(threshold=0.5, sample_interval=0.1)
@@ -231,13 +142,10 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_background_render_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             return {"method": method, "params": params}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         self.module.background_render_status()
         self.module.background_render_control("hold_off", 2.5)
@@ -251,10 +159,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_mixer_solo_mute_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             if method == "mixer.setSolo":
                 return {"ok": True, "role": "Dialogue", "soloed": True, "soloObjectCount": 2}
             if method == "mixer.setMute":
@@ -267,7 +172,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 return {"ok": True, "role": "Music", "effectIndex": 0, "busObjectCount": 1}
             return {"ok": True, "role": "Music", "effect": {"name": "Channel EQ"}, "busObjectCount": 1}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         solo_result = self.module.mixer_set_solo(index=0, mode="exclusive")
         mute_result = self.module.mixer_set_mute(role="Music", mode="unmute")
@@ -313,13 +218,10 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_handle_split_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             return {"method": method, "params": params}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         self.module.list_handles()
         self.module.inspect_handle("obj_7")
@@ -337,13 +239,10 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_timeline_split_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             return {"ok": True}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         self.module.timeline_navigation_action("nextEdit")
         self.module.timeline_edit_action("addMarker")
@@ -365,7 +264,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn("read-only", result)
 
     def test_timeline_split_wrappers_accept_documented_actions(self):
-        self.module.bridge.call = lambda method, **params: {"ok": True, "action": params["action"]}
+        self._install_bridge(lambda method, params: {"ok": True, "action": params["action"]})
 
         self.assertIn("ok", self.module.timeline_navigation_action("enableBeatDetection"))
         self.assertIn("ok", self.module.timeline_navigation_action("nextKeyframe"))
@@ -382,12 +281,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn("seconds must be > 0", self.module.background_render_control("hold_off", 0))
 
     def test_trim_clips_to_beats_forwards_expected_bridge_call(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -411,7 +305,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 ],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.trim_clips_to_beats(
             grid="half_beat",
@@ -454,12 +348,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn("Invalid target_handles JSON", result)
 
     def test_sync_clips_to_song_beats_uses_overlay_shortcut(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -475,7 +364,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 "plan": [],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.sync_clips_to_song_beats(
             mode="random_half_beat",
@@ -506,12 +395,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_assemble_random_clips_to_song_beats_forwards_expected_bridge_call(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -529,7 +413,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 ],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.assemble_random_clips_to_song_beats(
             grid="bar",
@@ -577,12 +461,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn("Invalid clip_handles JSON", result)
 
     def test_build_song_cut_maps_aggressive_preset(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -597,7 +476,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 "plan": [],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.build_song_cut(
             pace="aggressive",
@@ -636,12 +515,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_build_song_cut_maps_natural_preset_with_weighted_steps(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -657,7 +531,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 "plan": [],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.build_song_cut(
             project_name="Song Cut Natural",
@@ -691,12 +565,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         )
 
     def test_build_song_cut_forwards_sequence_backed_source_and_current_timeline(self):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+        def respond(method, params):
             return {
                 "status": "ok",
                 "dryRun": True,
@@ -712,7 +581,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 "plan": [],
             }
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         result = self.module.build_song_cut(
             project_name="Ignored",
@@ -753,13 +622,10 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn('pace must be one of', result)
 
     def test_livecam_wrappers_forward_expected_bridge_calls(self):
-        calls = []
-
-        def fake_call(method, **params):
-            calls.append((method, params))
+        def respond(method, params):
             return {"method": method, "params": params}
 
-        self.module.bridge.call = fake_call
+        calls = self._install_bridge(respond)
 
         self.module.livecam_open()
         self.module.livecam_close()
@@ -773,6 +639,37 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 ("liveCam.status", {}),
             ],
         )
+
+    def test_set_inspector_property_docstring_lists_keys_not_labels(self):
+        doc = " ".join((self.module.set_inspector_property.__doc__ or "").split())
+        for key in INSPECTOR_SET_KEYS:
+            self.assertIn(key, doc)
+        self.assertIn("keys like positionX, not inspector labels like Position X", doc)
+
+    def test_beat_sync_blade_count_matches_numbered_cuts(self):
+        # Three blade points plus a song end. The end is not a cut; numbering
+        # it used to make the list one longer than "Cuts:".
+        analysis = {
+            "bpm": 120,
+            "beatInterval": 0.5,
+            "bars": [1.0, 2.0, 3.0],
+            "beats": [],
+            "drops": [],
+            "structure": [
+                {"label": "INTRO", "start": 0.0},
+                {"label": "VERSE", "start": 2.0},
+            ],
+            "duration": 4.0,
+        }
+        set_package_global(self.module, "_run_structure_analyzer", lambda *args, **kwargs: analysis)
+        out = self.module.beat_sync_blade("/tmp/song.wav", dry_run=True)
+
+        numbered = re.findall(r"(?m)^\s+(\d+)\.", out)
+        count = int(re.search(r"Cuts: (\d+)", out).group(1))
+        self.assertEqual(numbered, ["1", "2", "3"])
+        self.assertEqual(count, len(numbered))
+        end_lines = [line for line in out.splitlines() if "[end]" in line]
+        self.assertEqual(end_lines, ["  end    4.00s  (clip: 1.00s)  [end]"])
 
 
 if __name__ == "__main__":

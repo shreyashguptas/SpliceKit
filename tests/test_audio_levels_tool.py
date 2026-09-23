@@ -3,7 +3,7 @@
 parameters sent to the bridge, the text rendering (summary, neighbours, cuts, skipped,
 sparklines, full detail) and the pure-Python waveform PNG. Runs without the mcp package
 through the shared fake loader, so the image is checked by decoding the PNG bytes, not by
-the SDK. The fixtures mirror the shapes Sources/SpliceKitAudioLevels.m emits."""
+the SDK. The fixtures mirror the shapes Sources/Audio/SpliceKitAudioLevels.m emits."""
 import json
 import struct
 import sys
@@ -13,51 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module  # noqa: E402
-
-
-def _clip(handle, name, start, end, lane=0, connected=False, n=40, tail_silent=False, clipped=False,
-          role=None, retimed="unknown"):
-    rms = [-20.0 + (i % 5) for i in range(n)]
-    peak = [v + 8.0 for v in rms]
-    if tail_silent:
-        rms[-6:] = [-80.0] * 6
-        peak[-6:] = [-70.0] * 6
-    if clipped:
-        peak[3] = 0.0
-    slice_s = (end - start) / n
-    out = {
-        "handle": handle, "name": name, "class": "FFAnchoredMediaComponent", "connected": connected,
-        "lane": lane, "index": 0, "kind": "video clip", "startSeconds": start, "endSeconds": end,
-        "durationSeconds": end - start, "retimed": retimed,
-        "source": {"path": f"/Volumes/Media/{name}.mov", "fileName": f"{name}.mov", "representation": "original",
-                   "fileStart": 3.0, "fileEnd": 3.0 + (end - start), "sourceStart": 3603.0, "mediaOrigin": 3600.0},
-        "analysisRange": {"startSeconds": start, "endSeconds": end},
-        "audio": {"sampleRate": 48000, "channels": 2, "channelsMode": "pooled", "audioTrackCount": 1,
-                  "tracksDecoded": 1, "videoFrameRate": 24.0, "fileDuration": 120.0, "sliceSeconds": slice_s,
-                  "sliceCount": n},
-        "stats": {"maxPeakDb": max(peak), "maxPeakAtSeconds": start + 0.5, "meanRmsDb": -18.5,
-                  "clippedSlices": 1 if clipped else 0, "silentSlices": 6 if tail_silent else 0,
-                  "allSilent": False, "headSilenceSeconds": 0.0,
-                  "tailSilenceSeconds": round(6 * slice_s, 3) if tail_silent else 0.0,
-                  "headRmsDb": -20.0, "headPeakDb": -12.0,
-                  "tailRmsDb": -80.0 if tail_silent else -19.0, "tailPeakDb": -70.0 if tail_silent else -11.0,
-                  "edgeSeconds": 0.1},
-    }
-    if role:
-        out["role"] = role          # neighbours carry no slices (summary only)
-    else:
-        out["slices"] = {"startSeconds": start, "sliceSeconds": slice_s, "count": n, "peakDb": peak, "rmsDb": rms,
-                         "clippedSliceIndices": [3] if clipped else []}
-    return out
-
-
-def _cut():
-    return {"atSeconds": 2.0,
-            "outgoing": {"handle": "obj_1", "name": "Interview A", "tailRmsDb": -80.0, "tailPeakDb": -70.0,
-                         "tailSilenceSeconds": 0.3},
-            "incoming": {"handle": "obj_2", "name": "B-roll", "headRmsDb": -20.0, "headPeakDb": -12.0,
-                         "headSilenceSeconds": 0.0},
-            "jumpDb": 60.0, "outgoingEndsInSilence": True, "incomingStartsInSilence": False}
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
+from support.payloads import audio_levels_clip, audio_levels_cut  # noqa: E402
 
 
 def _response(**overrides):
@@ -67,14 +24,14 @@ def _response(**overrides):
         "timeline": {"frameRate": 24.0, "durationSeconds": 6.0},
         "clipCount": 5, "analyzedCount": 3, "neighborCount": 0, "outsideRangeCount": 0,
         "clips": [
-            _clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
-            _clip("obj_2", "B-roll", 2.0, 4.0, clipped=True),
-            _clip("obj_3", "Music", 0.5, 3.5, lane=-1, connected=True),
+            audio_levels_clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
+            audio_levels_clip("obj_2", "B-roll", 2.0, 4.0, clipped=True),
+            audio_levels_clip("obj_3", "Music", 0.5, 3.5, lane=-1, connected=True),
             {"handle": "obj_5", "name": "Nested", "class": "FFAnchoredCollection", "connected": False, "lane": 0,
              "startSeconds": 4.0, "endSeconds": 6.0, "durationSeconds": 2.0, "kind": "compound clip",
              "skipped": "compound clip: no single source media file (open it to analyse the clips inside)"},
         ],
-        "cuts": [_cut()],
+        "cuts": [audio_levels_cut()],
         "skipped": [{"handle": "obj_4", "name": "Title", "reason": "no audio"},
                     {"handle": "obj_9", "name": "Cross Dissolve", "reason": "transition (no source media of its own)"}],
         "elapsedSeconds": 0.4,
@@ -118,27 +75,15 @@ ROW_H, GUTTER, TOP = 88, 4, 14
 RMS_COL, PEAK_COL, RED, WHITE, BASELINE, ROW_BG = (142, 197, 255), (74, 127, 181), (255, 69, 58), (255, 255, 255), (70, 70, 74), (36, 36, 38)
 
 
-class GetAudioLevelsTests(unittest.TestCase):
+class GetAudioLevelsTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
         cls.tools = {tool["name"]: tool for tool in cls.module.mcp.tools}
 
     def setUp(self):
-        self.calls = []
         self.response = _response()
-        m = self.module
-        self._original = m.bridge.call
-
-        def fake_call(method, params_dict=None, timeout=None, **params):
-            merged = dict(params_dict or {})
-            merged.update(params)
-            self.calls.append((method, merged, timeout))
-            return self.response
-        m.bridge.call = fake_call
-
-    def tearDown(self):
-        self.module.bridge.call = self._original
+        self.calls = self._install_bridge(lambda method, params: self.response, separate_timeout=True)
 
     def _run(self, **kwargs):
         return self.tools["get_audio_levels"]["func"](**kwargs)
@@ -249,8 +194,8 @@ class GetAudioLevelsTests(unittest.TestCase):
         self.assertIn("SpliceKit's bookkeeping, not FCP terms", text)
 
     def test_neighbour_rendering_for_a_single_handle(self):
-        self.response = _response(clips=[_clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
-                                         _clip("obj_2", "B-roll", 2.0, 4.0, role="neighbor")],
+        self.response = _response(clips=[audio_levels_clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
+                                         audio_levels_clip("obj_2", "B-roll", 2.0, 4.0, role="neighbor")],
                                   clipCount=2, analyzedCount=2, neighborCount=1, skipped=[])
         text = self._run(handle="obj_1", include_image=False)
         self.assertIn("analyzed: 2 (including 1 neighbour of the requested clip, summary only)", text)
@@ -307,7 +252,7 @@ class GetAudioLevelsTests(unittest.TestCase):
     def test_errors_are_counted_separately_and_retimed_true_prints_the_note_once(self):
         bad = {"handle": "obj_7", "name": "Broken", "connected": False, "lane": 0, "startSeconds": 6.0,
                "endSeconds": 8.0, "durationSeconds": 2.0, "error": "audio-levels did not finish within 90 s"}
-        retimed = _clip("obj_8", "Slow", 8.0, 10.0, retimed=True)
+        retimed = audio_levels_clip("obj_8", "Slow", 8.0, 10.0, retimed=True)
         retimed["note"] = "retimed clip: the levels are mapped assuming normal speed (100%)"
         self.response = _response(clips=[bad, retimed], cuts=[], skipped=[], clipCount=2, analyzedCount=1)
         text = self._run(include_image=False)
@@ -338,7 +283,7 @@ class GetAudioLevelsTests(unittest.TestCase):
         self.assertIn('4.000s  "B" -> "C": 0.500 s between these clips: not a straight cut', text)
 
     def test_range_header_and_partial_analysis_note(self):
-        clip = _clip("obj_1", "Interview A", 0.0, 2.0)
+        clip = audio_levels_clip("obj_1", "Interview A", 0.0, 2.0)
         clip["analysisRange"] = {"startSeconds": 0.5, "endSeconds": 2.0}
         self.response = _response(clips=[clip], cuts=[], skipped=[], analyzedCount=1, clipCount=1,
                                   timeline={"frameRate": 24.0, "durationSeconds": 4.0,
@@ -355,9 +300,9 @@ class GetAudioLevelsTests(unittest.TestCase):
             {"clips": None}, {},
             {"clips": [None, "x", {"handle": "h", "slices": None, "stats": None, "audio": {"sliceSeconds": "x"}}],
              "skipped": [None], "sliceSeconds": "0.05", "edgeSeconds": "0.1", "timeline": {"frameRate": "24"}},
-            _response(clips=[dict(_clip("a", "A", 0.0, 1.0), slices={"startSeconds": None, "peakDb": [None, "x", 1.0],
+            _response(clips=[dict(audio_levels_clip("a", "A", 0.0, 1.0), slices={"startSeconds": None, "peakDb": [None, "x", 1.0],
                                                                    "rmsDb": [float("nan"), -20.0]})]),
-            _response(clips=[_clip("a", "A", 0.0, 1.0), {"analysisRange": {"startSeconds": None}, "slices": {}, "stats": {}}]),
+            _response(clips=[audio_levels_clip("a", "A", 0.0, 1.0), {"analysisRange": {"startSeconds": None}, "slices": {}, "stats": {}}]),
         ]
         for r in hostile:
             with self.subTest(r=str(r)[:60]):

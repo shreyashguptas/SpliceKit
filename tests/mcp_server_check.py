@@ -20,6 +20,10 @@ Modes
 Options
   --python PATH   interpreter that runs the server (default: the one running this script)
   --json PATH     also write a machine-readable report
+  --snapshot PATH offline only: write the server's whole surface as JSON -- every tool's
+                  schema, annotations and description, every resource and prompt, and for
+                  each tool call the JSON-RPC requests it sent and the text it answered.
+                  Two snapshots that compare equal mean the server behaves the same.
   --timeout S     per-request timeout in seconds (default 60)
   --wait S        --live only: how long to keep retrying bridge_status while Final Cut
                   Pro finishes launching (default 90)
@@ -68,15 +72,15 @@ if not hasattr(mcp, "Client"):
         "the check needs the 2.x SDK (mcp>=2,<3). Run: make mcp-setup"
     )
 
-# Realistic response shapes shared with the offline unit tests, when available.
-try:
-    from test_timeline_reads import _detailed_state, _markers_response
-except Exception:  # pragma: no cover
-    _detailed_state = _markers_response = None
-try:
-    from test_clip_info_tools import _capture_clip_frame_response, _clip_info_response
-except Exception:  # pragma: no cover
-    _clip_info_response = _capture_clip_frame_response = None
+# Realistic response shapes, shared with the offline unit tests (tests/support/payloads.py).
+from support.payloads import (  # noqa: E402
+    audio_levels_clip,
+    audio_levels_cut,
+    capture_clip_frame_response,
+    clip_info_response,
+    detailed_state,
+    markers_response,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,39 +108,7 @@ def _audio_levels_response(p: dict) -> dict:
     resolution, the cut between the two spine clips, and a title skipped before resolution
     (no audio), as the ObjC handler does it. A single handle brings its spine neighbour
     along (role "neighbor", summary only)."""
-    def clip(handle, name, start, end, lane=0, connected=False, tail_silent=False, clipped=False, role=None):
-        n = 40
-        rms = [-20.0 + (i % 5) for i in range(n)]
-        peak = [v + 8.0 for v in rms]
-        if tail_silent:
-            rms[-6:] = [-80.0] * 6
-            peak[-6:] = [-70.0] * 6
-        if clipped:
-            peak[3] = 0.0
-        slice_s = (end - start) / n
-        out = {"handle": handle, "name": name, "class": "FFAnchoredMediaComponent", "connected": connected,
-               "lane": lane, "index": 0, "kind": "video clip", "startSeconds": start, "endSeconds": end,
-               "durationSeconds": end - start, "retimed": "unknown",
-               "source": {"path": f"/Volumes/Media/{name}.mov", "fileName": f"{name}.mov",
-                          "representation": "original", "fileStart": 3.0, "fileEnd": 3.0 + (end - start),
-                          "sourceStart": 3603.0, "mediaOrigin": 3600.0},
-               "analysisRange": {"startSeconds": start, "endSeconds": end},
-               "audio": {"sampleRate": 48000, "channels": 2, "channelsMode": "pooled", "audioTrackCount": 1,
-                         "tracksDecoded": 1, "videoFrameRate": 24.0, "fileDuration": 120.0,
-                         "sliceSeconds": slice_s, "sliceCount": n},
-               "stats": {"maxPeakDb": max(peak), "maxPeakAtSeconds": start + 0.5, "meanRmsDb": -18.5,
-                         "clippedSlices": 1 if clipped else 0, "silentSlices": 6 if tail_silent else 0,
-                         "allSilent": False, "headSilenceSeconds": 0.0,
-                         "tailSilenceSeconds": 0.3 if tail_silent else 0.0,
-                         "headRmsDb": -20.0, "headPeakDb": -12.0,
-                         "tailRmsDb": -80.0 if tail_silent else -19.0,
-                         "tailPeakDb": -70.0 if tail_silent else -11.0, "edgeSeconds": 0.1}}
-        if role:
-            out["role"] = role
-        else:
-            out["slices"] = {"startSeconds": start, "sliceSeconds": slice_s, "count": n, "peakDb": peak,
-                             "rmsDb": rms, "clippedSliceIndices": [3] if clipped else []}
-        return out
+    clip = audio_levels_clip
     if p.get("handle"):
         clips = [clip("obj_1", "Interview A", 0.0, 2.0, tail_silent=True),
                  clip("obj_2", "B-roll", 2.0, 4.0, role="neighbor")]
@@ -155,11 +127,7 @@ def _audio_levels_response(p: dict) -> dict:
             "timeline": {"frameRate": 24.0, "durationSeconds": 6.0},
             "clipCount": len(clips) + 1, "analyzedCount": sum(1 for c in clips if c.get("stats")),
             "neighborCount": neighbours, "outsideRangeCount": 0, "clips": clips,
-            "cuts": [{"atSeconds": 2.0, "outgoing": {"handle": "obj_1", "name": "Interview A", "tailRmsDb": -80.0,
-                                                     "tailPeakDb": -70.0, "tailSilenceSeconds": 0.3},
-                      "incoming": {"handle": "obj_2", "name": "B-roll", "headRmsDb": -20.0, "headPeakDb": -12.0,
-                                   "headSilenceSeconds": 0.0},
-                      "jumpDb": 60.0, "outgoingEndsInSilence": True, "incomingStartsInSilence": False}],
+            "cuts": [audio_levels_cut()],
             "skipped": [{"handle": "obj_4", "name": "Title", "reason": "no audio"},
                         {"handle": "obj_9", "name": "Cross Dissolve", "reason": "transition (no source media of its own)"}],
             "elapsedSeconds": 0.4}
@@ -220,22 +188,22 @@ class FakeBridge(threading.Thread):
         if method == "system.version":
             return {"splicekit": "check", "version": "check", "fcp": "12.3", "fcpVersion": "12.3",
                     "build": "check", "pid": os.getpid()}
-        if method == "timeline.getDetailedState" and _detailed_state:
-            return _detailed_state()
-        if method == "timeline.getMarkers" and _markers_response:
-            return _markers_response(p.get("kind"))
+        if method == "timeline.getDetailedState":
+            return detailed_state()
+        if method == "timeline.getMarkers":
+            return markers_response(p.get("kind"))
         if method == "timeline.getAudioLevels":
             return _audio_levels_response(p)
-        if method == "timeline.getClipInfo" and _clip_info_response:
-            r = _clip_info_response({"handle": p.get("handle", "obj_1"), **p})
+        if method == "timeline.getClipInfo":
+            r = clip_info_response({"handle": p.get("handle", "obj_1"), **p})
             if p.get("includeFrame", True) and isinstance(r, dict):
                 r.setdefault("frame", {})
                 if isinstance(r["frame"], dict):
                     r["frame"].update({"jpegBase64": base64.b64encode(TINY_JPEG).decode(),
                                        "width": 1, "height": 1, "sourceTime": 1.0})
             return r
-        if method == "timeline.captureClipFrame" and _capture_clip_frame_response:
-            r = _capture_clip_frame_response({"handle": p.get("handle", "obj_1"), **p})
+        if method == "timeline.captureClipFrame":
+            r = capture_clip_frame_response({"handle": p.get("handle", "obj_1"), **p})
             if isinstance(r, dict):
                 r.setdefault("capture", {})
                 if isinstance(r["capture"], dict):
@@ -272,8 +240,12 @@ class FakeBridge(threading.Thread):
                     "progress": {"completed": 1, "total": 1}, "results": [], "matches": [],
                     "deleted": 0, "moved": 0}
         if method.startswith("captions."):
-            return {"status": "complete", "state": "complete", "segments": [], "words": [], "styles": [],
-                    "presets": [], "count": 0, "progress": 1.0, "titles": [], "verified": 0}
+            r = {"status": "complete", "state": "complete", "segments": [], "words": [], "styles": [],
+                 "presets": [], "count": 0, "progress": 1.0, "titles": [], "verified": 0}
+            if method == "captions.getState":
+                # generate_captions waits for the run's outcome here.
+                r["lastGenerateResult"] = {"status": "ok", "captionCount": 0}
+            return r
         if method.startswith("debug."):
             return {"status": "ok", "config": {}, "threads": [], "log": [], "entries": [], "count": 0,
                     "result": None, "images": [], "symbols": [], "sections": {}, "classes": {}, "notifications": []}
@@ -546,15 +518,11 @@ def first_text(result) -> str:
 
 
 def expected_version() -> str:
-    """SPLICEKIT_VERSION from patcher/SpliceKit/Configuration/Version.xcconfig, or ""."""
+    """The version in the repo's VERSION file, or ""."""
     try:
-        for line in (REPO / "patcher" / "SpliceKit" / "Configuration" / "Version.xcconfig").read_text().splitlines():
-            key, sep, value = line.partition("=")
-            if sep and key.strip() == "SPLICEKIT_VERSION":
-                return value.strip()
+        return (REPO / "VERSION").read_text().strip()
     except OSError:
-        pass
-    return ""
+        return ""
 
 
 async def handshake(params, mode: str, report: Report, timeout: float):
@@ -587,7 +555,26 @@ async def run_offline(args, report: Report):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _dump(obj):
+    """A pydantic model (or anything else) as plain JSON data."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json", exclude_none=True)
+    return obj
+
+
+def _scrub(value, workdir: Path, port: int):
+    """Replace what differs between runs (the temp dir, the fake bridge's port and pid,
+    wall-clock timestamps)."""
+    import re
+    text = json.dumps(value, sort_keys=True)
+    text = re.sub(r'(\\"(?:pid|timestamp)\\": )[0-9.]+', r"\1<n>", text)
+    text = text.replace(str(workdir), "<workdir>").replace(str(workdir.resolve()), "<workdir>")
+    text = text.replace(f":{port}", ":<port>")
+    return json.loads(text)
+
+
 async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"):
+    snapshot = {"tools": {}, "resources": {}, "prompts": {}} if args.snapshot else None
     env = {**os.environ, "SPLICEKIT_HOST": "127.0.0.1", "SPLICEKIT_PORT": str(bridge.port), "PYTHONUNBUFFERED": "1"}
     params = StdioServerParameters(command=args.python, args=[str(SERVER)], env=env)
     print(f"server: {args.python} {SERVER}")
@@ -617,6 +604,9 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
         resources = (await cl.list_resources()).resources
         prompts = (await cl.list_prompts()).prompts
         names = [t.name for t in tools]
+        if snapshot is not None:
+            snapshot["instructions"] = cl.instructions
+            snapshot["tool_order"] = names
         dupes = sorted({n for n in names if names.count(n) > 1})
         report.add("listing", "tools", len(tools) >= 200 and not dupes,
                    f"{len(tools)} tools" + (f"; duplicates: {dupes}" if dupes else ""))
@@ -659,6 +649,15 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
                 continue
             reached_bridge = len(bridge.calls) > calls_before
             kinds = [b.type for b in r.content]
+            if snapshot is not None:
+                snapshot["tools"][t.name] = {
+                    "definition": _dump(t),
+                    "args": call_args,
+                    "calls": [[m, p] for m, p in bridge.calls[calls_before:]],
+                    "is_error": r.is_error,
+                    "content_types": kinds,
+                    "text": full_text(r),
+                }
             detail = first_text(r)
             ok = not r.is_error
             if t.output_schema is not None and ok:
@@ -686,6 +685,8 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             try:
                 rr = await cl.read_resource(str(res.uri))
                 contents = getattr(rr, "contents", [])
+                if snapshot is not None:
+                    snapshot["resources"][str(res.uri)] = {"definition": _dump(res), "contents": _dump(rr)}
                 ok = bool(contents) and all(getattr(c, "text", None) or getattr(c, "blob", None) for c in contents)
                 detail = f"{len(contents)} content block(s)"
             except Exception as exc:  # noqa: BLE001
@@ -698,6 +699,8 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             try:
                 gp = await cl.get_prompt(pr.name, pargs)
                 msgs = getattr(gp, "messages", [])
+                if snapshot is not None:
+                    snapshot["prompts"][pr.name] = {"definition": _dump(pr), "result": _dump(gp)}
                 ok = bool(msgs)
                 detail = f"{len(msgs)} message(s)"
             except Exception as exc:  # noqa: BLE001
@@ -705,6 +708,10 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             report.add("prompt", pr.name, ok, detail, time.time() - t0)
 
     report.add("bridge", "traffic", len(bridge.calls) > 0, f"{len(bridge.calls)} JSON-RPC calls reached the fake bridge")
+
+    if snapshot is not None:
+        Path(args.snapshot).write_text(json.dumps(_scrub(snapshot, workdir, bridge.port), indent=1, sort_keys=True) + "\n")
+        print(f"snapshot: {args.snapshot}")
 
 
 def _not_ready(text: str) -> bool:
@@ -792,6 +799,7 @@ def main(argv=None) -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--json")
+    ap.add_argument("--snapshot")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--wait", type=float, default=90.0)
     ap.add_argument("-v", "--verbose", action="store_true")

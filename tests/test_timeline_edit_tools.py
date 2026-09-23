@@ -12,67 +12,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module  # noqa: E402
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
+from support.payloads import select_response, trim_response  # noqa: E402
 
 
-def _cmtime(seconds, timescale=600):
-    return {"value": int(round(seconds * timescale)), "timescale": timescale, "seconds": seconds}
-
-
-def _select_response(params, **overrides):
-    handles = params.get("handles", [])
-    selected = [
-        {"handle": h, "name": f"Clip {h}", "class": "FFAnchoredMediaComponent", "lane": 0,
-         "startTime": _cmtime(6.0), "endTime": _cmtime(12.0)}
-        for h in handles
-    ]
-    out = {
-        "status": "ok", "mode": params.get("mode", "replace"),
-        "requestedCount": len(handles), "resolvedCount": len(handles),
-        "unresolved": [], "rejected": [], "selected": selected,
-        "selectedCount": len(selected), "matchesRequest": True, "selector": "setSelectedItems:",
-    }
-    out.update(overrides)
-    return out
-
-
-def _trim_response(params, dry_run=False):
-    before = {"start": 6.0, "end": 12.0, "duration": 6.0}
-    delta = params.get("deltaSeconds", -0.5)
-    if dry_run:
-        return {"dryRun": True, "handle": params["handle"], "name": "Interview B",
-                "edge": params["edge"], "requestedDelta": delta, "deltaSeconds": delta,
-                "deltaFrames": -12, "before": before,
-                "projected": {"start": 6.0, "end": 12.0 + delta, "duration": 6.0 + delta},
-                "frameSeconds": 1 / 24, "trimCommand": "ripple"}
-    return {"status": "ok", "handle": params["handle"], "name": "Interview B",
-            "edge": params["edge"], "requestedDelta": delta, "deltaSeconds": delta,
-            "before": before, "after": {"start": 6.0, "end": 12.0 + delta, "duration": 6.0 + delta},
-            "appliedDelta": delta, "returnedOK": True, "trimCommand": "ripple"}
-
-
-class TimelineEditToolTests(unittest.TestCase):
+class TimelineEditToolTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
         cls.tools = {tool["name"]: tool for tool in cls.module.mcp.tools}
         cls.resources = {res["uri"]: res for res in cls.module.mcp.resources}
 
-    def _install_bridge(self, responder):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
-            return responder(method, params)
-
-        self.module.bridge.call = fake_call
-        return calls
-
     # ── select_clips ──────────────────────────────────────────────────────
 
     def test_select_clips_accepts_list_json_and_comma_strings(self):
-        calls = self._install_bridge(lambda m, p: _select_response(p))
+        calls = self._install_bridge(lambda m, p: select_response(p))
 
         out_list = self.module.select_clips(["obj_1", "obj_2"])
         out_json = self.module.select_clips('["obj_1", "obj_2"]', mode="add")
@@ -95,20 +49,20 @@ class TimelineEditToolTests(unittest.TestCase):
         self.assertIn("12.00s", row)
 
     def test_select_clips_rejects_bad_mode_without_calling_bridge(self):
-        calls = self._install_bridge(lambda m, p: _select_response(p))
+        calls = self._install_bridge(lambda m, p: select_response(p))
         out = self.module.select_clips(["obj_1"], mode="toggle")
         self.assertTrue(out.startswith("Error:"), out)
         self.assertIn("mode", out)
         self.assertEqual(calls, [])
 
     def test_select_clips_rejects_bad_json_without_calling_bridge(self):
-        calls = self._install_bridge(lambda m, p: _select_response(p))
+        calls = self._install_bridge(lambda m, p: select_response(p))
         out = self.module.select_clips('["obj_1"')
         self.assertTrue(out.startswith("Error:"), out)
         self.assertEqual(calls, [])
 
     def test_select_clips_empty_handles_forwards_empty_list(self):
-        calls = self._install_bridge(lambda m, p: _select_response(p))
+        calls = self._install_bridge(lambda m, p: select_response(p))
         out_default = self.module.select_clips()
         out_empty_str = self.module.select_clips("")
         out_empty_list = self.module.select_clips([])
@@ -122,7 +76,7 @@ class TimelineEditToolTests(unittest.TestCase):
 
     def test_select_clips_renders_unresolved_rejected_and_mismatch(self):
         def responder(method, params):
-            return _select_response(
+            return select_response(
                 {"handles": ["obj_1"], "mode": "replace"},
                 requestedCount=3, resolvedCount=1,
                 unresolved=["obj_99"],
@@ -194,7 +148,7 @@ class TimelineEditToolTests(unittest.TestCase):
     # ── trim_clip ─────────────────────────────────────────────────────────
 
     def test_trim_clip_validates_edge_and_delta_exclusivity_without_calling_bridge(self):
-        calls = self._install_bridge(lambda m, p: _trim_response(p))
+        calls = self._install_bridge(lambda m, p: trim_response(p))
 
         out_edge = self.module.trim_clip("obj_2", edge="middle", delta_seconds=-0.5)
         out_none = self.module.trim_clip("obj_2", edge="end")
@@ -211,7 +165,7 @@ class TimelineEditToolTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_trim_clip_forwards_camel_case_params_and_dry_run(self):
-        calls = self._install_bridge(lambda m, p: _trim_response(p, dry_run=p.get("dryRun")))
+        calls = self._install_bridge(lambda m, p: trim_response(p, dry_run=p.get("dryRun")))
 
         out_dry = self.module.trim_clip("obj_2", edge="END", delta_seconds=-0.5, dry_run=True)
         out_to = self.module.trim_clip("obj_2", edge="start", to_seconds=7.0)
@@ -231,7 +185,7 @@ class TimelineEditToolTests(unittest.TestCase):
         self.assertIn("Nothing was changed", out_dry)
 
     def test_trim_clip_renders_before_after_and_applied_delta(self):
-        self._install_bridge(lambda m, p: _trim_response(p))
+        self._install_bridge(lambda m, p: trim_response(p))
         out = self.module.trim_clip("obj_2", edge="end", delta_seconds=-0.5)
         self.assertIn("Ripple trim OK -- end edit point of 'Interview B' (obj_2)", out)
         self.assertIn("requested: -0.500s, applied: -0.500s", out)
@@ -241,7 +195,7 @@ class TimelineEditToolTests(unittest.TestCase):
 
     def test_trim_clip_renders_failed_status_and_error(self):
         def responder(method, params):
-            r = _trim_response(params)
+            r = trim_response(params)
             r["status"] = "failed"
             r["after"] = dict(r["before"])
             r["appliedDelta"] = 0.0
@@ -306,6 +260,24 @@ class TimelineEditToolTests(unittest.TestCase):
         self.assertEqual(calls, [("timeline.getMarkers", {})])
         self.assertEqual(out["count"], 1)
         self.assertEqual(out["markers"][0]["handle"], "obj_20")
+
+    def test_batch_timeline_actions_undo_group_has_no_trailing_colon(self):
+        self._install_bridge(lambda method, params: {"status": "ok"})
+        out = self.module.batch_timeline_actions(
+            '[{"type":"timeline","action":"addMarker"}]'
+        )
+        self.assertIn("Executed 1 actions:\n", out)
+        self.assertIn("\nUndo group: Batch Actions\n", out)
+        self.assertNotIn("Batch Actions:", out)
+
+    def test_batch_timeline_actions_without_undo_group_still_introduces_results(self):
+        self._install_bridge(lambda method, params: {"status": "ok"})
+        out = self.module.batch_timeline_actions(
+            '[{"type":"playback","action":"goToStart"}]'
+        )
+        self.assertTrue(out.startswith("Executed 1 actions:\n"))
+        self.assertNotIn("Undo group", out)
+        self.assertIn("[0] playback.goToStart -> OK", out)
 
 
 if __name__ == "__main__":
