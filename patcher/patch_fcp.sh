@@ -31,7 +31,6 @@ DEFAULT_DEST="/Applications"
 DEST_DIR="${DEST_DIR:-$DEFAULT_DEST}"
 APP_NAME="$(basename "$SOURCE_APP")"
 BRIDGE_PORT=9876
-VERSION="2.0.0"
 
 # Colors
 RED='\033[0;31m'
@@ -54,7 +53,7 @@ step()  { echo -e "\n${CYAN}${BOLD}=== $* ===${NC}"; }
 usage() {
     cat << 'EOF'
 
-  SpliceKit Patcher v2.0.0
+  SpliceKit Patcher
 
   Creates a modded copy of Final Cut Pro with SpliceKit injected
   for direct programmatic control via JSON-RPC and MCP.
@@ -77,17 +76,18 @@ usage() {
     --help           Show this help
 
   Environment:
-    SPLICEKIT_SKIP_MCP_CONFIG=1  Skip step 7 (writing .mcp.json). `make install`
+    SPLICEKIT_SKIP_MCP_CONFIG=1  Skip step 6 (writing .mcp.json). `make install`
                                  sets this: it verifies the MCP server first and
                                  writes the configs itself afterwards.
 
   What it does:
     1. Copies Final Cut Pro to a writable location
-    2. Builds the SpliceKit dylib from source
-    3. Injects it into the FCP binary (LC_LOAD_DYLIB)
-    4. Re-signs everything with custom entitlements (no sandbox)
-    5. Patches CloudContent/ImagePlayground crash points
-    6. Sets up the MCP server config
+    2. Injects the SpliceKit framework into the FCP binary (LC_LOAD_DYLIB)
+    3. Retitles the copy (Info.plist and its localizations)
+    4. Runs `make deploy`: builds SpliceKit, its helpers and plugin bundles,
+       installs them and re-signs with patcher/entitlements.plist (no sandbox)
+    5. Sets the CloudContent defaults
+    6. Writes the MCP server config (.mcp.json)
 
   After patching:
     - Launch: the renamed copy in /Applications
@@ -201,7 +201,7 @@ echo -e "${BOLD}"
 cat << 'BANNER'
 
   ╔═══════════════════════════════════════════════╗
-  ║         SpliceKit Patcher v2.0.0              ║
+  ║              SpliceKit Patcher                ║
   ║  Direct programmatic control of Final Cut Pro ║
   ╚═══════════════════════════════════════════════╝
 
