@@ -114,6 +114,9 @@ NSDictionary *SpliceKit_getPluginMetadataSnapshot(void);
 // Built-in method metadata registry + bridge.describe / bridge.alive endpoints.
 void SpliceKit_installBridgeMetadata(void);
 NSDictionary *SpliceKit_builtinMetadataForMethod(NSString *method);
+// The parameters each built-in method reads. Generated from the handlers by
+// tools/gen_bridge_params.py into SpliceKitBridgeParams.m.
+NSDictionary<NSString *, NSString *> *SpliceKit_bridgeParamsForMethod(NSString *method);
 
 // Mirror every haptic FCP fires onto the JSON-RPC event channel so external
 // accessories (e.g. Logitech MX Master 4 mouse via the LogiPluginService
@@ -154,7 +157,6 @@ BOOL SpliceKit_asyncFdWantsEvent(int fd, NSString *eventType);
 // Starts the TCP listener on port 9876.
 // Called once from the app-launch notification handler.
 void SpliceKit_startControlServer(void);
-id SpliceKit_getActiveTimelineModule(void);
 
 // Push a JSON-RPC notification to every connected client.
 // Used for things like playhead-moved events.
@@ -313,11 +315,11 @@ NSDictionary *SpliceKit_dualTimelineFocus(NSDictionary *params);
 NSDictionary *SpliceKit_dualTimelineClose(NSDictionary *params);
 NSDictionary *SpliceKit_dualTimelineTogglePanel(NSDictionary *params);
 
-#pragma mark - Lua Scripting
+#pragma mark - OpenTimelineIO
 
-// Initialize the embedded Lua 5.4 VM and start the file watcher.
-// Called once from SpliceKit_appDidLaunch().
-void SpliceKitLua_initialize(void);
+// Convert an .otio file to FCPXML with the native converter (SpliceKit.m).
+// eventName names the FCPXML <event> that holds the project; nil or empty for the default.
+NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName);
 
 #pragma mark - LiveCam
 

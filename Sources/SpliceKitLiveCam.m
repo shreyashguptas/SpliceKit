@@ -1,5 +1,6 @@
 #import "SpliceKitLiveCam.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
@@ -13,8 +14,6 @@
 #import <objc/message.h>
 #import <mach/mach.h>
 #import <mach/mach_time.h>
-
-extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
 #if defined(__x86_64__)
 #define SPLICEKIT_LIVECAM_STRET_MSG objc_msgSend_stret

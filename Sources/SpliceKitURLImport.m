@@ -5,6 +5,7 @@
 
 #import "SpliceKitURLImport.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <sys/clonefile.h>
@@ -13,9 +14,6 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
-
-extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
-extern id SpliceKit_getActiveTimelineModule(void);
 
 #if defined(__x86_64__)
 #define SPLICEKIT_URLIMPORT_STRET_MSG objc_msgSend_stret

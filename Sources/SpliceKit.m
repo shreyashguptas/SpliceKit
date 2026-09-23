@@ -9,12 +9,15 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitPlugins.h"
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
+#import "SpliceKitMKV.h"
+#import "SpliceKitVP9.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -26,14 +29,6 @@
 #import <time.h>
 #import <setjmp.h>
 #import <pthread.h>
-
-extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
-extern void SpliceKit_installMixerSkimHooks(void);
-extern void SpliceKitURLImport_bootstrapAtLaunchPhase(NSString *phase);
-extern void SpliceKitVP9_Bootstrap(void);
 
 #pragma mark - Logging
 //
@@ -3283,7 +3278,6 @@ static void SpliceKit_appDidLaunch(void) {
     });
 
     SpliceKit_safeInstall("MKVBootstrap", ^{
-        extern void SpliceKitMKV_Bootstrap(void);
         SpliceKitMKV_Bootstrap();
     });
 
@@ -4135,7 +4129,6 @@ static void SpliceKit_init(void) {
             SpliceKit_logLoadedFrameworks();
             SpliceKitURLImport_bootstrapAtLaunchPhase(@"will-launch");
             SpliceKit_safeInstall("MKVWillLaunchHooks", ^{
-                extern void SpliceKitMKV_bootstrapAtLaunchPhase(NSString *phase);
                 SpliceKitMKV_bootstrapAtLaunchPhase(@"will-launch");
             });
         }];

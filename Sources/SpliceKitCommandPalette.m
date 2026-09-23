@@ -14,6 +14,7 @@
 
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitURLImport.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -24,12 +25,6 @@
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
-
-// These are defined in SpliceKitServer.m — we call them directly to avoid
-// going through the TCP socket when executing commands from within the process.
-extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
-extern NSDictionary *SpliceKit_handlePlayback(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
 #pragma mark - SpliceKitCommand
 
@@ -3152,21 +3147,16 @@ static NSString *FCPStripStopWords(NSString *query) {
         [self enterTransitionBrowseMode];
         result = @{@"action": action, @"status": @"ok"};
     } else if ([type isEqualToString:@"transition_apply"]) {
-        extern NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params);
         result = SpliceKit_handleTransitionsApply(@{@"effectID": action});
     } else if ([type isEqualToString:@"title_apply"] || [type isEqualToString:@"generator_apply"]) {
-        extern NSDictionary *SpliceKit_handleTitleInsert(NSDictionary *params);
         result = SpliceKit_handleTitleInsert(@{@"effectID": action});
     } else if ([type isEqualToString:@"effect_apply"]) {
-        extern NSDictionary *SpliceKit_handleEffectsApply(NSDictionary *params);
         result = SpliceKit_handleEffectsApply(@{@"effectID": action});
     } else if ([type isEqualToString:@"effect_apply_by_name"]) {
-        extern NSDictionary *SpliceKit_handleEffectsApply(NSDictionary *params);
         result = SpliceKit_handleEffectsApply(@{@"name": action});
     } else if ([type isEqualToString:@"subject_stabilize"]) {
         // Run on background thread — tracking takes time
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            extern NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params);
             NSDictionary *r = SpliceKit_handleSubjectStabilize(@{});
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (r[@"error"]) {
@@ -3186,8 +3176,6 @@ static NSString *FCPStripStopWords(NSString *query) {
     } else if ([type isEqualToString:@"spine_action"]) {
         // Spine manipulation actions (shuffle, reverse)
         if ([action isEqualToString:@"shuffle"]) {
-            extern NSDictionary *SpliceKit_handleSpineGetItems(NSDictionary *params);
-            extern NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params);
 
             NSDictionary *state = SpliceKit_handleSpineGetItems(@{});
             NSArray *items = state[@"items"];
@@ -3214,8 +3202,6 @@ static NSString *FCPStripStopWords(NSString *query) {
                 }
             }
         } else if ([action isEqualToString:@"reverse"]) {
-            extern NSDictionary *SpliceKit_handleSpineGetItems(NSDictionary *params);
-            extern NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params);
 
             NSDictionary *state = SpliceKit_handleSpineGetItems(@{});
             NSArray *items = state[@"items"];
@@ -3240,7 +3226,6 @@ static NSString *FCPStripStopWords(NSString *query) {
             result = @{@"error": [NSString stringWithFormat:@"Unknown spine action: %@", action]};
         }
     } else if ([type isEqualToString:@"batch_export"]) {
-        extern NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params);
         result = SpliceKit_handleBatchExport(@{@"scope": @"all"});
     } else if ([type isEqualToString:@"bridge_options"]) {
         [self showBridgeOptionsPanel];
@@ -3251,7 +3236,6 @@ static NSString *FCPStripStopWords(NSString *query) {
     } else if ([type isEqualToString:@"flexmusic"]) {
         // FlexMusic commands — dispatch to JSON-RPC handlers
         if ([action isEqualToString:@"listSongs"]) {
-            extern NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params);
             result = SpliceKit_handleFlexMusicListSongs(@{});
             // Log summary for palette feedback
             NSArray *songs = result[@"songs"];
@@ -3277,7 +3261,6 @@ static NSString *FCPStripStopWords(NSString *query) {
             SpliceKit_log(@"[Montage] auto requires songUID. Use via MCP: montage_auto(song_uid, event_name, style)");
             result = @{@"status": @"info", @"message": @"Use via MCP: montage_auto(song_uid, event_name, style, project_name). Run 'Browse FlexMusic Songs' first."};
         } else if ([action isEqualToString:@"analyzeClips"]) {
-            extern NSDictionary *SpliceKit_handleMontageAnalyze(NSDictionary *params);
             result = SpliceKit_handleMontageAnalyze(@{});
             NSArray *clips = result[@"clips"];
             if (clips) {
@@ -3856,7 +3839,6 @@ static NSString *FCPStripStopWords(NSString *query) {
             __block NSArray *items = nil;
             __block double fps = 24.0;
             SpliceKit_executeOnMainThread(^{
-                extern NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
                 NSDictionary *s = SpliceKit_handleTimelineGetDetailedState(@{@"limit": @500});
                 if (s[@"error"]) return;
                 items = s[@"items"];
@@ -3892,7 +3874,6 @@ static NSString *FCPStripStopWords(NSString *query) {
                 NSString *handle = item[@"handle"];
                 double trim = [item[@"trimmedOffset"][@"seconds"] doubleValue];
                 if (handle) {
-                    extern id SpliceKit_resolveHandle(NSString *handleId);
                     id obj = SpliceKit_resolveHandle(handle);
                     if (obj) {
                         @try {
@@ -4105,7 +4086,6 @@ static NSString *FCPStripStopWords(NSString *query) {
     NSPanel *hud = [self showProcessingHUD:@"Detecting scene changes..."];
 
     // Run on background
-    extern NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *r = SpliceKit_handleDetectSceneChanges(@{
             @"action": action,
@@ -4471,7 +4451,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     // Fetch transitions on background thread
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @try {
-            extern NSDictionary *SpliceKit_handleTransitionsList(NSDictionary *params);
             NSDictionary *r = SpliceKit_handleTransitionsList(@{});
             NSArray *transitions = r[@"transitions"];
 
@@ -4544,7 +4523,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @try {
-            extern NSDictionary *SpliceKit_handleEffectsListAvailable(NSDictionary *params);
             NSDictionary *r = SpliceKit_handleEffectsListAvailable(@{@"type": effectType});
             NSArray *effects = r[@"effects"];
 
@@ -4662,11 +4640,9 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
             NSDictionary *r;
             NSString *applyType;
             if ([effectType isEqualToString:@"transition"]) {
-                extern NSDictionary *SpliceKit_handleTransitionsList(NSDictionary *params);
                 r = SpliceKit_handleTransitionsList(@{@"filter": keyword});
                 applyType = @"transition_apply";
             } else {
-                extern NSDictionary *SpliceKit_handleEffectsListAvailable(NSDictionary *params);
                 r = SpliceKit_handleEffectsListAvailable(@{@"type": effectType, @"filter": keyword});
                 applyType = @"effect_apply";
             }
@@ -4747,7 +4723,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         if ([type isEqualToString:@"seek"]) {
             NSNumber *secs = action[@"seconds"];
             if (secs) {
-                extern NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params);
                 SpliceKit_handlePlaybackSeek(@{@"seconds": secs});
             }
             continue;
@@ -4770,7 +4745,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         if ([type isEqualToString:@"transition"]) {
             NSString *transitionName = action[@"name"];
             if (transitionName) {
-                extern NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params);
                 SpliceKit_handleTransitionsApply(@{@"name": transitionName});
                 SpliceKit_log(@"AI applied transition: %@", transitionName);
             }
@@ -4781,7 +4755,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         if ([type isEqualToString:@"menu"]) {
             NSArray *menuPath = action[@"path"];
             if ([menuPath isKindOfClass:[NSArray class]] && menuPath.count > 0) {
-                extern NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params);
                 NSDictionary *result = SpliceKit_handleMenuExecute(@{@"menuPath": menuPath});
                 SpliceKit_log(@"AI executed menu: %@ -> %@", [menuPath componentsJoinedByString:@" > "], result);
             }
@@ -4948,7 +4921,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
 
 - (NSDictionary *)getTimelineContext {
     // Fetch timeline state to give the LLM context about duration, fps, clip count
-    extern NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
     __block NSDictionary *state = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -7551,7 +7523,6 @@ static NSString * const kGemmaSystemPrompt =
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [self updateGemmaStatus:[NSString stringWithFormat:@"Executing %@ every %.0fs...", action, interval]];
 
-        extern NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
         __block double duration = 0;
         SpliceKit_executeOnMainThread(^{
             @try {

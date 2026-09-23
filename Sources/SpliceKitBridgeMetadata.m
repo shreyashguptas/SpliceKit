@@ -16,10 +16,6 @@
 #import <unistd.h>
 #import "SpliceKit.h"
 
-extern NSDictionary *SpliceKit_getPluginMetadataSnapshot(void);  // defined in SpliceKitServer.m
-// Generated from the handlers by tools/gen_bridge_params.py (SpliceKitBridgeParams.m).
-extern NSDictionary<NSString *, NSString *> *SpliceKit_bridgeParamsForMethod(NSString *method);
-
 // The entry bridge.describe returns for one method: its metadata plus `params`, the
 // keys its handler reads (with a description where one was written), so a caller
 // does not find out by trial and error that fcpxml.import wants `xml` or `path`.

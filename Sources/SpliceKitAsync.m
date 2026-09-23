@@ -25,8 +25,6 @@
 #import <pthread.h>
 #import "SpliceKit.h"
 
-void SpliceKit_broadcastEvent(NSDictionary *event);
-
 static dispatch_queue_t sAsyncQueue = NULL;
 static dispatch_queue_t sStateQueue = NULL;
 

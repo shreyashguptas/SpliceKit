@@ -13,6 +13,7 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitLogPanel.h"
 #import "SpliceKitTranscriptPanel.h"
 #import "SpliceKitCaptionPanel.h"
@@ -2800,8 +2801,6 @@ static void SpliceKit_internalEndEditGroupIfOpened(id sequence, id timeline, NSS
 NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
 static NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
 static void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
-extern NSString *SpliceKit_otioToFCPXML(NSString *otioPath);
-extern NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName);
 
 // Convert .otio file → FCPXML via the native ObjC converter.
 // This produces better FCPXML than the Python adapter (correct transitions,
@@ -32829,7 +32828,6 @@ static NSDictionary *SpliceKit_handleDebugEval(NSDictionary *params) {
 // SpliceKit_handleRequest checks here before returning "method not found".
 //
 
-typedef NSDictionary *(^SpliceKitMethodHandler)(NSDictionary *params);
 static NSMutableDictionary<NSString *, SpliceKitMethodHandler> *sPluginHandlers = nil;
 static NSMutableDictionary<NSString *, NSDictionary *> *sPluginMethodMeta = nil;
 static NSMutableDictionary<NSString *, NSDictionary *> *sPluginManifests = nil;

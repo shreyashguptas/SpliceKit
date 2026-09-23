@@ -9,27 +9,13 @@
 
 #import "SpliceKitLua.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
 
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
-
-// ============================================================================
-#pragma mark - Extern Declarations (handlers in SpliceKitServer.m)
-// ============================================================================
-
-// Non-static handlers we call directly for hot-path operations
-extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
-extern NSDictionary *SpliceKit_handlePlayback(NSDictionary *params);
-extern NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params);
-extern NSDictionary *SpliceKit_handlePlaybackGetPosition(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params);
-
-// The universal dispatcher — routes any method to its handler
-extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
 // ============================================================================
 #pragma mark - Globals

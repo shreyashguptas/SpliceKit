@@ -11,6 +11,7 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -139,9 +140,6 @@ static BOOL SB_hasStoryline(id sequence) {
 // Creates native FCP captions (FFAnchoredCaption) that appear in the
 // dedicated thin caption lane above the timeline. Uses FCPXML import
 // with <caption> elements, then copy/paste from temp project.
-
-// Forward-declare the FCPXML import handler from SpliceKitServer.m
-extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 
 // Forward-declare helpers we need from the caption panel patterns
 static id SB_findSequenceByPrefix(NSString *prefix) {

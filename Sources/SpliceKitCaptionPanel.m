@@ -15,6 +15,7 @@
 
 #import "SpliceKitCaptionPanel.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitTranscriptDiagnostics.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -47,8 +48,6 @@ NSNotificationName const SpliceKitCaptionDidGenerateNotification = @"SpliceKitCa
 @property (nonatomic, strong) NSTextField *statusLabel;
 @end
 
-extern id SpliceKit_getActiveTimelineModule(void);
-extern NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
 static id SpliceKitCaption_currentSequence(void);
 
 typedef struct {

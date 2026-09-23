@@ -14,12 +14,10 @@
 
 #import "SpliceKitPlugins.h"
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitPluginAPI.h"
 #import <dlfcn.h>
-
-// The universal dispatcher (defined in SpliceKitServer.m)
-extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
 // Current API version. Increment when adding new fields to SpliceKitPluginAPI.
 static const int kPluginAPIVersion = 1;

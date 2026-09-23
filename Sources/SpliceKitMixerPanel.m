@@ -10,22 +10,7 @@
 #import <float.h>
 #import <math.h>
 #import "SpliceKit.h"
-
-// Forward declarations from SpliceKitServer.m
-extern id SpliceKit_getActiveTimelineModule(void);
-extern id SpliceKit_getMasterAudioDest(void);
-extern id SpliceKit_storeHandle(id obj);
-extern id SpliceKit_resolveHandle(NSString *handle);
-extern double SpliceKit_channelValue(id channel);
-extern BOOL SpliceKit_setChannelValue(id channel, double value);
-extern BOOL SpliceKit_mixerSetStaticChannelValue(id channel, double value);
-extern BOOL SpliceKit_removeChannelKeyframes(id channel);
-extern BOOL SpliceKit_mixerWriteAutomationPoint(id clip, id channel, double value);
-extern NSDictionary *SpliceKit_handleEffectsListAvailable(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleMixerApplyBusEffect(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleMixerOpenBusEffect(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleMixerSetBusEffectEnabled(NSDictionary *params);
-extern NSDictionary *SpliceKit_handleMixerRemoveBusEffect(NSDictionary *params);
+#import "SpliceKitServerHandlers.h"
 
 // CMTime struct (matches FCP's internal layout)
 typedef struct { long long value; int timescale; unsigned int flags; long long epoch; } SKMixer_CMTime;
@@ -1160,7 +1145,6 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 }
 
 - (void)updateMixerState {
-    extern NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params);
     NSDictionary *result = SpliceKit_handleMixerGetState(@{});
     [self applyMixerState:result];
 }
@@ -1423,7 +1407,6 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     SpliceKitFaderView *target = self.faderViews[faderIndex];
     if (!target.state.isActive) return;
 
-    extern NSDictionary *SpliceKit_handleMixerSetSolo(NSDictionary *params);
     NSDictionary *result = SpliceKit_handleMixerSetSolo(@{
         @"index": @(faderIndex),
         @"mode": @"toggle"
@@ -1440,7 +1423,6 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     SpliceKitFaderView *target = self.faderViews[faderIndex];
     if (!target.state.isActive) return;
 
-    extern NSDictionary *SpliceKit_handleMixerSetMute(NSDictionary *params);
     NSDictionary *result = SpliceKit_handleMixerSetMute(@{
         @"index": @(faderIndex),
         @"mode": @"toggle"

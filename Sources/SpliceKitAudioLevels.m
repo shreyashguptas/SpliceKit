@@ -31,12 +31,11 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitServerHandlers.h"
 #import "SpliceKitAudioLevels.h"
 #import <objc/message.h>
 #import <math.h>
 #import <signal.h>
-
-extern NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
 
 static const double kSKALFloorDb = -100.0;
 
