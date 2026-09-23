@@ -33,30 +33,36 @@ def direct_timeline_action(action: str = "", selector: str = "",
                            interpolation: str = "",
                            time: float = -1,
                            store_result: bool = False) -> str:
-    """Call Flexo's parameterized action methods directly on FFAnchoredTimelineModule.
+    """Call Flexo's parameterized action methods directly, with real arguments.
 
     More powerful than timeline_action() because these accept real parameters
     (rates, durations, flags) instead of just dispatching through the responder chain.
+    Most act on the selected clips; the retime presets that need a time (hold, blade
+    speed) use the playhead. In Final Cut Pro 12.3 most of these ``action*`` methods live
+    on the sequence (FFAnchoredSequence), which is where they are sent; each is one undo
+    step, as when Final Cut Pro's own command runs it.
 
-    Many advertised actions call Flexo ``action*`` selectors that are not present on
-    Final Cut Pro 12.3 (only 17 ``action*`` methods exist on FFAnchoredTimelineModule
-    there). Unsupported ones return a clear error:
-    ``<action> is not supported on this Final Cut Pro build``, plus ``missingSelector``
-    and ``fcpVersion``. Verified working on FCP 12.3: insertGap, insertPlaceholder,
-    insertGapDirect, splitAtTime, nudgeAnchoredItems, nudgeSpineItems, insertFreezeFrame,
-    removeEdits, joinThroughEdits.
+    Not available in 12.3 through this tool (each returns an error naming the reason and
+    the tool to use instead): setAudioPlayEnable, invertEffectMasks, renameDirect,
+    deleteItemsInArray, moveClipsToTrash, addVariants, removeVariants, newProject,
+    newEvent, analyzeAndOptimize (their methods belong to browser, document or window
+    objects), and deleteMultiAngle, renameAngle, audioSyncMultiAngle (need a multicam
+    angle; not verified). An action whose method is missing entirely answers
+    ``<action> is not supported on this Final Cut Pro build`` with ``missingSelector``.
 
     Args:
         action: The action name. Available actions:
 
             Retiming/Speed:
               retimeSetRate (rate, ripple, allow_variable_speed)
-              retimeHoldPreset, retimeReverse, retimeBladeSpeedPreset
+              retimeHoldPreset (duration, default 2 s; at the playhead), retimeReverse,
+              retimeBladeSpeedPreset (at the playhead)
               retimeSpeedRamp (to_zero, from_zero)
               retimeInstantReplay (rate, allow_variable_speed, add_title)
               retimeJumpCut (frames_to_jump, allow_variable_speed)
               retimeRewind (speed, allow_variable_speed)
-              retimeSetInterpolation (interpolation)
+              retimeSetInterpolation (interpolation: floor, nearest, frameBlending,
+                opticalFlow, opticalFlowMedium, opticalFlowHigh, opticalFlowFRC)
               insertFreezeFrame
 
             Markers:
@@ -74,7 +80,7 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
             Trim/Edit:
               splitAtTime (time: seconds, or current playhead when omitted)
-              trimDuration (is_delta)
+              trimDuration (duration, is_delta)
               extendOverNextClip, joinThroughEdits (on_edges/on_left kept for
               compatibility but ignored — FCP 12.3 only has parameterless join)
               removeEdits (replace_with_gap), insertGapDirect
@@ -85,7 +91,8 @@ def direct_timeline_action(action: str = "", selector: str = "",
               deleteItemsInArray, moveClipsToTrash
 
             Keywords/Roles:
-              addKeywords (keywords: comma-separated), removeKeywords
+              addKeywords (keywords: comma-separated), removeKeywords: a keyword range
+                on the project over the selected clips' time range, not on the clips
 
             Effects:
               removeEffectByID (effect_id), invertEffectMasks, toggleEnabled
@@ -106,13 +113,16 @@ def direct_timeline_action(action: str = "", selector: str = "",
               newProject (name), newEvent (name), validateAndRepair
 
             Other:
-              autoReframeDirect, addTransitionsDirect
+              autoReframeDirect, addTransitionsDirect (effect_id; default is FCP's
+                default video transition)
               analyzeAndOptimize, resolveLaneConflicts, resolveLaneGaps
               nudgeAnchoredItems, nudgeSpineItems (frames for whole frames, amount for
               seconds; default one project frame when neither is set)
 
-        selector: Raw ObjC selector fallback when action is empty (e.g.
-            "actionValidateAndRepair:validateMode:error:"). Passed through to timeline.directAction.
+        selector: Raw ObjC selector fallback when action is empty, sent to
+            FFAnchoredTimelineModule with nil arguments. An ``action*`` selector that only the
+            sequence implements is refused (use the named action). Passed through to
+            timeline.directAction.
 
     Shared parameters (only sent when non-default; each action uses a subset):
 
@@ -125,7 +135,7 @@ def direct_timeline_action(action: str = "", selector: str = "",
             from_zero: Speed ramp from zero (retimeSpeedRamp).
             frames_to_jump: Frame count for retimeJumpCut (>0 to send).
             speed: Rewind speed for retimeRewind (non-zero to send).
-            interpolation: Interpolation mode string for retimeSetInterpolation.
+            interpolation: Video quality for retimeSetInterpolation (see the list above).
             add_title: For retimeInstantReplay, whether to add a title (default True; False to send).
 
         Markers (changeMarkerType, changeMarkerName, markMarkerCompleted, removeMarker):
@@ -138,21 +148,23 @@ def direct_timeline_action(action: str = "", selector: str = "",
             amount: Volume change in dB for changeAudioVolume (non-zero to send).
             relative: When False, set absolute volume instead of relative (default True).
             fade_in: When False, apply fade-out only for applyAudioFadesDirect (default True).
-            duration: Fade duration in seconds for applyAudioFadesDirect (non-zero to send).
+            duration: Seconds: fade length for applyAudioFadesDirect, hold length for
+                retimeHoldPreset, clip length (or change) for trimDuration (non-zero to send).
             enabled: When False, disable audio play or background music (default True).
 
         Trim / edit (splitAtTime, trimDuration, removeEdits, joinThroughEdits, nudge*, …):
             time: Timeline seconds for splitAtTime (>=0 to send; omit for playhead).
-            is_delta: For trimDuration, how `duration` is read. True (the default) treats
-                it as a change to add to the clip's current length; False treats it as the
-                length to set. Getting this backwards silently trims to the wrong place.
+            is_delta: For trimDuration, how `duration` is read. False (the default) sets the
+                clip's length to `duration`; True adds `duration` to the current length.
+                Getting this backwards silently trims to the wrong place.
             replace_with_gap: When True, removeEdits leaves a gap instead of ripple.
             on_edges / on_left: Ignored on FCP 12.3 for joinThroughEdits (reported in response).
             frames: Whole frames to nudge (nudgeAnchoredItems, nudgeSpineItems).
             amount: Seconds to nudge when frames is 0; also used by changeAudioVolume.
 
         Effects / keywords:
-            effect_id: Effect identifier for removeEffectByID.
+            effect_id: Effect identifier for removeEffectByID; video transition for
+                addTransitionsDirect.
             keywords: Comma-separated keyword strings for addKeywords / removeKeywords.
 
         Captions / multicam / variants:

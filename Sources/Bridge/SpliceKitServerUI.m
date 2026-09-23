@@ -288,41 +288,58 @@ NSDictionary *SpliceKit_handleViewToggle(NSDictionary *params) {
     NSString *panel = params[@"panel"];
     if (!panel) return @{@"error": @"panel parameter required"};
 
-    // Map panel names to selectors
+    // Panel name -> what FCP 12.3's View / Window menus send. A selector string goes
+    // through the responder chain; a menu path is used where the action reads its menu
+    // item (the Effects / Transitions browser toggles read the item's tag, and Angles / 360
+    // exist in both the Viewer and Event Viewer submenus with one selector), so the item
+    // itself is the sender, exactly as when the menu is chosen.
     NSDictionary *panelMap = @{
         @"inspector":       @"toggleInspector:",
         @"timeline":        @"toggleTimeline:",
-        @"browser":         @"toggleBrowser:",
+        @"browser":         @"toggleOrganizer:",                       // Window > Show in Workspace > Browser
         @"eventViewer":     @"toggleEventViewer:",
-        @"effectsBrowser":  @"toggleEffectsBrowser:",
-        @"transitionsBrowser": @"toggleTransitionsBrowser:",
+        @"effectsBrowser":  @[@"Window", @"Show in Workspace", @"Effects"],
+        @"transitionsBrowser": @[@"Window", @"Show in Workspace", @"Transitions"],
         @"videoScopes":     @"toggleVideoScopes:",
-        @"histogram":       @"toggleHistogram:",
-        @"vectorscope":     @"toggleVectorscope:",
-        @"waveform":        @"toggleWaveformMonitor:",
-        @"audioMeter":      @"toggleAudioMeters:",
+        @"histogram":       @"showHistogram:",                         // PEAppController; the scopes' own view menu
+        @"vectorscope":     @"showVectorscope:",
+        @"waveform":        @"showWaveform:",
+        @"audioMeter":      @"toggleAudioMeter:",                      // Window > Show in Workspace > Audio Meters
         @"keywordEditor":   @"toggleKeywordEditor:",
         @"timelineIndex":   @"toggleTimelineIndex:",
-        @"precisionEditor": @"showPrecisionEditor:",
+        @"precisionEditor": @"togglePrecisionEditor:",                 // View > Show Precision Editor
         @"retimeEditor":    @"toggleRetimeEditor:",
-        @"audioCurves":     @"toggleAudioCurves:",
         @"videoAnimation":  @"showTimelineCurveEditor:",
         @"audioAnimation":  @"showTimelineCurveEditor:",
-        @"multicamViewer":  @"toggleAngleViewer:",
-        @"360viewer":       @"toggle360Viewer:",
-        @"fullscreenViewer": @"toggleFullScreenViewer:",
+        @"multicamViewer":  @[@"View", @"Show in Viewer", @"Angles"],
+        @"360viewer":       @[@"View", @"Show in Viewer", @"360"],
+        @"fullscreenViewer": @"sendFullScreen:",                       // View > Playback > Play Full Screen
         @"backgroundTasks": @"goToBackgroundTaskList:",
         @"voiceover":       @"toggleVoiceoverRecordView:",
-        @"comparisonViewer": @"toggleComparisonViewer:",
+        @"comparisonViewer": @"toggleCompareViewer:",                  // Window > Show in Workspace > Comparison Viewer
+    };
+    // Names kept for compatibility that FCP 12.3 has no command for.
+    NSDictionary *unavailable = @{
+        @"audioCurves": @"there is no audio curves panel; use audioAnimation (Clip > Show Audio Animation)",
     };
 
-    NSString *selector = panelMap[panel];
-    if (!selector) {
-        return @{@"error": [NSString stringWithFormat:@"Unknown panel '%@'. Available: %@",
-                    panel, [[panelMap allKeys] componentsJoinedByString:@", "]]};
+    if (unavailable[panel]) {
+        return @{@"error": [NSString stringWithFormat:@"Panel '%@' is not available in this Final Cut Pro version: %@.",
+                            panel, unavailable[panel]]};
     }
-
-    return SpliceKit_sendAppAction(selector);
+    id target = panelMap[panel];
+    if (!target) {
+        NSArray *names = [[panelMap.allKeys arrayByAddingObjectsFromArray:unavailable.allKeys]
+                          sortedArrayUsingSelector:@selector(compare:)];
+        return @{@"error": [NSString stringWithFormat:@"Unknown panel '%@'. Available: %@",
+                    panel, [names componentsJoinedByString:@", "]]};
+    }
+    if ([target isKindOfClass:[NSArray class]]) {
+        NSMutableDictionary *r = [SpliceKit_handleMenuExecute(@{@"menuPath": target}) mutableCopy];
+        if (!r[@"error"]) r[@"panel"] = panel;
+        return r;
+    }
+    return SpliceKit_sendAppAction(target);
 }
 
 #pragma mark - Workspace Handler

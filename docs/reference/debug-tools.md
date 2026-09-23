@@ -916,8 +916,12 @@ timeline.directAction(action="retimeBladeSpeedPreset")
 # Reverse clip
 timeline.directAction(action="retimeReverse")
 
-# Set interpolation on retime segments
-timeline.directAction(action="retimeSetInterpolation", interpolation="optical")
+# Retime video quality on retimed clips: floor, nearest, frameBlending, opticalFlow,
+# opticalFlowMedium, opticalFlowHigh, opticalFlowFRC
+timeline.directAction(action="retimeSetInterpolation", interpolation="opticalFlowMedium")
+
+# Hold segment at the playhead (duration in seconds, default 2)
+timeline.directAction(action="retimeHoldPreset", duration=1.0)
 ```
 
 ### Markers
@@ -945,10 +949,7 @@ timeline.directAction(action="changeAudioVolume", amount=-6.0, relative=True)
 # Apply audio fades
 timeline.directAction(action="applyAudioFadesDirect", fadeIn=True, duration=0.5)
 
-# Enable/disable audio playback
-timeline.directAction(action="setAudioPlayEnable", enabled=False)
-
-# Mark as background music
+# Mark as background music (errors "made no change" for clips that cannot carry the flag)
 timeline.directAction(action="setBackgroundMusic", enabled=True)
 
 # Detach audio (direct API)
@@ -961,8 +962,8 @@ timeline.directAction(action="alignAudioToVideoDirect")
 ### Trim / Edit
 
 ```python
-# Trim to specific duration
-timeline.directAction(action="trimDuration", isDelta=False)
+# Set the selected clip's length to 5 s (isDelta=True adds duration instead)
+timeline.directAction(action="trimDuration", duration=5.0, isDelta=False)
 
 # Extend edit over next clip
 timeline.directAction(action="extendOverNextClip")
@@ -983,36 +984,24 @@ timeline.directAction(action="insertGapDirect")
 ### Clip Operations
 
 ```python
-# Break apart clip items
+# Break apart a compound clip, audition or storyline
 timeline.directAction(action="breakApartClipItems")
 
-# Create compound clip (or multicam)
+# Create a compound clip from the selection, no name sheet
 timeline.directAction(action="createCompoundClipDirect", multicam=False)
 
 # Lift from primary storyline
 timeline.directAction(action="liftAnchoredEdits")
-
-# Rename clip
-timeline.directAction(action="renameDirect", name="New Name")
-
-# Delete items
-timeline.directAction(action="deleteItemsInArray")
-
-# Move to trash
-timeline.directAction(action="moveClipsToTrash")
 ```
 
 ### Keywords / Roles
 
 ```python
-# Add keywords by name
+# Keyword range on the project over the selected clips' time range
 timeline.directAction(action="addKeywords", keywords=["Interview", "B-Roll"])
 
-# Remove keywords
+# Remove keywords over the same range
 timeline.directAction(action="removeKeywords", keywords=["B-Roll"])
-
-# Set role
-timeline.directAction(action="setRole")
 ```
 
 ### Effects / Masks
@@ -1021,32 +1010,14 @@ timeline.directAction(action="setRole")
 # Remove effect by ID
 timeline.directAction(action="removeEffectByID", effectID="HEFlowTransition")
 
-# Invert effect masks
-timeline.directAction(action="invertEffectMasks")
-
-# Toggle effect enabled
+# Enable / disable the selected clips (Clip > Enable / Disable)
 timeline.directAction(action="toggleEnabled")
 ```
 
-### Multicam / Angles
+### Audition
 
 ```python
-# Delete multicam angle
-timeline.directAction(action="deleteMultiAngle")
-
-# Rename angle
-timeline.directAction(action="renameAngle", name="Camera 2")
-
-# Audio sync multicam
-timeline.directAction(action="audioSyncMultiAngle")
-```
-
-### Audition / Variants
-
-```python
-timeline.directAction(action="addVariants")
-timeline.directAction(action="removeVariants")
-timeline.directAction(action="finalizeVariant")
+timeline.directAction(action="finalizeVariant")   # the selected audition
 ```
 
 ### Captions
@@ -1065,31 +1036,37 @@ timeline.directAction(action="alignClipsAtMusicMarkers", asSplit=True)
 ### Project / Library
 
 ```python
-timeline.directAction(action="newProject", name="My Project")
-timeline.directAction(action="newEvent", name="My Event")
-timeline.directAction(action="validateAndRepair")
+timeline.directAction(action="validateAndRepair")   # Verify and Repair Project, no sheet
 ```
 
 ### Other
 
 ```python
 timeline.directAction(action="autoReframeDirect")
-timeline.directAction(action="addTransitionsDirect")
-timeline.directAction(action="analyzeAndOptimize")
+timeline.directAction(action="addTransitionsDirect")   # effectID= for another transition
 timeline.directAction(action="resolveLaneConflicts")
 timeline.directAction(action="resolveLaneGaps")
 ```
+
+Not available through `timeline.directAction` in Final Cut Pro 12.3 (each answers with the
+reason and the tool to use instead): `setAudioPlayEnable`, `invertEffectMasks`,
+`renameDirect`, `deleteItemsInArray`, `moveClipsToTrash`, `addVariants`, `removeVariants`,
+`newProject`, `newEvent`, `analyzeAndOptimize` (their methods belong to browser, document
+or window objects) and `deleteMultiAngle`, `renameAngle`, `audioSyncMultiAngle` (need a
+multicam angle; not verified).
 
 ### Raw selector fallback
 
 For any action not covered by a friendly name, pass the raw ObjC selector:
 
 ```python
-timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
+timeline.directAction(selector="someTimelineModuleSelector:")
 ```
 
-The handler counts colons to determine argument count and passes nils. For full
-control over arguments, use `call_method` instead.
+The selector is sent to FFAnchoredTimelineModule; the handler counts colons to determine
+argument count and passes nils. An `action*` selector that only FFAnchoredSequence
+implements is refused with a message saying so (nil cannot stand in for its struct, BOOL
+and pointer arguments); use the named action or `call_method_with_args` instead.
 
 ## New Simple Actions (`timeline.action`)
 

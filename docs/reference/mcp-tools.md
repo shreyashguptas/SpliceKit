@@ -174,15 +174,15 @@ direct_timeline_action(action="setBackgroundMusic", enabled=True)
 ```
 direct_timeline_action(action="addKeywords", keywords='["Interview", "B-Roll"]')  # JSON string
 direct_timeline_action(action="removeEffectByID", effect_id="HEFlowTransition")
-direct_timeline_action(action="renameAngle", name="Camera 2")
-direct_timeline_action(action="newProject", name="My Project")
+direct_timeline_action(action="createCompoundClipDirect")                      # no name sheet
+direct_timeline_action(action="retimeHoldPreset", duration=1.0)                 # at the playhead
 direct_timeline_action(action="alignToMusicMarkers")
 direct_timeline_action(action="duplicateCaptions", language="es", format_="SRT")
 ```
 
 #### Raw selector fallback
 ```
-direct_timeline_action(selector="actionValidateAndRepair:validateMode:error:")
+direct_timeline_action(selector="someTimelineModuleSelector:")   # sent to FFAnchoredTimelineModule with nil arguments
 ```
 
 ---

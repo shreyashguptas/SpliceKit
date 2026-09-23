@@ -157,6 +157,8 @@ def toggle_panel(panel: str) -> str:
                audioCurves, videoAnimation, audioAnimation,
                multicamViewer, 360viewer, fullscreenViewer,
                backgroundTasks, voiceover, comparisonViewer
+               (audioCurves has no Final Cut Pro 12.3 equivalent and returns an error;
+               fullscreenViewer starts Play Full Screen)
     """
     return _call_or_error("view.toggle", panel=panel)
 

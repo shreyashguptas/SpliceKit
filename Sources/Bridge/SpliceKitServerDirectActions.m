@@ -253,6 +253,124 @@ static NSDictionary *SpliceKit_directActionResolveMarker(id timeline, id sequenc
     return nil;
 }
 
+// FCP 12.3 implements the parameterized action* methods below on FFAnchoredSequence,
+// not on FFAnchoredTimelineModule. Their argument shapes were read from how Final Cut
+// Pro's own commands call them (Modify > Retime, Trim > Extend Edit, Clip > Enable, ...):
+// the selected clips as an NSArray, clip-local (component) times from -clippedRange and
+// -containerToLocalTime:container:, and FigTimeRangeAndObject entries for rewind / jump cut.
+// Each action* method opens and closes its own undo step (actionEnd:save:error:).
+static NSDictionary *SpliceKit_directActionSequenceSelector(id sequence, SEL sel, NSString *action) {
+    if (!sequence) return @{@"error": @"No sequence in timeline."};
+    if ([sequence respondsToSelector:sel]) return nil;
+    return @{
+        @"error": [NSString stringWithFormat:@"%@ is not supported on this Final Cut Pro build", action],
+        @"missingSelector": NSStringFromSelector(sel),
+        @"receiver": @"FFAnchoredSequence",
+        @"fcpVersion": SpliceKit_fcpShortVersionString(),
+    };
+}
+
+// An action that FCP 12.3 has only on an object this handler does not drive (a browser
+// event, the library document, a view controller), or that needs content SpliceKit has
+// not verified it against. Kept as a name so callers get a reason instead of a guess.
+static NSDictionary *SpliceKit_directActionUnavailable(NSString *action, NSString *reason) {
+    return @{
+        @"error": [NSString stringWithFormat:@"%@ is not available through direct_timeline_action in this Final Cut Pro version: %@",
+                   action, reason],
+        @"fcpVersion": SpliceKit_fcpShortVersionString(),
+    };
+}
+
+static NSDictionary *SpliceKit_directActionResult(NSString *action, BOOL ok, NSError *error,
+                                                   NSDictionary *extra) {
+    if (!ok || error) {
+        NSString *msg = error.localizedDescription.length ? error.localizedDescription
+            : [NSString stringWithFormat:@"Final Cut Pro declined %@ for the current selection", action];
+        return @{@"error": msg};
+    }
+    NSMutableDictionary *out = [@{@"action": action, @"status": @"ok"} mutableCopy];
+    if (extra) [out addEntriesFromDictionary:extra];
+    return out;
+}
+
+// The clip's own time range (component time), as FCP passes it to the retime presets.
+static BOOL SpliceKit_directActionLocalRange(id clip, CMTimeRange *out) {
+    SEL sel = NSSelectorFromString(@"clippedRange");
+    if (!clip || ![clip respondsToSelector:sel]) return NO;
+    @try {
+        CMTimeRange r = ((CMTimeRange (*)(id, SEL))STRET_MSG)(clip, sel);
+        if (r.start.timescale <= 0 || r.duration.timescale <= 0) return NO;
+        *out = r;
+        return YES;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+// The playhead, snapped down to a frame boundary the way FCP's retime commands read it,
+// converted into the clip's component time. NO when the playhead is not over the clip.
+static BOOL SpliceKit_directActionLocalPlayhead(id timeline, id clip, id rootItem, CMTime *out) {
+    if (!timeline || !clip || !rootItem) return NO;
+    SEL convSel = NSSelectorFromString(@"containerToLocalTime:container:");
+    if (![clip respondsToSelector:convSel] || ![timeline respondsToSelector:@selector(playheadTime)]) return NO;
+    @try {
+        CMTime ph = ((CMTime (*)(id, SEL))STRET_MSG)(timeline, @selector(playheadTime));
+        CMTime fd = SpliceKit_directActionFrameDuration(timeline);
+        if (fd.value > 0 && fd.timescale > 0 && ph.timescale > 0) {
+            double frames = floor(((double)ph.value * fd.timescale) / ((double)ph.timescale * fd.value) + 1e-6);
+            ph = (CMTime){(int64_t)frames * fd.value, fd.timescale, kCMTimeFlags_Valid, 0};
+        }
+        CMTime local = ((CMTime (*)(id, SEL, CMTime, id))STRET_MSG)(clip, convSel, ph, rootItem);
+        CMTimeRange range;
+        if (!(local.flags & kCMTimeFlags_Valid)) return NO;
+        if (SpliceKit_directActionLocalRange(clip, &range)) {
+            double t = SpliceKit_secondsFromTime(local);
+            double s = SpliceKit_secondsFromTime(range.start);
+            double e = s + SpliceKit_secondsFromTime(range.duration);
+            if (t < s - 0.0005 || t > e + 0.0005) return NO;
+        }
+        *out = local;
+        return YES;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+// FigTimeRangeAndObject entries (clip + its component range), the argument FCP's own
+// Rewind and Jump Cut at Markers commands pass.
+static NSArray *SpliceKit_directActionRangesAndObjects(NSArray *items) {
+    Class cls = NSClassFromString(@"FigTimeRangeAndObject");
+    SEL make = NSSelectorFromString(@"rangeAndObjectWithRange:andObject:");
+    if (!cls || ![cls respondsToSelector:make]) return nil;
+    NSMutableArray *out = [NSMutableArray array];
+    for (id item in items) {
+        CMTimeRange range;
+        if (!SpliceKit_directActionLocalRange(item, &range)) continue;
+        id entry = ((id (*)(id, SEL, CMTimeRange, id))objc_msgSend)((id)cls, make, range, item);
+        if (entry) [out addObject:entry];
+    }
+    return out;
+}
+
+static CMTime SpliceKit_directActionFramesFromSeconds(double seconds, id timeline) {
+    CMTime fd = SpliceKit_directActionFrameDuration(timeline);
+    if (fd.value <= 0 || fd.timescale <= 0) return CMTimeMakeWithSeconds(seconds, 600);
+    double frames = llround(seconds * fd.timescale / (double)fd.value);
+    return (CMTime){(int64_t)frames * fd.value, fd.timescale, kCMTimeFlags_Valid, 0};
+}
+
+// The timeline range covering the selected clips (for keyword ranges).
+static BOOL SpliceKit_directActionSelectionRange(id rootItem, NSArray *items, CMTimeRange *out) {
+    BOOL have = NO;
+    CMTimeRange total = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (id item in items) {
+        CMTimeRange r;
+        if (!SpliceKit_tryReadTimelineRange(rootItem, item, &r)) continue;
+        total = have ? CMTimeRangeGetUnion(total, r) : r;
+        have = YES;
+    }
+    if (have) *out = total;
+    return have;
+}
+
 NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
     NSString *action = params[@"action"];
     NSString *rawSelector = params[@"selector"];
@@ -288,6 +406,7 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 }
                 return (id)nil;
             };
+            NSArray *items = SpliceKit_directActionCollection(getSelectedItems());
 
             // === Marker Operations ===
             // Markers are owned by the sequence, not the timeline module. The action
@@ -393,77 +512,99 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // behavior, and variable speed settings. Each one operates on selected items.
 
             if ([action isEqualToString:@"retimeSetRate"]) {
-                // Set exact retime rate with ripple control
+                // Constant speed, the way Modify > Retime > Slow / Fast set it:
+                // -[FFAnchoredSequence actionSetEdits:constantRetiming:ripple:error:].
                 double rate = [params[@"rate"] doubleValue];
                 BOOL ripple = [params[@"ripple"] boolValue];
-                BOOL allowVariable = params[@"allowVariableSpeed"] ? [params[@"allowVariableSpeed"] boolValue] : YES;
                 if (rate <= 0) { result = @{@"error": @"rate must be > 0 (e.g. 0.5 for half speed, 2.0 for double)"}; return; }
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRetimeSetRatePreset:rate:ripple:allowVariableSpeedRetiming:objectsAndNewRanges:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
+                SEL sel = NSSelectorFromString(@"actionSetEdits:constantRetiming:ripple:error:");
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, double, BOOL, BOOL, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rate, ripple, allowVariable, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"rate": @(rate), @"ripple": @(ripple), @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, double, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, items, rate, ripple, &error);
+                NSMutableDictionary *extra = [@{@"rate": @(rate), @"ripple": @(ripple)} mutableCopy];
+                if (params[@"allowVariableSpeed"]) {
+                    extra[@"note"] = @"allowVariableSpeed does not apply to a constant-speed retime and was not used.";
+                }
+                result = SpliceKit_directActionResult(action, ok, error, extra);
                 return;
             }
 
             if ([action isEqualToString:@"retimeHoldPreset"]) {
-                // Insert a hold/freeze frame at a specific time
-                // This is the direct API for freeze-extend
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Modify > Retime > Hold: a hold segment at the playhead, `duration` seconds
+                // long (default 2 s, rounded to whole frames).
+                id clip = items.firstObject;
+                if (!clip) { result = @{@"error": @"Select the clip to hold first."}; return; }
+                CMTime at;
+                if (!SpliceKit_directActionLocalPlayhead(timeline, clip, rootItem, &at)) {
+                    result = @{@"error": @"The playhead is not over the selected clip."}; return;
+                }
+                double seconds = params[@"duration"] ? [params[@"duration"] doubleValue] : 2.0;
+                if (seconds <= 0) { result = @{@"error": @"duration must be > 0 seconds"}; return; }
+                CMTime duration = SpliceKit_directActionFramesFromSeconds(seconds, timeline);
                 SEL sel = NSSelectorFromString(@"actionRetimeHoldPreset:holdComponentTime:duration:newHoldComponentTime:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                // holdComponentTime and duration come from the selected clip context
-                ((void (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, nil, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                CMTime newHold = kCMTimeInvalid;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTime, CMTime, CMTime *, NSError **))objc_msgSend)(
+                    sequence, sel, @[clip], at, duration, &newHold, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{
+                    @"holdAt": SpliceKit_serializeCMTime(at),
+                    @"duration": SpliceKit_serializeCMTime(duration)});
                 return;
             }
 
             if ([action isEqualToString:@"retimeReverse"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionRetimeReverseClipPreset:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, items, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             if ([action isEqualToString:@"retimeBladeSpeedPreset"]) {
-                // Blade at a speed segment boundary
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Modify > Retime > Blade Speed at the playhead.
+                id clip = items.firstObject;
+                if (!clip) { result = @{@"error": @"Select the clip first."}; return; }
+                CMTime at;
+                if (!SpliceKit_directActionLocalPlayhead(timeline, clip, rootItem, &at)) {
+                    result = @{@"error": @"The playhead is not over the selected clip."}; return;
+                }
                 SEL sel = NSSelectorFromString(@"actionRetimeBladeSpeedPreset:componentTime:newComponentTime:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                CMTime newTime = kCMTimeInvalid;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTime, CMTime *, NSError **))objc_msgSend)(
+                    sequence, sel, @[clip], at, &newTime, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"bladeAt": SpliceKit_serializeCMTime(at)});
                 return;
             }
 
             if ([action isEqualToString:@"retimeSpeedRamp"]) {
+                // Modify > Retime > Speed Ramp over the whole selected clip.
                 BOOL toZero = [params[@"toZero"] boolValue];
                 BOOL fromZero = [params[@"fromZero"] boolValue];
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (!toZero && !fromZero) toZero = YES;
+                id clip = items.firstObject;
+                CMTimeRange range;
+                if (!clip || !SpliceKit_directActionLocalRange(clip, &range)) {
+                    result = @{@"error": @"Select the clip to ramp first."}; return;
+                }
                 SEL sel = NSSelectorFromString(@"actionRetimeSpeedRampPreset:startComponentTime:endComponentTime:toZero:fromZero:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id, BOOL, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, nil, toZero, fromZero, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"toZero": @(toZero), @"fromZero": @(fromZero), @"status": @"ok"};
+                CMTime end = CMTimeAdd(range.start, range.duration);
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTime, CMTime, BOOL, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, @[clip], range.start, end, toZero, fromZero, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"toZero": @(toZero), @"fromZero": @(fromZero)});
                 return;
             }
 
@@ -471,57 +612,83 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 double rate = params[@"rate"] ? [params[@"rate"] doubleValue] : 0.5;
                 BOOL allowVariable = params[@"allowVariableSpeed"] ? [params[@"allowVariableSpeed"] boolValue] : YES;
                 BOOL addTitle = params[@"addTitle"] ? [params[@"addTitle"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (rate <= 0) { result = @{@"error": @"rate must be > 0"}; return; }
+                id clip = items.firstObject;
+                CMTimeRange range;
+                if (!clip || !SpliceKit_directActionLocalRange(clip, &range)) {
+                    result = @{@"error": @"Select the clip to replay first."}; return;
+                }
                 SEL sel = NSSelectorFromString(@"actionRetimeInstantReplayPreset:range:rate:allowVariableSpeedRetiming:addTitle:objectsAndNewRanges:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, double, BOOL, BOOL, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, rate, allowVariable, addTitle, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"rate": @(rate), @"status": @"ok"};
+                id newRanges = nil;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTimeRange, double, BOOL, BOOL, id *, NSError **))objc_msgSend)(
+                    sequence, sel, @[clip], range, rate, allowVariable, addTitle, &newRanges, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"rate": @(rate), @"addTitle": @(addTitle)});
                 return;
             }
 
             if ([action isEqualToString:@"retimeJumpCut"]) {
+                // Modify > Retime > Jump Cut at Markers: needs markers on the selected clip.
                 int framesToJump = params[@"framesToJump"] ? [params[@"framesToJump"] intValue] : 5;
                 BOOL allowVariable = params[@"allowVariableSpeed"] ? [params[@"allowVariableSpeed"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (framesToJump <= 0) { result = @{@"error": @"framesToJump must be > 0"}; return; }
+                NSArray *ranges = SpliceKit_directActionRangesAndObjects(items);
+                if (ranges.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionRetimeJumpCutPreset:framesToJump:allowVariableSpeedRetiming:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, int, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, framesToJump, allowVariable, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"framesToJump": @(framesToJump), @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, int, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, [ranges mutableCopy], framesToJump, allowVariable, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"framesToJump": @(framesToJump)});
                 return;
             }
 
             if ([action isEqualToString:@"retimeRewind"]) {
                 double rewindSpeed = params[@"speed"] ? [params[@"speed"] doubleValue] : 2.0;
                 BOOL allowVariable = params[@"allowVariableSpeed"] ? [params[@"allowVariableSpeed"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (rewindSpeed <= 0) { result = @{@"error": @"speed must be > 0"}; return; }
+                NSArray *ranges = SpliceKit_directActionRangesAndObjects(items);
+                if (ranges.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionRetimeRewindPreset:rewindSpeed:allowVariableSpeedRetiming:objectsAndNewRanges:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, double, BOOL, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rewindSpeed, allowVariable, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"speed": @(rewindSpeed), @"status": @"ok"};
+                id newRanges = nil;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, double, BOOL, id *, NSError **))objc_msgSend)(
+                    sequence, sel, [ranges mutableCopy], rewindSpeed, allowVariable, &newRanges, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"speed": @(rewindSpeed)});
                 return;
             }
 
             if ([action isEqualToString:@"retimeSetInterpolation"]) {
-                // Set interpolation type on retime segments
-                id selectedItems = getSelectedItems();
-                NSString *interpolation = params[@"interpolation"];
-                SEL sel = NSSelectorFromString(@"actionRetimeSetInterpolation:edits:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                // Modify > Retime > Video Quality. Each quality is its own FFAnchoredSequence
+                // action taking the selected clips (actionRetimeSetInterpolation:edits: takes an
+                // undocumented enum and is not used).
+                NSString *mode = [params[@"interpolation"] isKindOfClass:[NSString class]] ? params[@"interpolation"] : @"";
+                NSDictionary<NSString *, NSString *> *modes = @{
+                    @"floor":             @"actionRetimeTurnOnFloorFrameSampling:",
+                    @"nearest":           @"actionRetimeTurnOnNearestNeighbor:",
+                    @"frameBlending":     @"actionRetimeTurnOnFrameBlending:",
+                    @"opticalFlow":       @"actionRetimeTurnOnOpticalFlow:",
+                    @"opticalFlowMedium": @"actionRetimeTurnOnOpticalFlowMedium:",
+                    @"opticalFlowHigh":   @"actionRetimeTurnOnOpticalFlowHigh:",
+                    @"opticalFlowFRC":    @"actionRetimeTurnOnOpticalFlowFRC:",
+                };
+                NSString *selName = modes[mode];
+                if (!selName) {
+                    result = @{@"error": [NSString stringWithFormat:@"interpolation must be one of: %@",
+                        [[modes.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "]]};
+                    return;
+                }
+                if (items.count == 0) { result = @{@"error": @"Select one or more retimed clips first."}; return; }
+                SEL sel = NSSelectorFromString(selName);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id))objc_msgSend)(timeline, sel, interpolation, selectedItems);
-                result = @{@"action": action, @"status": @"ok"};
+                ((void (*)(id, SEL, id))objc_msgSend)(sequence, sel, items);
+                result = @{@"action": action, @"interpolation": mode, @"status": @"ok"};
                 return;
             }
 
@@ -624,29 +791,34 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             if ([action isEqualToString:@"trimDuration"]) {
-                // Trim selected edits to a specific duration
+                // Modify > Change Duration: `duration` seconds (whole frames); isDelta adds it to
+                // the current length instead of setting the length.
                 BOOL isDelta = params[@"isDelta"] ? [params[@"isDelta"] boolValue] : NO;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (!params[@"duration"]) { result = @{@"error": @"duration (seconds) parameter required"}; return; }
+                double seconds = [params[@"duration"] doubleValue];
+                if (!isDelta && seconds <= 0) { result = @{@"error": @"duration must be > 0 seconds"}; return; }
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
+                CMTime duration = SpliceKit_directActionFramesFromSeconds(seconds, timeline);
                 SEL sel = NSSelectorFromString(@"actionTrimDuration:forEdits:isDelta:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, nil, selectedItems, isDelta, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, CMTime, id, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, duration, items, isDelta, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{
+                    @"duration": SpliceKit_serializeCMTime(duration), @"isDelta": @(isDelta)});
                 return;
             }
 
             if ([action isEqualToString:@"extendOverNextClip"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                id clip = items.firstObject;
+                if (!clip) { result = @{@"error": @"Select the clip to extend first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionExtendOverNextClip:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, clip, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
@@ -765,82 +937,109 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // background music flag, audio detach, and A/V sync alignment.
 
             if ([action isEqualToString:@"changeAudioVolume"]) {
+                // Modify > Adjust Volume: one clip per call, over the clip's whole range.
+                // Several clips share one undo step, as FCP's own Up/Down commands do.
                 double amount = [params[@"amount"] doubleValue];
                 BOOL isRelative = params[@"relative"] ? [params[@"relative"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionChangeAudioVolume:byAmount:overRange:isRelative:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, double, id, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, amount, nil, isRelative, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"amount": @(amount), @"relative": @(isRelative), @"status": @"ok"};
+                CMTimeRange whole = {kCMTimeNegativeInfinity, kCMTimePositiveInfinity};
+                SEL beginSel = NSSelectorFromString(@"actionBegin:");
+                SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
+                BOOL grouped = items.count > 1 && [sequence respondsToSelector:beginSel] && [sequence respondsToSelector:endSel];
+                NSString *stepName = @"Volume Adjustment";
+                if (grouped) ((void (*)(id, SEL, id))objc_msgSend)(sequence, beginSel, stepName);
+                BOOL ok = YES;
+                NSError *error = nil;
+                @try {
+                    for (id item in items) {
+                        NSError *itemError = nil;
+                        BOOL itemOK = ((BOOL (*)(id, SEL, id, double, CMTimeRange, BOOL, NSError **))objc_msgSend)(
+                            sequence, sel, item, amount, whole, isRelative, &itemError);
+                        if (!itemOK || itemError) { ok = NO; if (!error) error = itemError; }
+                    }
+                } @finally {
+                    if (grouped) {
+                        NSError *endError = nil;
+                        ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(sequence, endSel, stepName, YES, &endError);
+                    }
+                }
+                result = SpliceKit_directActionResult(action, ok, error, @{
+                    @"amount": @(amount), @"relative": @(isRelative), @"clips": @(items.count)});
                 return;
             }
 
             if ([action isEqualToString:@"applyAudioFadesDirect"]) {
                 BOOL fadeIn = params[@"fadeIn"] ? [params[@"fadeIn"] boolValue] : YES;
                 double duration = params[@"duration"] ? [params[@"duration"] doubleValue] : 0.5;
-                id selectedItems = getSelectedItems();
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips with audio first."}; return; }
+                if (duration <= 0) { result = @{@"error": @"duration must be > 0 seconds"}; return; }
                 NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionApplyAudioFades:objects:fadeInNotOut:fadeDuration:error:");
                 NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, BOOL, double, NSError **))objc_msgSend)(
-                    timeline, sel, nil, selectedItems, fadeIn, duration, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"fadeIn": @(fadeIn), @"duration": @(duration), @"status": @"ok"};
+                // As Modify > Adjust Audio Fades > Apply Fades calls it: the undo step name, the
+                // clips as an array, and fadeDuration as a float (B48@0:8@16@24B32f36^@40).
+                NSString *stepName = fadeIn ? @"Apply Audio Fade In" : @"Apply Audio Fade Out";
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, BOOL, float, NSError **))objc_msgSend)(
+                    timeline, sel, stepName, [items mutableCopy], fadeIn, (float)duration, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"fadeIn": @(fadeIn), @"duration": @(duration)});
                 return;
             }
 
             if ([action isEqualToString:@"setAudioPlayEnable"]) {
-                BOOL enabled = params[@"enabled"] ? [params[@"enabled"] boolValue] : YES;
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionSetAudioPlayEnable:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, BOOL, NSError **))objc_msgSend)(timeline, sel, enabled, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"enabled": @(enabled), @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionSetAudioPlayEnable:error: belongs to the audio components view (FFAudioComponentsConfigWaveformManager). "
+                    @"Use timeline_action(\"toggleMuteAudio\") or the mixer tools instead.");
                 return;
             }
 
             if ([action isEqualToString:@"setBackgroundMusic"]) {
                 BOOL isBackground = params[@"enabled"] ? [params[@"enabled"] boolValue] : YES;
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more audio clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionSetBackgroundMusic:isBackgroundMusic:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, isBackground, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"enabled": @(isBackground), @"status": @"ok"};
+                // Only some clips can carry the flag; FCP 12.3 answers YES without a change for
+                // the rest (its own Toggle Background Music does nothing for them either), so
+                // report whether an undo step was actually recorded.
+                id um = SpliceKit_getUndoManager();
+                NSString *topBefore = um ? ((id (*)(id, SEL))objc_msgSend)(um, @selector(undoActionName)) : nil;
+                BOOL couldUndoBefore = um ? ((BOOL (*)(id, SEL))objc_msgSend)(um, @selector(canUndo)) : NO;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, NSError **))objc_msgSend)(sequence, sel, items, isBackground, &error);
+                NSString *topAfter = um ? ((id (*)(id, SEL))objc_msgSend)(um, @selector(undoActionName)) : nil;
+                BOOL canUndoAfter = um ? ((BOOL (*)(id, SEL))objc_msgSend)(um, @selector(canUndo)) : NO;
+                if (ok && !error && um && canUndoAfter == couldUndoBefore && [topAfter ?: @"" isEqualToString:topBefore ?: @""]) {
+                    result = @{@"error": @"Final Cut Pro made no change: none of the selected clips can be marked as background music."};
+                    return;
+                }
+                result = SpliceKit_directActionResult(action, ok, error, @{@"enabled": @(isBackground)});
                 return;
             }
 
             if ([action isEqualToString:@"detachAudioDirect"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionDetachAudio:newDetachedEdits:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSMutableArray *detached = [NSMutableArray array];
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, items, detached, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"detached": @(detached.count)});
                 return;
             }
 
             if ([action isEqualToString:@"alignAudioToVideoDirect"]) {
-                id selectedItems = getSelectedItems();
+                // Trim > Align Audio to Video: select the video clip and its detached audio.
+                if (items.count == 0) { result = @{@"error": @"Select the video clip and its detached audio first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionAlignAudioToVideo:endEdits:container:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, rootItem);
-                result = @{@"action": action, @"status": @"ok"};
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, id))objc_msgSend)(sequence, sel, items, items, rootItem);
+                result = SpliceKit_directActionResult(action, ok, nil, nil);
                 return;
             }
 
@@ -849,42 +1048,20 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // or audio-synced independently.
 
             if ([action isEqualToString:@"deleteMultiAngle"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionDeleteMultiAngle:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"FFAnchoredSequence's actionDeleteMultiAngle:error: takes a multicam angle, and SpliceKit has not been verified against a multicam clip in 12.3. Use the angle editor (Clip > Open in Angle Editor) for now.");
                 return;
             }
 
             if ([action isEqualToString:@"renameAngle"]) {
-                NSString *newName = params[@"name"];
-                if (!newName) { result = @{@"error": @"name parameter required"}; return; }
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRenameAngle:newName:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, newName, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"name": newName, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"FFAnchoredSequence's actionRenameAngle:newName:error: takes a multicam angle, and SpliceKit has not been verified against a multicam clip in 12.3. Use the angle editor (Clip > Open in Angle Editor) for now.");
                 return;
             }
 
             if ([action isEqualToString:@"audioSyncMultiAngle"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionAudioSyncMultiAngleItems:rootItem:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"FFAnchoredSequence's actionAudioSyncMultiAngleItems:rootItem:error: takes a multicam angle, and SpliceKit has not been verified against a multicam clip in 12.3. Use the angle editor (Clip > Open in Angle Editor) for now.");
                 return;
             }
 
@@ -893,31 +1070,39 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // for export (Dialogue, Music, Effects, Titles, etc).
 
             if ([action isEqualToString:@"addKeywords"]) {
-                NSArray *keywords = params[@"keywords"];
-                if (!keywords) { result = @{@"error": @"keywords array required"}; return; }
-                NSSet *keywordSet = [NSSet setWithArray:keywords];
-                NSError *error = nil;
+                // The sequence's own keyword action: a keyword range on the project covering the
+                // selected clips' timeline range (stored on the project's storyline, not the clips).
+                NSArray *keywords = [params[@"keywords"] isKindOfClass:[NSArray class]] ? params[@"keywords"] : nil;
+                if (keywords.count == 0) { result = @{@"error": @"keywords array required"}; return; }
+                CMTimeRange range;
+                if (!SpliceKit_directActionSelectionRange(rootItem, items, &range)) {
+                    result = @{@"error": @"Select the clips to keyword first."}; return;
+                }
                 SEL sel = NSSelectorFromString(@"actionAddKeywordsWithNames:forRange:animationHint:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, int, NSError **))objc_msgSend)(
-                    timeline, sel, keywordSet, nil, 0, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"keywords": keywords, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTimeRange, id, NSError **))objc_msgSend)(
+                    sequence, sel, [NSSet setWithArray:keywords], range, nil, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"keywords": keywords,
+                    @"note": @"The keywords are a range on the project over the selected clips' time range (the sequence's keyword action), not keywords stored on the clips themselves."});
                 return;
             }
 
             if ([action isEqualToString:@"removeKeywords"]) {
-                NSArray *keywords = params[@"keywords"];
-                if (!keywords) { result = @{@"error": @"keywords array required"}; return; }
-                NSSet *keywordSet = [NSSet setWithArray:keywords];
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRemoveKeywordsWithNames:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSArray *keywords = [params[@"keywords"] isKindOfClass:[NSArray class]] ? params[@"keywords"] : nil;
+                if (keywords.count == 0) { result = @{@"error": @"keywords array required"}; return; }
+                CMTimeRange range;
+                if (!SpliceKit_directActionSelectionRange(rootItem, items, &range)) {
+                    result = @{@"error": @"Select the clips to remove keywords from first."}; return;
+                }
+                SEL sel = NSSelectorFromString(@"actionRemoveKeywordsWithNames:forRange:animationHint:error:");
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, keywordSet, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, CMTimeRange, id, NSError **))objc_msgSend)(
+                    sequence, sel, [NSSet setWithArray:keywords], range, nil, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"keywords": keywords});
                 return;
             }
 
@@ -928,40 +1113,30 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"removeEffectByID"]) {
                 NSString *effectID = params[@"effectID"];
                 if (!effectID) { result = @{@"error": @"effectID parameter required"}; return; }
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionRemoveEffectID:fromAnchoredObjects:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, effectID, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"effectID": effectID, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, effectID, items, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"effectID": effectID});
                 return;
             }
 
             if ([action isEqualToString:@"invertEffectMasks"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionInvertEffectMasks:actionName:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, @"Invert Mask", &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionInvertEffectMasks:actionName:error: belongs to the project document (FFProjectDocument) and takes effect masks, not clips.");
                 return;
             }
 
             if ([action isEqualToString:@"toggleEnabled"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionToggleEnabled:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, items, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
@@ -970,81 +1145,77 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // compound clips, lift from storyline, rename, delete, move to trash.
 
             if ([action isEqualToString:@"breakApartClipItems"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // The clips are passed by reference (^@); FCP replaces them with the pieces.
+                if (items.count == 0) { result = @{@"error": @"Select one or more compound clips first."}; return; }
+                // FCP's own Clip > Break Apart Clip Items asks first; the action itself would
+                // also split an ordinary clip into its video and audio components.
+                SEL canSel = NSSelectorFromString(@"canBreakApartClipItems");
+                if ([timeline respondsToSelector:canSel] && !((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel)) {
+                    result = @{@"error": @"Final Cut Pro cannot break apart the selection (select a compound clip, audition or storyline)."};
+                    return;
+                }
                 SEL sel = NSSelectorFromString(@"actionBreakApartClipItems:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                id inOut = items;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id *, NSError **))objc_msgSend)(sequence, sel, &inOut, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             if ([action isEqualToString:@"createCompoundClipDirect"]) {
+                // No name sheet: FCP names the compound clip itself. The clips are passed by
+                // reference (^@). spine:YES builds a storyline instead (Clip > Create Storyline,
+                // seen live), so it is NO here.
                 BOOL multiClip = [params[@"multicam"] boolValue];
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                if (items.count == 0) { result = @{@"error": @"Select the clips to combine first."}; return; }
+                SEL canSel = NSSelectorFromString(@"canCreateCompoundClip");
+                if ([timeline respondsToSelector:canSel] && !((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel)) {
+                    result = @{@"error": @"Final Cut Pro cannot make a compound clip from the selection."};
+                    return;
+                }
                 SEL sel = NSSelectorFromString(@"actionCreateCompoundClip:multiClip:spine:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, BOOL, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, multiClip, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"multicam": @(multiClip), @"status": @"ok"};
+                id inOut = items;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id *, BOOL, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, &inOut, multiClip, NO, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"multicam": @(multiClip)});
                 return;
             }
 
             if ([action isEqualToString:@"liftAnchoredEdits"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Edit > Lift from Storyline.
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionLiftAnchoredEdits:rootItem:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, items, rootItem, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             if ([action isEqualToString:@"renameDirect"]) {
-                NSString *newName = params[@"name"];
-                if (!newName) { result = @{@"error": @"name parameter required"}; return; }
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRename:actionName:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, newName, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"name": newName, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionRename:actionName:error: belongs to the library document (FFModelDocument) and renames the document, not a clip. "
+                    @"Use timeline_action(\"renameClip\") to rename the selected clip.");
                 return;
             }
 
             if ([action isEqualToString:@"deleteItemsInArray"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionDeleteItemsInArray:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionDeleteItemsInArray:error: is a class method of the browser event (FFMediaEventProject) that deletes browser items. "
+                    @"Use timeline_destructive_action(\"delete\") for timeline clips or remove_browser_clip for browser items.");
                 return;
             }
 
             if ([action isEqualToString:@"moveClipsToTrash"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionMoveClipsToTrash:mediaRefsToDelete:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionMoveClipsToTrash:mediaRefsToDelete:error: belongs to the browser's event controller (FFMediaEventController) and deletes media files. "
+                    @"Use timeline_action(\"moveToTrash\") (File > Move to Trash) instead.");
                 return;
             }
 
@@ -1054,13 +1225,17 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             if ([action isEqualToString:@"duplicateCaptions"]) {
                 NSString *language = params[@"language"] ?: @"en";
                 NSString *format = params[@"format"] ?: @"ITT";
-                id selectedItems = getSelectedItems();
+                SEL canSel = NSSelectorFromString(@"canDuplicateCaptions");
+                if ([timeline respondsToSelector:canSel] && !((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel)) {
+                    result = @{@"error": @"Select one or more captions first (Final Cut Pro cannot duplicate the current selection)."};
+                    return;
+                }
                 SEL sel = NSSelectorFromString(@"actionDuplicateCaptions:toLanguageIdentifier:andCaptionFormat:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id))objc_msgSend)(
-                    timeline, sel, selectedItems, language, format);
-                result = @{@"action": action, @"language": language, @"format": format, @"status": @"ok"};
+                id created = ((id (*)(id, SEL, id, id, id))objc_msgSend)(sequence, sel, items, language, format);
+                result = @{@"action": action, @"language": language, @"format": format,
+                           @"created": @([SpliceKit_directActionCollection(created) count]), @"status": @"ok"};
                 return;
             }
 
@@ -1069,178 +1244,166 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             // through them. "Variants" are the individual takes within an audition.
 
             if ([action isEqualToString:@"addVariants"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionAddVariants:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionAddVariants:error: belongs to the browser event (FFMediaEventProject), not the timeline. "
+                    @"Use timeline_action(\"createAudition\") on a timeline clip.");
                 return;
             }
 
             if ([action isEqualToString:@"removeVariants"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionRemoveVariants:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, selectedItems, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionRemoveVariants:error: belongs to the browser event (FFMediaEventProject), not the timeline.");
                 return;
             }
 
             if ([action isEqualToString:@"finalizeVariant"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Clip > Audition > Finalize Audition on the selected audition.
+                id audition = nil;
+                for (id item in items) {
+                    if ([NSStringFromClass([item class]) isEqualToString:@"FFAnchoredStack"]) { audition = item; break; }
+                }
+                if (!audition) { result = @{@"error": @"Select an audition clip first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionFinalizePickFromVariant:rootItem:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                id picked = ((id (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, audition, rootItem, &error);
+                result = SpliceKit_directActionResult(action, picked != nil, error, nil);
                 return;
             }
 
             // === Project / Library ===
 
             if ([action isEqualToString:@"newProject"]) {
-                NSString *name = params[@"name"] ?: @"Untitled";
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionNewProject:name:sequence:actionName:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, nil, name, nil, @"New Project", &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"name": name, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionNewProject:name:sequence:actionName:error: is a class method of FFProjectDocument, not a timeline action. "
+                    @"Use create_project().");
                 return;
             }
 
             if ([action isEqualToString:@"newEvent"]) {
-                NSString *name = params[@"name"] ?: @"New Event";
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionNewEvent:name:actionName:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, nil, name, @"New Event", &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"name": name, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionNewEvent:name:actionName:error: is a class method of FFProjectDocument, not a timeline action. "
+                    @"Use create_event().");
                 return;
             }
 
             if ([action isEqualToString:@"validateAndRepair"]) {
-                NSError *error = nil;
+                // Clip > Verify and Repair Project without its result sheet: repair on, mode 0,
+                // as -[FFAnchoredTimelineModule validateAndRepairSequence:] calls it.
                 SEL sel = NSSelectorFromString(@"actionValidateAndRepair:validateMode:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, int, NSError **))objc_msgSend)(
-                    timeline, sel, nil, 0, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, BOOL, int, NSError **))objc_msgSend)(sequence, sel, YES, 0, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             // === Auto-reframe (Direct) ===
 
             if ([action isEqualToString:@"autoReframeDirect"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Modify > Smart Conform.
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionAutoReframe:forContainer:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, items, rootItem, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             // === Music alignment ===
 
             if ([action isEqualToString:@"alignToMusicMarkers"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                SEL canSel = NSSelectorFromString(@"canAlignToMusicMarkers");
+                if ([timeline respondsToSelector:canSel] && !((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel)) {
+                    result = @{@"error": @"Final Cut Pro cannot align to music markers here (it needs a clip with beat/music markers)."};
+                    return;
+                }
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionAlignToMusicMarkers:rootItem:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, items, rootItem, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             if ([action isEqualToString:@"alignClipsAtMusicMarkers"]) {
                 BOOL asSplit = [params[@"asSplit"] boolValue];
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                SEL canSel = NSSelectorFromString(@"canAlignToMusicMarkers");
+                if ([timeline respondsToSelector:canSel] && !((BOOL (*)(id, SEL))objc_msgSend)(timeline, canSel)) {
+                    result = @{@"error": @"Final Cut Pro cannot align to music markers here (it needs a clip with beat/music markers)."};
+                    return;
+                }
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionAlignClipsAtMusicMarkersOnItems:rootItem:asSplit:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, rootItem, asSplit, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"asSplit": @(asSplit), @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, BOOL, NSError **))objc_msgSend)(sequence, sel, items, rootItem, asSplit, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"asSplit": @(asSplit)});
                 return;
             }
 
             // === Transition operations (Direct) ===
 
             if ([action isEqualToString:@"addTransitionsDirect"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
+                // Edit > Add Default Transition on both edges of the selected clips: the default
+                // video transition plus FCP's audio crossfade, as addTransition: passes them.
+                if (items.count == 0) { result = @{@"error": @"Select one or more clips first."}; return; }
                 SEL sel = NSSelectorFromString(@"actionAddTransitionsToSpineObjects:before:after:effects:transitionOverlapType:transitionsCreated:rootItem:reportErrors:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, id, id, int, id, id, BOOL, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, nil, nil, 0, nil, rootItem, YES, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSString *videoID = [params[@"effectID"] isKindOfClass:[NSString class]] ? params[@"effectID"] : nil;
+                if (!videoID) {
+                    Class ffEffect = NSClassFromString(@"FFEffect");
+                    SEL defSel = NSSelectorFromString(@"defaultVideoTransitionEffectID");
+                    if (ffEffect && [ffEffect respondsToSelector:defSel]) videoID = ((id (*)(id, SEL))objc_msgSend)(ffEffect, defSel);
+                }
+                if (!videoID) { result = @{@"error": @"No default video transition is set in Final Cut Pro."}; return; }
+                NSDictionary *effects = @{@"video": videoID, @"audio": @"FFAudioTransition"};
+                // Not enough media on an edge puts up an alert; accept it like apply_transition does.
+                SpliceKit_armTransitionAlertAutoAccept();
+                id created = nil;
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, BOOL, id, int, id *, id, BOOL, NSError **))objc_msgSend)(
+                    sequence, sel, items, YES, YES, effects, 1, &created, rootItem, YES, &error);
+                result = SpliceKit_directActionResult(action, ok, error, @{@"videoTransition": videoID});
                 return;
             }
 
             // === Analyze and optimize ===
 
             if ([action isEqualToString:@"analyzeAndOptimize"]) {
-                id selectedItems = getSelectedItems();
-                NSError *error = nil;
-                SEL sel = NSSelectorFromString(@"actionPerformAnalyzeAndOptimizeClips:options:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
-                if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, selectedItems, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                result = SpliceKit_directActionUnavailable(action,
+                    @"actionPerformAnalyzeAndOptimizeClips:options:error: belongs to the Analyze and Fix window's view controller. "
+                    @"Use timeline_action(\"analyzeAndFix\") (Modify > Analyze and Fix…), which opens that window.");
                 return;
             }
 
             // === Lane conflict resolution ===
 
             if ([action isEqualToString:@"resolveLaneConflicts"]) {
-                NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionResolveLaneConflictsInContainer:excludedItems:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, id, NSError **))objc_msgSend)(
-                    timeline, sel, rootItem, nil, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(sequence, sel, rootItem, nil, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
             if ([action isEqualToString:@"resolveLaneGaps"]) {
-                NSError *error = nil;
                 SEL sel = NSSelectorFromString(@"actionResolveLaneGapsInContainer:error:");
-                NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(timeline, sel, action);
+                NSDictionary *missingSel = SpliceKit_directActionSequenceSelector(sequence, sel, action);
                 if (missingSel) { result = missingSel; return; }
-                ((void (*)(id, SEL, id, NSError **))objc_msgSend)(timeline, sel, rootItem, &error);
-                result = error ? @{@"error": error.localizedDescription}
-                               : @{@"action": action, @"status": @"ok"};
+                NSError *error = nil;
+                BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(sequence, sel, rootItem, &error);
+                result = SpliceKit_directActionResult(action, ok, error, nil);
                 return;
             }
 
@@ -1251,6 +1414,18 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if ([rawSelector hasPrefix:@"action"]) {
                     NSDictionary *missingSel = SpliceKit_directActionMissingSelectorError(
                         timeline, sel, rawSelector);
+                    if (missingSel && sequence && [sequence respondsToSelector:sel]) {
+                        // Raw calls pass nil for every argument, which is wrong for the
+                        // sequence's struct / BOOL / pointer parameters.
+                        result = @{
+                            @"error": [NSString stringWithFormat:
+                                @"%@ is implemented on FFAnchoredSequence, not the timeline module; "
+                                @"a raw selector call cannot supply its arguments. Use the named action, "
+                                @"or call_method_with_args on the sequence.", rawSelector],
+                            @"receiver": @"FFAnchoredSequence",
+                        };
+                        return;
+                    }
                     if (missingSel) {
                         result = missingSel;
                         return;
