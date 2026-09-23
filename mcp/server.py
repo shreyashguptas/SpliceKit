@@ -140,19 +140,14 @@ SPLICEKIT_HOST, SPLICEKIT_PORT = _bridge_address()
 
 
 def _splicekit_version() -> str:
-    """SpliceKit's version string (patcher/SpliceKit/Configuration/Version.xcconfig), or ""
-    when the file is not beside this checkout. Reported to MCP clients as the server version."""
+    """SpliceKit's version string (the VERSION file at the repo root), or "" when the
+    file is not beside this checkout. Reported to MCP clients as the server version."""
     try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "patcher",
-                            "SpliceKit", "Configuration", "Version.xcconfig")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
         with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                key, sep, value = line.partition("=")
-                if sep and key.strip() == "SPLICEKIT_VERSION":
-                    return value.strip()
+            return fh.read().strip()
     except OSError:
-        pass
-    return ""
+        return ""
 
 
 SPLICEKIT_VERSION = _splicekit_version()
@@ -9871,7 +9866,7 @@ def debug_observe_notification(action: str = "list", name: str = "",
     - FFAssetMediaChangedNotification: media asset changes
     - FFBeatGridSettingsChangedNotification: beat grid toggled
     - FFQTMovieExporterFinishedNotification: export completes
-    See fcp_symbols/notifications.txt for all 337 notification names.
+    get_notification_names(binary=...) lists the rest from the running app.
     """
     params = {"action": action}
     if name:

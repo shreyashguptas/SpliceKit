@@ -1002,11 +1002,10 @@ operations. Useful when developing new SpliceKit features or investigating FCP b
 **Understanding timeline internals**: `TLKShowHiddenGapItems` and `TLKShowZeroHeightSpineItems`
 reveal items FCP hides from the user, helping understand the true timeline data model.
 
-## Runtime Metadata Export (for IDA Pro & Reverse Engineering)
+## Runtime Metadata Export
 
 Extract rich ObjC runtime metadata from the live FCP process — data that static binary
-analysis cannot provide. Used to enrich IDA Pro decompilation and build the 303K-function
-decompiled codebase.
+analysis cannot provide (IMP owners, ivar offsets, protocol declarations, ASLR slides).
 
 ### Bulk Class Metadata Export
 ```
@@ -1059,34 +1058,6 @@ get_notification_names(binary="Flexo")   # notification-related classes & symbol
 ```
 Finds classes with "Notification" in their name and enumerates their methods.
 Also resolves well-known notification name constants (e.g., `FFEffectsChangedNotification`).
-
-### IDA Pro Integration Scripts
-The `tools/` directory contains scripts for applying runtime metadata to IDA Pro:
-
-```bash
-# Step 1: Export runtime metadata from live FCP
-python3 tools/fcp_runtime_export.py --binary Flexo -o ida_export
-
-# Step 2: Run IDA headless with metadata enrichment + decompile
-RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
-  idat -A -S"tools/ida_apply_and_decompile.py" /path/to/Flexo
-```
-
-**What the IDA script does:**
-1. Declares struct types from ivars with correct offsets and typed members
-2. Registers types in IDA's local type library (persists across sessions)
-3. Renames functions to ObjC names (`sub_XXXX` → `-[FFPlayer play]`)
-4. Sets function prototypes with typed parameters
-5. Adds class hierarchy and protocol conformance comments
-6. Creates enums for known constant sets
-7. Triggers type propagation across the entire binary
-
-**Tools:**
-- `tools/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
-- `tools/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
-- `tools/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
-- `tools/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
-- `tools/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
 
 ## In-Process Debugging (Debugger Parity)
 
@@ -1310,12 +1281,6 @@ python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_mcp_server_v2.
 - `docs/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
 - `docs/DIALOG_AUTOMATION_GUIDE.md` — Dialog detection & interaction
 - `docs/SCENE_BEAT_DETECTION_GUIDE.md` — Scene change & beat detection
-- `docs/FXPLUG_PLUGIN_GUIDE.md` — FxPlug 4 plugin development
 - `docs/FCPXML_FORMAT_REFERENCE.md` — FCPXML interchange format
-- `docs/WORKFLOW_EXTENSIONS_GUIDE.md` — Workflow Extensions (ProExtensionHost)
-- `docs/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
 - `docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
 - `docs/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
-- `tools/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
-- `tools/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
-- `tools/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment

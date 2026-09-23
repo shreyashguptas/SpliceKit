@@ -550,15 +550,11 @@ def first_text(result) -> str:
 
 
 def expected_version() -> str:
-    """SPLICEKIT_VERSION from patcher/SpliceKit/Configuration/Version.xcconfig, or ""."""
+    """The version in the repo's VERSION file, or ""."""
     try:
-        for line in (REPO / "patcher" / "SpliceKit" / "Configuration" / "Version.xcconfig").read_text().splitlines():
-            key, sep, value = line.partition("=")
-            if sep and key.strip() == "SPLICEKIT_VERSION":
-                return value.strip()
+        return (REPO / "VERSION").read_text().strip()
     except OSError:
-        pass
-    return ""
+        return ""
 
 
 async def handshake(params, mode: str, report: Report, timeout: float):

@@ -637,7 +637,7 @@ debug.observeNotification(action="removeAll")
 | FFImportDidBegin | Import operation starts |
 | FFQTMovieExporterFinishedNotification | Export completes |
 
-See `fcp_symbols/notifications.txt` for the full list of 337 notification names.
+`get_notification_names(binary="Flexo")` lists the rest from the running app.
 
 ## Direct Timeline Actions (`timeline.directAction`)
 
@@ -903,28 +903,6 @@ timeline_action("removeCutawayEffects")
 timeline_action("toggleVerifyObjectAlignment")
 ```
 
-## Symbol Dump Tool
-
-The `tools/dump_fcp_symbols.sh` script extracts metadata from FCP's binaries that
-IDA Pro decompilation misses. Run it to generate reference files:
-
-```bash
-./tools/dump_fcp_symbols.sh [output_dir]
-```
-
-Output files:
-
-| File | Contents |
-|------|----------|
-| `action_selectors.txt` | All `action*` method names from all FCP frameworks |
-| `toggle_selectors.txt` | All `toggle/show/hide*` methods |
-| `notifications.txt` | All NSNotification names |
-| `defaults_keys.txt` | All NSUserDefaults feature flag keys |
-| `protocols.txt` | All protocol/delegate interface names |
-| `categories.txt` | All ObjC categories |
-| `swift_symbols.txt` | Demangled Swift type metadata |
-| `unnamed_functions.txt` | Functions IDA couldn't symbolicate |
-
 ## Recipes
 
 ### Discover what happens when you click a menu item
@@ -1001,8 +979,6 @@ debug.loadPlugin(action="unload", path="/tmp/fix.dylib")
 debug.eval(expression="NSApp.delegate", storeResult=True)
 # Use the handle to explore further...
 
-# Or check the static dump:
-# See fcp_symbols/defaults_keys.txt for 426 known feature flag keys
 # Set one:
 debug.setConfig(key="FFCinematicToolEnable", value=True)
 ```

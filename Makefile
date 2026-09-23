@@ -9,7 +9,7 @@ DEBUG_FLAGS = -g
 LINKER_FLAGS = -undefined dynamic_lookup -dynamiclib
 CPP_LIBS = -lc++
 INSTALL_NAME = -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit
-SPLICEKIT_VERSION = $(shell awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $$2); print $$2; exit }' patcher/SpliceKit/Configuration/Version.xcconfig)
+SPLICEKIT_VERSION = $(shell tr -d ' \n' < VERSION)
 VERSION_DEFINE = -DSPLICEKIT_VERSION=\"$(SPLICEKIT_VERSION)\"
 DSYM = $(OUTPUT).dSYM
 
@@ -47,20 +47,10 @@ SILENCE_DETECTOR = $(BUILD_DIR)/silence-detector
 STRUCTURE_ANALYZER = $(BUILD_DIR)/structure-analyzer
 AUDIO_LEVELS = $(BUILD_DIR)/audio-levels
 BEAT_DETECTOR = $(BUILD_DIR)/beat-detector
-MIXER_APP = $(BUILD_DIR)/SpliceKitMixer
-AUDIO_BUS_PROBE_DIR = tools/audio-bus-probe-au
-AUDIO_BUS_PROBE_COMPONENT = $(BUILD_DIR)/SpliceKitAudioBusProbe.component
-AUDIO_BUS_PROBE_BINARY = $(AUDIO_BUS_PROBE_COMPONENT)/Contents/MacOS/SpliceKitAudioBusProbe
-AUDIO_BUS_PROBE_INFO = $(AUDIO_BUS_PROBE_DIR)/Info.plist
-AUDIO_BUS_PROBE_SOURCE = $(AUDIO_BUS_PROBE_DIR)/SpliceKitAudioBusProbe.c
-AUDIO_BUS_PROBE_INSTALL_DIR = $(HOME)/Library/Audio/Plug-Ins/Components
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
 # Transcription helpers (Parakeet for the transcript panel, Whisper for the
-# caption panel). These used to point at
-# patcher/SpliceKitPatcher.app/Contents/Resources/tools/..., a directory that
-# only exists inside a release tarball — so on a source checkout the copy below
-# was silently skipped and both engines failed at runtime. They are now built
-# from tools/<name> by Scripts/build-transcribers.sh and cached in build/.
+# caption panel), built from tools/<name> by Scripts/build-transcribers.sh and
+# cached in build/.
 PARAKEET_BIN = $(BUILD_DIR)/parakeet-transcriber
 WHISPER_BIN = $(BUILD_DIR)/whisper-transcriber
 
@@ -99,7 +89,7 @@ MKV_LDFLAGS = -bundle $(CPP_LIBS)
 # never be what an unqualified `make` does.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers test test-unit
+.PHONY: all clean deploy launch tools url-import-tools symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers test test-unit
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
 # copy of Final Cut Pro, the MCP server (proven over the wire with
@@ -121,32 +111,7 @@ all: $(OUTPUT)
 
 symbols: $(DSYM)
 
-tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP)
-
-audio-bus-probe: $(AUDIO_BUS_PROBE_BINARY)
-	@echo "Built: $(AUDIO_BUS_PROBE_COMPONENT)"
-
-$(AUDIO_BUS_PROBE_BINARY): $(AUDIO_BUS_PROBE_SOURCE) $(AUDIO_BUS_PROBE_INFO) | $(BUILD_DIR)
-	@mkdir -p "$(AUDIO_BUS_PROBE_COMPONENT)/Contents/MacOS"
-	@cp "$(AUDIO_BUS_PROBE_INFO)" "$(AUDIO_BUS_PROBE_COMPONENT)/Contents/Info.plist"
-	$(CC) $(ARCHS) $(MIN_VERSION) -std=c11 -O2 -Wall -Wextra -Wno-deprecated-declarations \
-		-fvisibility=hidden -dynamiclib \
-		-framework AudioToolbox -framework AudioUnit -framework CoreAudio -framework CoreFoundation -framework CoreServices \
-		"$(AUDIO_BUS_PROBE_SOURCE)" -o "$(AUDIO_BUS_PROBE_BINARY)"
-	@codesign --force --sign - "$(AUDIO_BUS_PROBE_COMPONENT)" >/dev/null
-
-install-audio-bus-probe: audio-bus-probe
-	@mkdir -p "$(AUDIO_BUS_PROBE_INSTALL_DIR)"
-	@rm -rf "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
-	@cp -R "$(AUDIO_BUS_PROBE_COMPONENT)" "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
-	@codesign --force --sign - "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component" >/dev/null
-	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
-	@echo "Installed: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
-
-uninstall-audio-bus-probe:
-	@rm -rf "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
-	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
-	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR)
 
 # ---------------------------------------------------------------------------
 # MCP server setup (Python venv + dependencies)
@@ -308,17 +273,6 @@ $(AUDIO_LEVELS): tools/audio-levels.swift | $(BUILD_DIR)
 	@codesign --force --sign - $(AUDIO_LEVELS) >/dev/null 2>&1 || true
 	@echo "Built: $(AUDIO_LEVELS)"
 
-SWIFT_PLUGIN_PATH = $(shell \
-	if [ -d "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" ]; then \
-		echo "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"; \
-	elif XCODE="$$(xcode-select -p 2>/dev/null)" && [ -n "$$XCODE" ] && [ -d "$$XCODE/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" ]; then \
-		echo "$$XCODE/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"; \
-	fi)
-MIXER_SOURCES = $(wildcard tools/mixer-app/*.swift)
-$(MIXER_APP): $(MIXER_SOURCES) | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -parse-as-library $(if $(SWIFT_PLUGIN_PATH),-plugin-path $(SWIFT_PLUGIN_PATH),) -o $(MIXER_APP) $(MIXER_SOURCES)
-	@echo "Built: $(MIXER_APP)"
-
 # Lua static library — compiled as C (no -fobjc-arc)
 $(BUILD_DIR)/lua/%.o: $(LUA_DIR)/%.c | $(BUILD_DIR)/lua
 	$(CC) $(ARCHS) $(MIN_VERSION) -DLUA_USE_MACOSX -O2 -Wall -c $< -o $@
@@ -380,7 +334,7 @@ $(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
 mkv-prototype: $(MKV_IMPORT_EXEC)
 	@echo "Staged: $(MKV_BUILD_DIR)"
 
-deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) $(MIXER_APP) vp9-prototype mkv-prototype
+deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR) vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
@@ -409,7 +363,6 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BE
 	@cp $(SILENCE_DETECTOR) "$(FW_DIR)/Versions/A/Resources/silence-detector" 2>/dev/null || true
 	@cp $(AUDIO_LEVELS) "$(FW_DIR)/Versions/A/Resources/audio-levels" 2>/dev/null || true
 	@cp $(BEAT_DETECTOR) "$(FW_DIR)/Versions/A/Resources/beat-detector" 2>/dev/null || true
-	@cp $(MIXER_APP) "$(TOOLS_DIR)/SpliceKitMixer" 2>/dev/null || true
 	@# Build (cached) and install the Parakeet/Whisper CLIs into both the
 	@# framework Resources and Application Support. Non-fatal by design.
 	@bash Scripts/build-transcribers.sh --framework "$(FW_DIR)" || \

@@ -394,14 +394,13 @@ fi
 # Makefile and the Xcode project read. Without the define the header's fallback
 # ("unversioned") is compiled in, which is how installs used to report a stale
 # number.
-SPLICEKIT_VERSION="$(awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $2); print $2; exit }' \
-    "$REPO_DIR/patcher/SpliceKit/Configuration/Version.xcconfig" 2>/dev/null || true)"
+SPLICEKIT_VERSION="$(tr -d ' \n' < "$REPO_DIR/VERSION" 2>/dev/null || true)"
 VERSION_FLAGS=()
 if [ -n "$SPLICEKIT_VERSION" ]; then
     VERSION_FLAGS=("-DSPLICEKIT_VERSION=\"$SPLICEKIT_VERSION\"")
     info "Compiling ${#SOURCES[@]} source files (SpliceKit $SPLICEKIT_VERSION)..."
 else
-    warn "Version.xcconfig not readable; the dylib will report its version as 'unversioned'"
+    warn "VERSION not readable; the dylib will report its version as 'unversioned'"
     info "Compiling ${#SOURCES[@]} source files..."
 fi
 clang -arch arm64 -arch x86_64 \

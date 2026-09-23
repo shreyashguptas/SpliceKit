@@ -382,14 +382,9 @@ class ServerV2Tests(unittest.TestCase):
         os.environ["SPLICEKIT_ALLOW_REMOTE"] = "1"
         self.assertEqual(m._bridge_address(), ("10.0.0.5", 9877))
 
-    def test_reported_version_matches_version_xcconfig(self):
+    def test_reported_version_matches_version_file(self):
         m = self.module
-        xcconfig = Path(__file__).resolve().parents[1] / "patcher" / "SpliceKit" / "Configuration" / "Version.xcconfig"
-        expected = ""
-        for line in xcconfig.read_text().splitlines():
-            key, sep, value = line.partition("=")
-            if sep and key.strip() == "SPLICEKIT_VERSION":
-                expected = value.strip()
+        expected = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
         self.assertTrue(expected)
         self.assertEqual(m.SPLICEKIT_VERSION, expected)
         self.assertEqual(m.mcp.version, expected)

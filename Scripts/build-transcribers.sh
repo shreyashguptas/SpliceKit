@@ -7,12 +7,6 @@
 # injected dylib. Those CLIs live in tools/<name>/ as SwiftPM packages and have
 # to be compiled and placed somewhere the injected code looks for them.
 #
-# Previously nothing built them. The Makefile and the GUI patcher both looked
-# for a pre-built binary under patcher/SpliceKitPatcher.app/Contents/Resources/,
-# a path that only ever existed inside the upstream release tarball — so on a
-# source checkout the copy was silently skipped and the panel failed at runtime
-# with "rerun the SpliceKit patcher app or copy the binary manually to ...".
-#
 # Install locations, matching the runtime search order in
 # SpliceKitTranscriptPanel.m (parakeetTranscriberPath) and
 # SpliceKitCaptionPanel.m (transcriberBinaryPathForName:):

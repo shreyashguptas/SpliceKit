@@ -19,6 +19,15 @@ that copy: a local bridge on `127.0.0.1:9876` that the MCP server talks to. Your
 original app, libraries and media are unchanged, and you can keep using them
 with either app.
 
+What to know before you rely on it:
+
+- It drives Final Cut Pro through internal APIs Apple does not document. A
+  Final Cut Pro update can break it until it is rebuilt against the new version.
+- The edits it makes are real edits. Undo works as usual, but keep backups of
+  projects that matter.
+- The patched copy runs without Final Cut Pro's sandbox, which the injected
+  library needs. It then has the same file access as any other app on your Mac.
+
 ## Install
 
 You need a Mac on macOS 14 or newer with Final Cut Pro in `/Applications`

@@ -1,8 +1,3 @@
----
-layout: default
-title: FlexMusic & Montage Maker Guide
----
-
 # FlexMusic & Montage Maker Guide
 
 SpliceKit brings two iPad-exclusive features to Final Cut Pro on the Mac: **FlexMusic** (dynamic soundtracks that automatically fit any project duration) and **Montage Maker** (auto-edit clips to the beat of a song).

@@ -154,7 +154,7 @@ is left.
 | Path | Where | Goes to |
 | --- | --- | --- |
 | JSON-RPC bridge inside Final Cut Pro | `Sources/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
-| MCP server, `Scripts/splicekit_client.py`, `tools/splicekit-watchdog.py`, `tools/fcp_runtime_export.py`, the mixer app, the Loupedeck haptics plugin | `mcp/server.py` and the named files, `Plugins/LogiHaptics/.../FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
+| MCP server, `Scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/server.py` and the named files, `Plugins/LogiHaptics/.../FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
 | Command palette helper scripts | the Swift helper that the Apple Intelligence engines spawn, and the Gemma engine's port probe | 127.0.0.1:9876 and 127.0.0.1:8080 |
 | Test suites | `tests/` | a fake bridge on 127.0.0.1 |
 
@@ -180,7 +180,7 @@ missing, as part of the one-command install.
 | Homebrew, if missing (prompted) | `Scripts/install.sh` | raw.githubusercontent.com (Homebrew's installer), then Homebrew's own mirrors |
 | Python 3.10+, if missing (prompted) | `brew install python@3.13` | Homebrew |
 | MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` | PyPI |
-| `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`), GUI patcher (`curl`) | github.com/tyilo/insert_dylib |
+| `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`) | github.com/tyilo/insert_dylib |
 | Transcriber helpers, if they need rebuilding | SwiftPM (tables above) | github.com (FluidAudio, WhisperKit) |
 | Optional OTIO tools | `pip install opentimelineio ...`, only if you run it | PyPI |
 
@@ -194,5 +194,5 @@ when you click it. Nothing is fetched until then.
 Removed from this fork, with their configuration and call sites: the Sentry
 SDK and its stubs (dylib and patcher), the Sparkle update feed (`SUFeedURL`,
 `appcast.xml`, "Check for Updates"), the patcher's "Share Logs" upload to
-filebin.net, and `release.sh` (dSYM upload, feed signing). The GitHub Pages
-site under `docs/` has no analytics script.
+filebin.net, `release.sh` (dSYM upload, feed signing), and the GitHub Pages
+site.

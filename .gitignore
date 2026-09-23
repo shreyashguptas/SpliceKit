@@ -25,11 +25,6 @@ xcuserdata/
 # Xcode build artifacts
 DerivedData/
 patcher/build/
-patcher/SpliceKit.xcodeproj/xcuserdata/
-patcher/SpliceKit.xcodeproj/project.xcworkspace/xcuserdata/
-
-# Pre-built patcher app (local build output)
-patcher/SpliceKitPatcher.app/
 
 # Keys and credentials
 *.pem
@@ -48,16 +43,6 @@ Package.resolved
 # transcription API — a clean checkout then failed to build, and the Parakeet
 # engine reported a missing binary instead of a broken build.
 !tools/*/Package.resolved
-
-# Release binaries (use GitHub Releases instead)
-patcher/SpliceKitPatcher-v*.zip
-patcher/SpliceKit-v*.dmg
-
-# Runtime metadata export (75MB+, regenerate with tools/fcp_runtime_export.py)
-ida_export/
-
-# Decompilation analysis output (multi-GB, local scratch only)
-analysis/
 
 # Local scratch/test binaries and artifacts
 out/
