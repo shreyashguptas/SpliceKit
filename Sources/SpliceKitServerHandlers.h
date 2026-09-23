@@ -22,6 +22,14 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
 NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
 NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineGetMarkers(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineGetClipInfo(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineCaptureClipFrame(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineSelectItems(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineBeginEdit(NSDictionary *params);
+NSDictionary *SpliceKit_handleTimelineEndEdit(NSDictionary *params);
+NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params);
 NSDictionary *SpliceKit_handleSpineGetItems(NSDictionary *params);
 NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params);
 NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params);
@@ -51,6 +59,8 @@ NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params);
 NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
 NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
+NSArray<NSDictionary *> *SpliceKit_windowSnapshotOffMain(void);
+NSString *SpliceKit_filesystemPathFromParam(id value);
 NSDictionary *SpliceKit_handleFlexMusicListSongs(NSDictionary *params);
 NSDictionary *SpliceKit_handleMontageAnalyze(NSDictionary *params);
 
