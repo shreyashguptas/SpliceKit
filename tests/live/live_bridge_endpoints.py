@@ -8,9 +8,9 @@ Tests every JSON-RPC endpoint exposed by the ObjC server to verify:
 3. Error cases return proper error messages
 
 Usage:
-    python3 tests/test_mcp_endpoints.py              # run all tests
-    python3 tests/test_mcp_endpoints.py --group debug # run only debug tests
-    python3 tests/test_mcp_endpoints.py --verbose     # show all responses
+    python3 tests/live/live_bridge_endpoints.py              # run all tests
+    python3 tests/live/live_bridge_endpoints.py --group debug # run only debug tests
+    python3 tests/live/live_bridge_endpoints.py --verbose     # show all responses
 
 Requires: FCP running with SpliceKit injected, bridge on 127.0.0.1:9876
 """
@@ -40,7 +40,7 @@ def _load_mcp_action_sets():
     global _MCP_SERVER
     if _MCP_SERVER is not None:
         return _MCP_SERVER
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from test_mcp_tool_annotations import load_server_module  # noqa: WPS433
 
     _MCP_SERVER = load_server_module()

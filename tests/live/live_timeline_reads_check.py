@@ -43,11 +43,11 @@ and prints, without changing the timeline:
      playhead really is back, writes /tmp/splicekit_clip_viewer_frame.jpg.
 
 Usage:
-    python3 tests/live_timeline_reads_check.py                # read-only report
-    python3 tests/live_timeline_reads_check.py --cross-check  # also verify lanes/times
-    python3 tests/live_timeline_reads_check.py --select-check --edit-check --trim-check
-    python3 tests/live_timeline_reads_check.py --clip-info-check --viewer-frame-check
-    python3 tests/live_timeline_reads_check.py --json out.json # dump raw responses
+    python3 tests/live/live_timeline_reads_check.py                # read-only report
+    python3 tests/live/live_timeline_reads_check.py --cross-check  # also verify lanes/times
+    python3 tests/live/live_timeline_reads_check.py --select-check --edit-check --trim-check
+    python3 tests/live/live_timeline_reads_check.py --clip-info-check --viewer-frame-check
+    python3 tests/live/live_timeline_reads_check.py --json out.json # dump raw responses
 
 Open a project first that has at least one title, one connected audio clip,
 one chapter marker and one to-do marker. Paste the whole output back for review.

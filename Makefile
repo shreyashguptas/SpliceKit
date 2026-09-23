@@ -94,7 +94,12 @@ MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework Core
 MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers
+# A bare `make` builds the dylib. `install` is listed first below for readers, but
+# it runs the interactive installer (a ~7 GB copy of Final Cut Pro), which must
+# never be what an unqualified `make` does.
+.DEFAULT_GOAL := all
+
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers test test-unit
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
 # copy of Final Cut Pro, the MCP server (proven over the wire with
@@ -210,6 +215,16 @@ mcp-check:
 mcp-check-live:
 	@test -x "$(MCP_PYTHON)" || { echo "[mcp-check-live] No MCP virtualenv at $(MCP_PYTHON) — run 'make mcp-setup' first"; exit 1; }
 	@"$(MCP_PYTHON)" tests/mcp_server_check.py --live
+
+# Every offline check in one command: the unit tests and the MCP wire check. None
+# of it needs Final Cut Pro. SPLICEKIT_PORT=1 points anything that would reach for
+# the bridge at a port nothing listens on, so a running Final Cut Pro is never
+# touched. The live checks (mcp-check-live, tests/live/) stay opt-in.
+test: test-unit mcp-check
+
+test-unit:
+	@test -x "$(MCP_PYTHON)" || { echo "[test-unit] No MCP virtualenv at $(MCP_PYTHON) — run 'make mcp-setup' first"; exit 1; }
+	@SPLICEKIT_PORT=1 "$(MCP_PYTHON)" -m unittest discover -s tests -p 'test_*.py'
 
 mcp-doctor:
 	@echo "== SpliceKit MCP doctor =="

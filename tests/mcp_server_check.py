@@ -20,6 +20,10 @@ Modes
 Options
   --python PATH   interpreter that runs the server (default: the one running this script)
   --json PATH     also write a machine-readable report
+  --snapshot PATH offline only: write the server's whole surface as JSON -- every tool's
+                  schema, annotations and description, every resource and prompt, and for
+                  each tool call the JSON-RPC requests it sent and the text it answered.
+                  Two snapshots that compare equal mean the server behaves the same.
   --timeout S     per-request timeout in seconds (default 60)
   --wait S        --live only: how long to keep retrying bridge_status while Final Cut
                   Pro finishes launching (default 90)
@@ -587,7 +591,26 @@ async def run_offline(args, report: Report):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _dump(obj):
+    """A pydantic model (or anything else) as plain JSON data."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json", exclude_none=True)
+    return obj
+
+
+def _scrub(value, workdir: Path, port: int):
+    """Replace what differs between runs (the temp dir, the fake bridge's port and pid,
+    wall-clock timestamps)."""
+    import re
+    text = json.dumps(value, sort_keys=True)
+    text = re.sub(r'(\\"(?:pid|timestamp)\\": )[0-9.]+', r"\1<n>", text)
+    text = text.replace(str(workdir), "<workdir>").replace(str(workdir.resolve()), "<workdir>")
+    text = text.replace(f":{port}", ":<port>")
+    return json.loads(text)
+
+
 async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"):
+    snapshot = {"tools": {}, "resources": {}, "prompts": {}} if args.snapshot else None
     env = {**os.environ, "SPLICEKIT_HOST": "127.0.0.1", "SPLICEKIT_PORT": str(bridge.port), "PYTHONUNBUFFERED": "1"}
     params = StdioServerParameters(command=args.python, args=[str(SERVER)], env=env)
     print(f"server: {args.python} {SERVER}")
@@ -617,6 +640,9 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
         resources = (await cl.list_resources()).resources
         prompts = (await cl.list_prompts()).prompts
         names = [t.name for t in tools]
+        if snapshot is not None:
+            snapshot["instructions"] = cl.instructions
+            snapshot["tool_order"] = names
         dupes = sorted({n for n in names if names.count(n) > 1})
         report.add("listing", "tools", len(tools) >= 200 and not dupes,
                    f"{len(tools)} tools" + (f"; duplicates: {dupes}" if dupes else ""))
@@ -659,6 +685,15 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
                 continue
             reached_bridge = len(bridge.calls) > calls_before
             kinds = [b.type for b in r.content]
+            if snapshot is not None:
+                snapshot["tools"][t.name] = {
+                    "definition": _dump(t),
+                    "args": call_args,
+                    "calls": [[m, p] for m, p in bridge.calls[calls_before:]],
+                    "is_error": r.is_error,
+                    "content_types": kinds,
+                    "text": full_text(r),
+                }
             detail = first_text(r)
             ok = not r.is_error
             if t.output_schema is not None and ok:
@@ -686,6 +721,8 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             try:
                 rr = await cl.read_resource(str(res.uri))
                 contents = getattr(rr, "contents", [])
+                if snapshot is not None:
+                    snapshot["resources"][str(res.uri)] = {"definition": _dump(res), "contents": _dump(rr)}
                 ok = bool(contents) and all(getattr(c, "text", None) or getattr(c, "blob", None) for c in contents)
                 detail = f"{len(contents)} content block(s)"
             except Exception as exc:  # noqa: BLE001
@@ -698,6 +735,8 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             try:
                 gp = await cl.get_prompt(pr.name, pargs)
                 msgs = getattr(gp, "messages", [])
+                if snapshot is not None:
+                    snapshot["prompts"][pr.name] = {"definition": _dump(pr), "result": _dump(gp)}
                 ok = bool(msgs)
                 detail = f"{len(msgs)} message(s)"
             except Exception as exc:  # noqa: BLE001
@@ -705,6 +744,10 @@ async def _run_offline(args, report: Report, workdir: Path, bridge: "FakeBridge"
             report.add("prompt", pr.name, ok, detail, time.time() - t0)
 
     report.add("bridge", "traffic", len(bridge.calls) > 0, f"{len(bridge.calls)} JSON-RPC calls reached the fake bridge")
+
+    if snapshot is not None:
+        Path(args.snapshot).write_text(json.dumps(_scrub(snapshot, workdir, bridge.port), indent=1, sort_keys=True) + "\n")
+        print(f"snapshot: {args.snapshot}")
 
 
 def _not_ready(text: str) -> bool:
@@ -792,6 +835,7 @@ def main(argv=None) -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--json")
+    ap.add_argument("--snapshot")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--wait", type=float, default=90.0)
     ap.add_argument("-v", "--verbose", action="store_true")

@@ -3,7 +3,7 @@
 
 This is the check the other suites do not make. `tests/mcp_server_check.py` calls every
 tool against a fake bridge, which proves a tool does not crash on a canned answer.
-`tests/test_mcp_endpoints.py --live` calls the bridge directly and skips anything that
+`tests/live/live_bridge_endpoints.py` calls the bridge directly and skips anything that
 would change the timeline. Neither one proves that a tool which edits a project
 actually edits it, so tools could sit broken for a long time while every suite stayed
 green — that is exactly how a marker-placement bug and two crashers survived.
@@ -15,7 +15,7 @@ puts it back.
     library. It refuses to start against anything else (see EXPECTED_PROJECT).
 
 Usage
-    python3 tests/live_tool_sweep.py [options]
+    python3 tests/live/live_tool_sweep.py [options]
 
     --only PREFIX     run only tools whose name starts with PREFIX (repeatable)
     --group NAME      run only one group (read / write / dependency / modal)
@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 try:
@@ -514,6 +514,8 @@ CASES.update({
                           expect=r"importOK|\bok\b",
                           cleanup=[("remove_browser_clip",
                                     {"name": "$SCRATCH_PROJECT", "include_projects": True})]),
+    # Without a job id it lists every import since Final Cut Pro started.
+    "import_fcpxml_status": read(),
     "paste_fcpxml": Case(args={"xml": "$PASTE_FCPXML"}, kind="write", timeout=300,
                          expect=r"importOK|\bok\b",
                          cleanup=[("remove_browser_clip",

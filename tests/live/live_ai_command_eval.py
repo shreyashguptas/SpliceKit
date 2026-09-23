@@ -6,9 +6,9 @@ Tests 120+ natural language queries against the command.ai endpoint,
 validates the returned action plans, and reports pass/fail with details.
 
 Usage:
-    python3 tests/test_ai_command.py              # run all tests
-    python3 tests/test_ai_command.py --group effects  # run one group
-    python3 tests/test_ai_command.py --execute    # actually execute actions (will modify timeline!)
+    python3 tests/live/live_ai_command_eval.py              # run all tests
+    python3 tests/live/live_ai_command_eval.py --group effects  # run one group
+    python3 tests/live/live_ai_command_eval.py --execute    # actually execute actions (will modify timeline!)
 
 Requires: FCP running with SpliceKit injected, bridge on 127.0.0.1:9876
 """

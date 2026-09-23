@@ -11158,10 +11158,6 @@ def _register_plugin_tools(timeout: float = None):
         return 0  # FCP not running yet — no plugin tools to register
 
 
-# Register plugin tools at startup (best-effort)
-_plugin_tool_count = _register_plugin_tools(timeout=2.0)
-
-
 @splicekit_tool("reload_plugin_tools")
 def reload_plugin_tools() -> str:
     """Reload plugin tools from SpliceKit.
@@ -11962,4 +11958,8 @@ _forbid_unknown_tool_arguments()
 # file as a subprocess and speaks JSON-RPC on its stdin/stdout. While serving, the SDK
 # points fd 1 at stderr so stray prints cannot corrupt the wire.
 if __name__ == "__main__":
+    # Plugin tools come from the running Final Cut Pro, so they are asked for only when
+    # the server really starts (best-effort: FCP may not be up yet), never on import.
+    if _register_plugin_tools(timeout=2.0):
+        _forbid_unknown_tool_arguments()
     mcp.run(transport="stdio")
