@@ -1,7 +1,7 @@
 """Tools: timeline and inspector captures."""
 
 from ..images import _image_content, _maybe_with_image
-from ..registry import splicekit_tool
+from ..registry import READ, splicekit_tool
 from ..bridge import _err, _fmt, bridge
 from .clip_info import _capture_flat_note
 
@@ -10,7 +10,7 @@ from .clip_info import _capture_flat_note
 # Capture Timeline Screenshot
 # ============================================================
 
-@splicekit_tool("capture_timeline")
+@splicekit_tool("capture_timeline", READ)
 def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bool = True):
     """Capture the FCP timeline as a PNG screenshot.
 
@@ -48,7 +48,7 @@ def capture_timeline(path: str = "/tmp/splicekit_timeline.png", return_image: bo
 # Capture Inspector Screenshot
 # ============================================================
 
-@splicekit_tool("capture_inspector")
+@splicekit_tool("capture_inspector", READ)
 def capture_inspector(path: str = "/tmp/splicekit_inspector.png", class_name: str = "",
                       return_image: bool = True):
     """Capture the FCP Inspector pane as a PNG screenshot.

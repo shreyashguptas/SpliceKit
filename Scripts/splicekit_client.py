@@ -41,7 +41,8 @@ class SpliceKit:
         """Connect to the SpliceKit TCP server."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
-        print(f"Connected to SpliceKit at {self.host}:{self.port}")
+        # stderr, so one-shot output on stdout stays pure JSON (pipeable into jq)
+        print(f"Connected to SpliceKit at {self.host}:{self.port}", file=sys.stderr)
 
     def close(self):
         """Close the connection."""
@@ -64,20 +65,31 @@ class SpliceKit:
             "id": self._id_counter,
         }
         self.sock.sendall(json.dumps(request).encode() + b"\n")
-
-        # Read until we have a complete newline-delimited response
-        while b"\n" not in self._buffer:
-            chunk = self.sock.recv(1048576)  # 1MB -- responses can be large
-            if not chunk:
-                raise ConnectionError("Server closed connection")
-            self._buffer += chunk
-
-        line, self._buffer = self._buffer.split(b"\n", 1)
-        response = json.loads(line)
+        response = self._read_response(self._id_counter)
 
         if "error" in response:
             raise Exception(f"RPC Error: {response['error']}")
         return response.get("result")
+
+    def _read_response(self, request_id):
+        """The reply to request `request_id`. Reads newline-delimited frames, buffering
+        leftover bytes for the next call, and skips event notifications (frames with a
+        "method" and no "id") that the server broadcasts on the same connection."""
+        while True:
+            while b"\n" not in self._buffer:
+                chunk = self.sock.recv(1048576)  # 1MB -- responses can be large
+                if not chunk:
+                    raise ConnectionError("Server closed connection")
+                self._buffer += chunk
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            if not line.strip():
+                continue
+            response = json.loads(line)
+            if "id" not in response and "method" in response:
+                continue  # an event notification, not the reply
+            if response.get("id") not in (request_id, None):
+                continue  # a reply to an earlier request that was abandoned
+            return response
 
     # ---- Convenience methods for common introspection tasks ----
 
@@ -216,10 +228,7 @@ def interactive_mode():
                 req["id"] = fcp._id_counter
                 req["jsonrpc"] = "2.0"
                 fcp.sock.sendall(json.dumps(req).encode() + b"\n")
-                while b"\n" not in fcp._buffer:
-                    fcp._buffer += fcp.sock.recv(1048576)
-                resp_line, fcp._buffer = fcp._buffer.split(b"\n", 1)
-                print(json.dumps(json.loads(resp_line), indent=2))
+                print(json.dumps(fcp._read_response(req["id"]), indent=2))
             elif cmd == "version":
                 result = fcp.version()
                 print(json.dumps(result, indent=2))

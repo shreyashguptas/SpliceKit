@@ -1,6 +1,6 @@
 """Tools: Flexo's parameterized timeline action methods."""
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, splicekit_tool
 from ..bridge import _err, _fmt, bridge
 
 
@@ -12,7 +12,7 @@ from ..bridge import _err, _fmt, bridge
 # real parameters (rates, durations, flags, etc). More powerful but
 # requires knowing which parameters each action needs.
 
-@splicekit_tool("direct_timeline_action")
+@splicekit_tool("direct_timeline_action", DESTRUCTIVE)
 def direct_timeline_action(action: str = "", selector: str = "",
                            rate: float = 0, ripple: bool = False,
                            allow_variable_speed: bool = True,

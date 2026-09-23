@@ -2,8 +2,8 @@
 
 import json
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ============================================================
@@ -15,7 +15,7 @@ from ..bridge import _err, _fmt, bridge
 # FCPXML title elements and imports via pasteboard.
 
 
-@splicekit_tool("open_captions")
+@splicekit_tool("open_captions", LOCAL, title="Open Captions Panel")
 def open_captions(file_url: str = "", style: str = "") -> str:
     """Open the social captions panel and start transcribing the timeline.
 
@@ -36,13 +36,10 @@ def open_captions(file_url: str = "", style: str = "") -> str:
         params["fileURL"] = file_url
     if style:
         params["style"] = style
-    r = bridge.call("captions.open", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.open", **params)
 
 
-@splicekit_tool("close_captions")
+@splicekit_tool("close_captions", LOCAL_IDEMPOTENT, title="Close Captions Panel")
 def close_captions() -> str:
     """Close the social captions panel."""
     r = bridge.call("captions.close")
@@ -51,7 +48,7 @@ def close_captions() -> str:
     return "Captions panel closed."
 
 
-@splicekit_tool("get_caption_state")
+@splicekit_tool("get_caption_state", READ)
 def get_caption_state() -> str:
     """Get the current caption panel state.
 
@@ -90,7 +87,7 @@ def get_caption_state() -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_caption_styles")
+@splicekit_tool("get_caption_styles", READ)
 def get_caption_styles() -> str:
     """List all available caption style presets.
 
@@ -112,7 +109,7 @@ def get_caption_styles() -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("set_caption_style")
+@splicekit_tool("set_caption_style", LOCAL)
 def set_caption_style(preset_id: str = "", font: str = "", font_size: float = 0,
                       text_color: str = "", highlight_color: str = "",
                       outline_color: str = "", outline_width: float = -1,
@@ -158,13 +155,10 @@ def set_caption_style(preset_id: str = "", font: str = "", font_size: float = 0,
     params["wordByWordHighlight"] = word_highlight
     params["allCaps"] = all_caps
 
-    r = bridge.call("captions.setStyle", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.setStyle", **params)
 
 
-@splicekit_tool("set_caption_grouping")
+@splicekit_tool("set_caption_grouping", LOCAL)
 def set_caption_grouping(mode: str = "social", max_words: int = 3,
                          max_chars: int = 20, max_seconds: float = 3.0) -> str:
     """Configure how words are grouped into caption segments.
@@ -177,15 +171,11 @@ def set_caption_grouping(mode: str = "social", max_words: int = 3,
         max_chars: Max characters per segment (when mode="chars", default 20)
         max_seconds: Max duration per segment (when mode="time", default 3.0)
     """
-    r = bridge.call("captions.setGrouping",
-                    mode=mode, maxWords=max_words,
-                    maxChars=max_chars, maxSeconds=max_seconds)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.setGrouping", mode=mode, maxWords=max_words, maxChars=max_chars,
+                          maxSeconds=max_seconds)
 
 
-@splicekit_tool("generate_captions")
+@splicekit_tool("generate_captions", DESTRUCTIVE)
 def generate_captions(style: str = "", position: str = "center",
                       animation: str = "pop", word_highlight: bool = True,
                       max_words: int = 3, all_caps: bool = True) -> str:
@@ -227,13 +217,10 @@ def generate_captions(style: str = "", position: str = "center",
     params["maxWords"] = max_words
     params["allCaps"] = all_caps
 
-    r = bridge.call("captions.generate", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.generate", **params)
 
 
-@splicekit_tool("export_captions_srt")
+@splicekit_tool("export_captions_srt", DESTRUCTIVE)
 def export_captions_srt(path: str) -> str:
     """Export the current captions as an SRT subtitle file.
 
@@ -246,13 +233,10 @@ def export_captions_srt(path: str) -> str:
     serve main-thread RPC. Save/open panels cannot be confirmed from the bridge —
     only dismiss_dialog(action=\"cancel\") closes them.
     """
-    r = bridge.call("captions.exportSRT", path=path)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.exportSRT", path=path)
 
 
-@splicekit_tool("export_captions_txt")
+@splicekit_tool("export_captions_txt", DESTRUCTIVE, title="Export Captions Text")
 def export_captions_txt(path: str) -> str:
     """Export the current captions as plain text.
 
@@ -263,13 +247,10 @@ def export_captions_txt(path: str) -> str:
     serve main-thread RPC. Save/open panels cannot be confirmed from the bridge —
     only dismiss_dialog(action=\"cancel\") closes them.
     """
-    r = bridge.call("captions.exportTXT", path=path)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.exportTXT", path=path)
 
 
-@splicekit_tool("set_caption_words")
+@splicekit_tool("set_caption_words", LOCAL)
 def set_caption_words(words: str) -> str:
     """Manually set caption words with timing (bypasses transcription).
 
@@ -291,13 +272,10 @@ def set_caption_words(words: str) -> str:
     except json.JSONDecodeError as e:
         return f"Invalid JSON: {e}"
 
-    r = bridge.call("captions.setWords", words=word_list)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.setWords", words=word_list)
 
 
-@splicekit_tool("generate_native_captions")
+@splicekit_tool("generate_native_captions", DESTRUCTIVE)
 def generate_native_captions(grouping: str = "word", language: str = "en",
                               max_words: int = 1, max_seconds: float = 3.0,
                               format: str = "ITT") -> str:
@@ -335,13 +313,10 @@ def generate_native_captions(grouping: str = "word", language: str = "en",
         "maxSeconds": max_seconds,
         "format": format,
     }
-    r = bridge.call("nativeCaptions.generate", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("nativeCaptions.generate", **params)
 
 
-@splicekit_tool("cleanup_temp_projects")
+@splicekit_tool("cleanup_temp_projects", DESTRUCTIVE, title="Cleanup Temp Import Projects")
 def cleanup_temp_projects(dry_run: bool = False) -> str:
     """Remove stale scratch projects left by caption and song-structure pipelines.
 
@@ -369,13 +344,10 @@ def cleanup_temp_projects(dry_run: bool = False) -> str:
 
     Returns found/removed project and event names, plus any that failed to delete.
     """
-    r = bridge.call("captions.cleanup", dryRun=dry_run)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.cleanup", dryRun=dry_run)
 
 
-@splicekit_tool("verify_native_captions")
+@splicekit_tool("verify_native_captions", READ)
 def verify_native_captions() -> str:
     """Verify native captions on the current timeline.
 
@@ -383,10 +355,7 @@ def verify_native_captions() -> str:
     objects found — their text, display names, and count. Use after
     generate_native_captions() to confirm captions were placed correctly.
     """
-    r = bridge.call("nativeCaptions.verify")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("nativeCaptions.verify")
 
 
 def _format_caption_removal_item(row: dict) -> str:
@@ -439,7 +408,7 @@ def _render_remove_captions(r: dict) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("remove_captions")
+@splicekit_tool("remove_captions", DESTRUCTIVE)
 def remove_captions(native: bool = True, dry_run: bool = False) -> str:
     """Delete caption items from the open sequence.
 

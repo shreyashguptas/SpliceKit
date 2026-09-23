@@ -2,8 +2,8 @@
 
 import json
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 from .timeline_reads import _fmt_secs, _time_seconds
 
 
@@ -13,7 +13,7 @@ from .timeline_reads import _fmt_secs, _time_seconds
 # The standard selectClipAtPlayhead only selects the primary
 # storyline clip. This tool selects clips in any lane.
 
-@splicekit_tool("select_clip_in_lane")
+@splicekit_tool("select_clip_in_lane", LOCAL_IDEMPOTENT)
 def select_clip_in_lane(lane: int = 1) -> str:
     """Select the clip at the playhead in a specific lane (connected storyline).
 
@@ -30,10 +30,7 @@ def select_clip_in_lane(lane: int = 1) -> str:
 
     Returns the selected clip's name, class, and handle for further inspection.
     """
-    r = bridge.call("timeline.selectClipInLane", lane=lane)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("timeline.selectClipInLane", lane=lane)
 
 
 # ============================================================
@@ -65,7 +62,7 @@ def _parse_handle_list(handles) -> list:
                      "or a comma-separated string")
 
 
-@splicekit_tool("select_clips")
+@splicekit_tool("select_clips", LOCAL_IDEMPOTENT)
 def select_clips(handles: list[str] | str = "", mode: str = "replace") -> str:
     """Select clips by handle -- the way to act on a specific clip after get_timeline_clips().
 
@@ -134,7 +131,7 @@ def select_clips(handles: list[str] | str = "", mode: str = "replace") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("begin_edit")
+@splicekit_tool("begin_edit", LOCAL, title="Begin Undo Step")
 def begin_edit(name: str = "Edit") -> str:
     """Open one undo step: everything until end_edit() reverts with a single Edit > Undo `name`.
 
@@ -161,7 +158,7 @@ def begin_edit(name: str = "Edit") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("end_edit")
+@splicekit_tool("end_edit", LOCAL_IDEMPOTENT, title="End Undo Step")
 def end_edit(name: str = "") -> str:
     """Close the undo step opened by begin_edit(); everything since then is one Edit > Undo entry.
 
@@ -201,7 +198,7 @@ def _trim_range_line(label, rng):
             f"(duration {rng.get('duration', 0):.3f}s)")
 
 
-@splicekit_tool("trim_clip")
+@splicekit_tool("trim_clip", DESTRUCTIVE)
 def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
               to_seconds: float | None = None, dry_run: bool = False) -> str:
     """Ripple trim one edit point (a clip's start point or end point) by handle, to an exact time.

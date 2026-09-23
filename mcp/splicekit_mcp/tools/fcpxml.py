@@ -3,8 +3,8 @@
 import json
 import time
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, _fmt, bridge
 from ..otio_fcpxml import _otio_write_fcpx_string
 
 
@@ -43,7 +43,7 @@ def _format_import_job(job: dict) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("import_fcpxml")
+@splicekit_tool("import_fcpxml", DESTRUCTIVE)
 def import_fcpxml(xml: str = "", path: str = "", internal: bool = True,
                   library: str = "", wait_seconds: float = 60) -> str:
     """Import FCPXML into Final Cut Pro, from a file on this Mac or from a string.
@@ -98,7 +98,7 @@ def import_fcpxml(xml: str = "", path: str = "", internal: bool = True,
     return _format_import_job(job)
 
 
-@splicekit_tool("import_fcpxml_status")
+@splicekit_tool("import_fcpxml_status", READ, title="FCPXML Import Status")
 def import_fcpxml_status(job_id: str = "") -> str:
     """State of an FCPXML import started by import_fcpxml (running / ok / error).
 
@@ -125,7 +125,7 @@ def import_fcpxml_status(job_id: str = "") -> str:
     return "\n".join(out)
 
 
-@splicekit_tool("import_url")
+@splicekit_tool("import_url", DESTRUCTIVE, title="Import Media URL")
 def import_url(url: str, mode: str = "import_only", target_event: str = "",
                title: str = "", highest_quality: bool = False,
                wait_until_complete: bool = True) -> str:
@@ -162,25 +162,19 @@ def import_url(url: str, mode: str = "import_only", target_event: str = "",
     return _fmt(r)
 
 
-@splicekit_tool("import_url_status")
+@splicekit_tool("import_url_status", READ, title="URL Import Status")
 def import_url_status(job_id: str) -> str:
     """Check the current status of a URL import job."""
-    r = bridge.call("urlImport.status", job_id=job_id)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("urlImport.status", job_id=job_id)
 
 
-@splicekit_tool("cancel_import_url")
+@splicekit_tool("cancel_import_url", DESTRUCTIVE, title="Cancel URL Import")
 def cancel_import_url(job_id: str) -> str:
     """Cancel an in-flight URL import job."""
-    r = bridge.call("urlImport.cancel", job_id=job_id)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("urlImport.cancel", job_id=job_id)
 
 
-@splicekit_tool("generate_fcpxml")
+@splicekit_tool("generate_fcpxml", READ)
 def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "SpliceKit Project",
                     frame_rate: str = "24", width: int = 1920, height: int = 1080,
                     items: str = "[]") -> str:

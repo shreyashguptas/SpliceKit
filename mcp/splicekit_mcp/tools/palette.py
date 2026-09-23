@@ -1,7 +1,7 @@
 """Tools: command palette, LiveCam, commands and AI commands."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ============================================================
@@ -11,7 +11,7 @@ from ..bridge import _err, _fmt, bridge
 # can also pipe queries through Apple Intelligence for natural
 # language editing commands.
 
-@splicekit_tool("show_command_palette")
+@splicekit_tool("show_command_palette", LOCAL)
 def show_command_palette() -> str:
     """Open the command palette inside FCP.
     The palette provides quick access to all FCP actions via fuzzy search,
@@ -24,7 +24,7 @@ def show_command_palette() -> str:
     return "Command palette opened."
 
 
-@splicekit_tool("hide_command_palette")
+@splicekit_tool("hide_command_palette", LOCAL_IDEMPOTENT)
 def hide_command_palette() -> str:
     """Close the command palette."""
     r = bridge.call("command.hide")
@@ -33,34 +33,25 @@ def hide_command_palette() -> str:
     return "Command palette closed."
 
 
-@splicekit_tool("livecam_open")
+@splicekit_tool("livecam_open", LOCAL_IDEMPOTENT, title="Open LiveCam")
 def livecam_open() -> str:
     """Open the LiveCam panel inside Final Cut Pro."""
-    r = bridge.call("liveCam.show")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("liveCam.show")
 
 
-@splicekit_tool("livecam_close")
+@splicekit_tool("livecam_close", LOCAL_IDEMPOTENT, title="Close LiveCam")
 def livecam_close() -> str:
     """Close the LiveCam panel."""
-    r = bridge.call("liveCam.hide")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("liveCam.hide")
 
 
-@splicekit_tool("livecam_status")
+@splicekit_tool("livecam_status", READ, title="Get LiveCam Status")
 def livecam_status() -> str:
     """Get the current LiveCam panel state, selected devices, recording flags, and destination."""
-    r = bridge.call("liveCam.status")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("liveCam.status")
 
 
-@splicekit_tool("search_commands")
+@splicekit_tool("search_commands", READ)
 def search_commands(query: str, limit: int = 20) -> str:
     """Search available FCP commands by name, keyword, or category.
 
@@ -87,7 +78,7 @@ def search_commands(query: str, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("execute_command")
+@splicekit_tool("execute_command", DESTRUCTIVE)
 def execute_command(action: str, type: str = "timeline") -> str:
     """Execute a command from the palette by action name.
 
@@ -97,16 +88,13 @@ def execute_command(action: str, type: str = "timeline") -> str:
 
     This is equivalent to selecting a command in the palette and pressing Enter.
     """
-    r = bridge.call("command.execute", action=action, type=type)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("command.execute", action=action, type=type)
 
 
 _AI_COMMAND_ENGINES = ("standard", "agentic", "gemma")
 
 
-@splicekit_tool("ai_command")
+@splicekit_tool("ai_command", DESTRUCTIVE)
 def ai_command(query: str, engine: str = "") -> str:
     """Use Apple Intelligence (on-device LLM) to interpret a natural language
     editing instruction and execute the appropriate FCP actions.
@@ -227,7 +215,7 @@ def ai_command(query: str, engine: str = "") -> str:
     return f"AI executed {len(actions)} action(s):\n" + "\n".join(results)
 
 
-@splicekit_tool("ai_command_gemma")
+@splicekit_tool("ai_command_gemma", DESTRUCTIVE)
 def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bit") -> str:
     """Use Gemma 4 (via MLX on Apple Silicon) for agentic natural language editing.
 

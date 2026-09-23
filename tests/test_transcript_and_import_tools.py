@@ -13,24 +13,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module  # noqa: E402
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
 
 
-class TranscriptAndImportToolTests(unittest.TestCase):
+class TranscriptAndImportToolTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
-
-    def _install_bridge(self, responder):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
-            return responder(method, params)
-
-        self.module.bridge.call = fake_call
-        return calls
 
     # ── open_transcript ───────────────────────────────────────────────────
 

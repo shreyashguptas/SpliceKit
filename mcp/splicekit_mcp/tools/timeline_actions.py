@@ -1,6 +1,6 @@
 """Tools: the timeline / playback action dispatchers and playback speed."""
 
-from ..registry import _lists_actions, splicekit_tool
+from ..registry import _lists_actions, DESTRUCTIVE, LOCAL, splicekit_tool
 from ..bridge import _call_or_error
 
 
@@ -88,7 +88,7 @@ TIMELINE_HISTORY_ACTIONS = {
 # These map directly to FCP's IBAction methods on the timeline module.
 # Most require a clip to be selected first (selectClipAtPlayhead).
 
-@splicekit_tool("timeline_action")
+@splicekit_tool("timeline_action", DESTRUCTIVE)
 def timeline_action(action: str, dry_run: bool = False) -> str:
     """Use this legacy catch-all tool when a timeline action does not fit the narrower action tools.
 
@@ -170,7 +170,7 @@ def timeline_action(action: str, dry_run: bool = False) -> str:
     return _call_or_error("timeline.action", action=action, dry_run=dry_run)
 
 
-@splicekit_tool("timeline_navigation_action")
+@splicekit_tool("timeline_navigation_action", LOCAL)
 @_lists_actions(TIMELINE_NAVIGATION_ACTIONS,
                 "Nothing here changes the project. For edits use timeline_edit_action(), for "
                 "deletes and trims timeline_destructive_action(), for undo/redo history_action().")
@@ -188,7 +188,7 @@ def timeline_navigation_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@splicekit_tool("timeline_edit_action")
+@splicekit_tool("timeline_edit_action", LOCAL)
 @_lists_actions(TIMELINE_EDIT_ACTIONS,
                 "These change the project but do not remove media: markers, effects, titles, "
                 "roles, ranges. Undo with history_action(\"undo\"). For deletes, cuts, blades, "
@@ -207,7 +207,7 @@ def timeline_edit_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@splicekit_tool("timeline_destructive_action")
+@splicekit_tool("timeline_destructive_action", DESTRUCTIVE)
 @_lists_actions(TIMELINE_DESTRUCTIVE_ACTIONS,
                 "Every one of these removes or rewrites timeline content. Most are undoable with "
                 "history_action(\"undo\") — check the result and verify with get_timeline_clips() "
@@ -226,7 +226,7 @@ def timeline_destructive_action(action: str) -> str:
     return _call_or_error("timeline.action", action=action)
 
 
-@splicekit_tool("history_action")
+@splicekit_tool("history_action", DESTRUCTIVE, title="Timeline History Action")
 @_lists_actions(TIMELINE_HISTORY_ACTIONS)
 def history_action(action: str) -> str:
     """Undo or redo the last timeline edit.
@@ -280,7 +280,7 @@ def _playback_action_doc() -> str:
     )
 
 
-@splicekit_tool("playback_action")
+@splicekit_tool("playback_action", LOCAL)
 def playback_action(action: str) -> str:
     """Use this tool to move playback state without changing timeline content."""
     if action not in PLAYBACK_ACTIONS:
@@ -294,7 +294,7 @@ def playback_action(action: str) -> str:
 playback_action.__doc__ = _playback_action_doc()
 
 
-@splicekit_tool("set_playback_speed")
+@splicekit_tool("set_playback_speed", LOCAL)
 def set_playback_speed(rate: float = None, action: str = None) -> str:
     """Set playback speed to an exact rate, or use shuttle actions.
 

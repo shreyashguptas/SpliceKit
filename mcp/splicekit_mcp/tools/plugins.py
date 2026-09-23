@@ -5,7 +5,7 @@ import json
 from ..sdk import ToolAnnotations
 from ..app import mcp
 from ..registry import (
-    _forbid_unknown_tool_arguments, _guard_tool_errors, LOCAL_WRITE, LOCAL_WRITE_TOOLS,
+    _forbid_unknown_tool_arguments, _guard_tool_errors, LOCAL_WRITE, LOCAL_WRITE_TOOLS, READ,
     READ_ONLY, READ_ONLY_TOOLS, splicekit_tool,
 )
 from ..bridge import _call_or_error, _err, _fmt, bridge
@@ -19,13 +19,13 @@ from ..bridge import _call_or_error, _err, _fmt, bridge
 # all registered plugin methods with metadata.
 
 
-@splicekit_tool("plugin_list")
+@splicekit_tool("plugin_list", READ)
 def plugin_list() -> str:
     """List all loaded SpliceKit plugins with their manifests."""
     return _call_or_error("plugin.list")
 
 
-@splicekit_tool("plugin_list_methods")
+@splicekit_tool("plugin_list_methods", READ)
 def plugin_list_methods() -> str:
     """List all registered plugin methods with descriptions and parameter schemas."""
     return _call_or_error("plugin.listMethods")
@@ -92,7 +92,7 @@ def _register_plugin_tools(timeout: float = None):
         return 0  # FCP not running yet — no plugin tools to register
 
 
-@splicekit_tool("reload_plugin_tools")
+@splicekit_tool("reload_plugin_tools", READ)
 def reload_plugin_tools() -> str:
     """Reload plugin tools from SpliceKit.
 

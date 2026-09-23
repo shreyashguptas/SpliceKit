@@ -58,13 +58,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import socket
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import live_rpc  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 9876
-_id = 0
 RAW: dict = {}
 
 # Selectors the bridge code probes (Sources/Bridge/SpliceKitServerTimelineRead.m, timeline.getDetailedState).
@@ -86,23 +88,7 @@ RELEVANT = re.compile(r"(todo|ToDo|Todo|chapter|Chapter|complet|Complet|note|Not
 
 
 def rpc(method, params=None, timeout=20):
-    global _id
-    _id += 1
-    req = {"jsonrpc": "2.0", "method": method, "id": _id}
-    if params:
-        req["params"] = params
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(req) + "\n").encode())
-    data = b""
-    while b"\n" not in data:
-        chunk = s.recv(1 << 20)
-        if not chunk:
-            break
-        data += chunk
-    s.close()
-    resp = json.loads(data.decode().strip())
+    resp = live_rpc.rpc(method, params, timeout, host=HOST, port=PORT)
     if "result" in resp:
         res = resp["result"]
     else:

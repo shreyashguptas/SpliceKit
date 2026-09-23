@@ -1,7 +1,7 @@
 """Tools: playhead position, dialogs, viewer zoom, SpliceKit options."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error
 
 
 # ============================================================
@@ -9,7 +9,7 @@ from ..bridge import _err, _fmt, bridge
 # ============================================================
 # Query current playhead position, frame rate, and play state.
 
-@splicekit_tool("get_playhead_position")
+@splicekit_tool("get_playhead_position", READ)
 def get_playhead_position() -> str:
     """Get the current playhead position, timeline duration, frame rate, and playing state.
 
@@ -22,10 +22,7 @@ def get_playhead_position() -> str:
     Use this to monitor playhead position during playback or to know
     exact position before performing edits.
     """
-    r = bridge.call("playback.getPosition")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("playback.getPosition")
 
 
 # ============================================================
@@ -35,7 +32,7 @@ def get_playhead_position() -> str:
 # export, missing media, etc). These tools detect and interact with
 # them so the AI can handle dialogs without human intervention.
 
-@splicekit_tool("detect_dialog")
+@splicekit_tool("detect_dialog", READ)
 def detect_dialog(view_tree: bool = False) -> str:
     """Detect if any dialog, sheet, alert, or popup is currently showing in FCP.
 
@@ -63,13 +60,10 @@ def detect_dialog(view_tree: bool = False) -> str:
                    actually built the sheet from. Capped at 2048 nodes per dialog.
     """
     params = {"viewTree": True} if view_tree else {}
-    r = bridge.call("dialog.detect", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.detect", **params)
 
 
-@splicekit_tool("click_dialog_button")
+@splicekit_tool("click_dialog_button", DESTRUCTIVE)
 def click_dialog_button(button: str = "", index: int = -1) -> str:
     """Click a button in the currently showing dialog/sheet/alert.
 
@@ -94,13 +88,10 @@ def click_dialog_button(button: str = "", index: int = -1) -> str:
         params["button"] = button
     if index >= 0:
         params["index"] = index
-    r = bridge.call("dialog.click", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.click", **params)
 
 
-@splicekit_tool("fill_dialog_field")
+@splicekit_tool("fill_dialog_field", DESTRUCTIVE)
 def fill_dialog_field(value: str, index: int = 0) -> str:
     """Fill a text field in the currently showing dialog.
 
@@ -113,13 +104,10 @@ def fill_dialog_field(value: str, index: int = 0) -> str:
     Filling a field does not commit anything on its own, but it decides what the button
     you click next will act on — a name typed here is the name a Save panel will use.
     """
-    r = bridge.call("dialog.fill", value=value, index=index)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.fill", value=value, index=index)
 
 
-@splicekit_tool("toggle_dialog_checkbox")
+@splicekit_tool("toggle_dialog_checkbox", DESTRUCTIVE)
 def toggle_dialog_checkbox(checkbox: str = "", index: int = -1, checked: bool = None) -> str:
     """Toggle or set a checkbox in the currently showing dialog.
 
@@ -145,13 +133,10 @@ def toggle_dialog_checkbox(checkbox: str = "", index: int = -1, checked: bool = 
         params["index"] = index
     if checked is not None:
         params["checked"] = checked
-    r = bridge.call("dialog.checkbox", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.checkbox", **params)
 
 
-@splicekit_tool("select_dialog_popup")
+@splicekit_tool("select_dialog_popup", DESTRUCTIVE)
 def select_dialog_popup(select: str, popup_index: int = 0) -> str:
     """Select an item from a popup menu in the currently showing dialog.
 
@@ -165,13 +150,10 @@ def select_dialog_popup(select: str, popup_index: int = 0) -> str:
     destination, a codec — so read the dialog before setting one, and there is no undo
     once the dialog is confirmed.
     """
-    r = bridge.call("dialog.popup", select=select, popupIndex=popup_index)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.popup", select=select, popupIndex=popup_index)
 
 
-@splicekit_tool("dismiss_dialog")
+@splicekit_tool("dismiss_dialog", DESTRUCTIVE)
 def dismiss_dialog(action: str = "cancel") -> str:
     """Dismiss the currently showing dialog without committing (by default).
 
@@ -190,10 +172,7 @@ def dismiss_dialog(action: str = "cancel") -> str:
     Automatically finds and clicks the appropriate button to dismiss
     the dialog, sheet, or alert.
     """
-    r = bridge.call("dialog.dismiss", action=action)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("dialog.dismiss", action=action)
 
 
 # ============================================================
@@ -201,20 +180,17 @@ def dismiss_dialog(action: str = "cancel") -> str:
 # ============================================================
 # Get/set the canvas zoom level. 0.0 = fit-to-window.
 
-@splicekit_tool("get_viewer_zoom")
+@splicekit_tool("get_viewer_zoom", READ)
 def get_viewer_zoom() -> str:
     """Get the current viewer zoom level.
 
     Returns the zoom factor (0.0 = Fit, 1.0 = 100%, 2.0 = 200%, etc.),
     the reported zoom percentage, and whether the viewer is in Fit mode.
     """
-    r = bridge.call("viewer.getZoom")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("viewer.getZoom")
 
 
-@splicekit_tool("set_viewer_zoom")
+@splicekit_tool("set_viewer_zoom", LOCAL_IDEMPOTENT)
 def set_viewer_zoom(zoom: float) -> str:
     """Set the viewer zoom level to any value.
 
@@ -223,10 +199,7 @@ def set_viewer_zoom(zoom: float) -> str:
               1.5 = 150%, 2.0 = 200%, etc. Any float value is accepted
               (not limited to FCP's preset percentages).
     """
-    r = bridge.call("viewer.setZoom", zoom=zoom)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("viewer.setZoom", zoom=zoom)
 
 
 # ============================================================
@@ -234,7 +207,7 @@ def set_viewer_zoom(zoom: float) -> str:
 # ============================================================
 # Runtime configuration for SpliceKit's own behavioral tweaks.
 
-@splicekit_tool("get_bridge_options")
+@splicekit_tool("get_bridge_options", READ)
 def get_bridge_options() -> str:
     """Get the current SpliceKit option settings.
 
@@ -242,13 +215,10 @@ def get_bridge_options() -> str:
     (e.g. effectDragAsAdjustmentClip, viewerPinchZoom, videoOnlyKeepsAudioDisabled,
     suppressAutoImport, defaultSpatialConformType).
     """
-    r = bridge.call("options.get")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("options.get")
 
 
-@splicekit_tool("set_bridge_option")
+@splicekit_tool("set_bridge_option", LOCAL_IDEMPOTENT)
 def set_bridge_option(option: str, enabled: bool) -> str:
     """Toggle a boolean SpliceKit option.
 
@@ -266,13 +236,10 @@ def set_bridge_option(option: str, enabled: bool) -> str:
                 For "defaultSpatialConformType", use set_bridge_option_value() instead.
         enabled: True to enable, False to disable
     """
-    r = bridge.call("options.set", option=option, enabled=enabled)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("options.set", option=option, enabled=enabled)
 
 
-@splicekit_tool("set_bridge_option_value")
+@splicekit_tool("set_bridge_option_value", LOCAL_IDEMPOTENT)
 def set_bridge_option_value(option: str, value: str) -> str:
     """Set a string-valued SpliceKit option.
 
@@ -284,7 +251,4 @@ def set_bridge_option_value(option: str, value: str) -> str:
                "fill" - Fill (scale to fill frame, crops edges)
                "none" - None (native resolution, no scaling)
     """
-    r = bridge.call("options.set", option=option, value=value)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("options.set", option=option, value=value)

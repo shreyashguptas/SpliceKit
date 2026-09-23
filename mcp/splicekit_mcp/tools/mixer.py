@@ -1,6 +1,6 @@
 """Tools: SpliceKit's audio mixer."""
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
 from ..bridge import _err, bridge
 
 
@@ -10,7 +10,7 @@ from ..bridge import _err, bridge
 # Real-time audio mixer with per-clip volume faders.
 # Returns clips overlapping the playhead with volume levels.
 
-@splicekit_tool("mixer_get_state")
+@splicekit_tool("mixer_get_state", READ)
 def mixer_get_state() -> str:
     """Get current mixer state: all clips overlapping the playhead with their volumes.
 
@@ -54,7 +54,7 @@ def mixer_get_state() -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("mixer_set_volume")
+@splicekit_tool("mixer_set_volume", DESTRUCTIVE)
 def mixer_set_volume(handle: str, volume_db: float = None,
                      volume_linear: float = None) -> str:
     """Set volume on a specific clip via its volumeChannelHandle.
@@ -83,7 +83,7 @@ def mixer_set_volume(handle: str, volume_db: float = None,
     return f"Volume set: {db_str} dB (linear: {r.get('volumeLinear', 0):.3f})"
 
 
-@splicekit_tool("mixer_set_solo")
+@splicekit_tool("mixer_set_solo", LOCAL)
 def mixer_set_solo(index: int = -1, role: str = "", mode: str = "toggle",
                    solo: bool = None) -> str:
     """Solo, unsolo, or clear solo for a mixer role fader.
@@ -112,7 +112,7 @@ def mixer_set_solo(index: int = -1, role: str = "", mode: str = "toggle",
     return f"Mixer role {target}: {state} ({r.get('soloObjectCount', 0)} soloed objects)"
 
 
-@splicekit_tool("mixer_set_mute")
+@splicekit_tool("mixer_set_mute", LOCAL)
 def mixer_set_mute(index: int = -1, role: str = "", mode: str = "toggle",
                    muted: bool = None) -> str:
     """Mute, unmute, or clear mute for a mixer role fader.
@@ -144,7 +144,7 @@ def mixer_set_mute(index: int = -1, role: str = "", mode: str = "toggle",
     return f"Mixer role {target}: {state} ({r.get('roleUIDCount', 0)} role UIDs)"
 
 
-@splicekit_tool("mixer_apply_bus_effect")
+@splicekit_tool("mixer_apply_bus_effect", DESTRUCTIVE)
 def mixer_apply_bus_effect(effect_id: str = "", name: str = "",
                            index: int = -1, role: str = "",
                            dry_run: bool = False,
@@ -185,7 +185,7 @@ def mixer_apply_bus_effect(effect_id: str = "", name: str = "",
     return f"Applied {effect_name} to mixer role {target} ({count} bus object{'s' if count != 1 else ''})"
 
 
-@splicekit_tool("mixer_open_bus_effect")
+@splicekit_tool("mixer_open_bus_effect", LOCAL)
 def mixer_open_bus_effect(effect_index: int = -1, index: int = -1, role: str = "",
                           effect_handle: str = "", effect_stack_handle: str = "",
                           allow_object_fallback: bool = False) -> str:
@@ -221,7 +221,7 @@ def mixer_open_bus_effect(effect_index: int = -1, index: int = -1, role: str = "
     return f"Opened {effect_name} editor for mixer role {target}"
 
 
-@splicekit_tool("mixer_set_bus_effect_enabled")
+@splicekit_tool("mixer_set_bus_effect_enabled", DESTRUCTIVE)
 def mixer_set_bus_effect_enabled(effect_index: int = -1, enabled: bool = True,
                                  index: int = -1, role: str = "",
                                  effect_handle: str = "", effect_stack_handle: str = "",
@@ -261,7 +261,7 @@ def mixer_set_bus_effect_enabled(effect_index: int = -1, enabled: bool = True,
     return f"Mixer bus effect {effect_index} on {target}: {state}"
 
 
-@splicekit_tool("mixer_remove_bus_effect")
+@splicekit_tool("mixer_remove_bus_effect", DESTRUCTIVE)
 def mixer_remove_bus_effect(effect_index: int = -1, index: int = -1, role: str = "",
                             effect_handle: str = "", effect_stack_handle: str = "",
                             allow_object_fallback: bool = False) -> str:
@@ -296,7 +296,7 @@ def mixer_remove_bus_effect(effect_index: int = -1, index: int = -1, role: str =
     return f"Removed mixer bus effect {effect_index} from {target} ({count} bus object{'s' if count != 1 else ''})"
 
 
-@splicekit_tool("mixer_volume_begin")
+@splicekit_tool("mixer_volume_begin", LOCAL_IDEMPOTENT)
 def mixer_volume_begin(effect_stack_handle: str) -> str:
     """Begin an undo-batched volume change (call before a series of mixer_set_volume).
 
@@ -312,7 +312,7 @@ def mixer_volume_begin(effect_stack_handle: str) -> str:
     return "Undo transaction opened for volume adjustment"
 
 
-@splicekit_tool("mixer_volume_end")
+@splicekit_tool("mixer_volume_end", LOCAL_IDEMPOTENT)
 def mixer_volume_end(effect_stack_handle: str) -> str:
     """End an undo-batched volume change (call after mixer_set_volume series).
 
@@ -327,7 +327,7 @@ def mixer_volume_end(effect_stack_handle: str) -> str:
     return "Undo transaction closed"
 
 
-@splicekit_tool("mixer_set_all_volumes")
+@splicekit_tool("mixer_set_all_volumes", DESTRUCTIVE)
 def mixer_set_all_volumes(volumes: list) -> str:
     """Set volumes for multiple faders at once.
 

@@ -88,9 +88,6 @@ class FakeMCPServer:
         return decorator
 
 
-# Kept under the old name for tests written against it.
-FakeFastMCP = FakeMCPServer
-
 
 def load_server_module():
     repo_root = Path(__file__).resolve().parents[2]

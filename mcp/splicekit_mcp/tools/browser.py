@@ -1,7 +1,7 @@
 """Tools: browser clips, placing source clips, import, titles."""
 
-from ..registry import splicekit_tool
-from ..bridge import _call, _err, _fmt, bridge, bridge_tool
+from ..registry import DESTRUCTIVE, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 from .timeline_reads import _s3
 
 
@@ -11,7 +11,7 @@ from .timeline_reads import _s3
 # ---------------------------------------------------------------------------
 
 
-@splicekit_tool("browser_list_clips")
+@splicekit_tool("browser_list_clips", READ, title="List Browser Clips")
 def browser_list_clips(event: str = "") -> str:
     """List what is in the browser (the active library's events): name, event, duration,
     a handle, and whether each row is a project.
@@ -35,13 +35,10 @@ def browser_list_clips(event: str = "") -> str:
     params = {}
     if event:
         params["event"] = event
-    r = bridge.call("browser.listClips", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("browser.listClips", **params)
 
 
-@splicekit_tool("browser_append_clip")
+@splicekit_tool("browser_append_clip", DESTRUCTIVE, title="Append Browser Clip")
 def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> str:
     """Append a whole browser clip at the end of the primary storyline (FCP: Append, E).
     Shortcut for add_clip_to_timeline(edit="append"); use that tool for a range of the
@@ -66,10 +63,7 @@ def browser_append_clip(handle: str = "", index: int = -1, name: str = "") -> st
         params["index"] = index
     if name:
         params["name"] = name
-    r = bridge.call("browser.appendClip", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("browser.appendClip", **params)
 
 
 def _yes_no(value) -> str:
@@ -143,8 +137,7 @@ def _render_place_clip(r: dict) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("add_clip_to_timeline")
-@bridge_tool
+@splicekit_tool("add_clip_to_timeline", DESTRUCTIVE)
 def add_clip_to_timeline(handle: str = "", name: str = "", index: int = -1,
                          edit: str = "append",
                          start_seconds: float | None = None, end_seconds: float | None = None,
@@ -219,11 +212,13 @@ def add_clip_to_timeline(handle: str = "", name: str = "", index: int = -1,
         params["backtimed"] = True
     if dry_run:
         params["dryRun"] = True
-    r = _call("browser.placeClip", **params)
+    r = bridge.call("browser.placeClip", **params)
+    if _err(r):
+        return f"Error: {r.get('error', str(r))}"
     return _render_place_clip(r)
 
 
-@splicekit_tool("import_media")
+@splicekit_tool("import_media", DESTRUCTIVE, title="Import Media Files")
 def import_media(paths: list[str] | None = None,
                  path: str = "",
                  event: str = "",
@@ -257,13 +252,10 @@ def import_media(paths: list[str] | None = None,
         params["event"] = event
     if library:
         params["library"] = library
-    r = bridge.call("media.importFile", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("media.importFile", **params)
 
 
-@splicekit_tool("remove_browser_clip")
+@splicekit_tool("remove_browser_clip", DESTRUCTIVE)
 def remove_browser_clip(handle: str = "", name: str = "", event: str = "",
                         library: str = "", include_projects: bool = False,
                         dry_run: bool = False) -> str:
@@ -310,13 +302,10 @@ def remove_browser_clip(handle: str = "", name: str = "", event: str = "",
     if not handle and not name:
         return ("Error: provide `handle` (from browser_list_clips or import_media) or "
                 "`name` (the clip's name exactly as the browser shows it)")
-    r = bridge.call("media.removeClip", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("media.removeClip", **params)
 
 
-@splicekit_tool("paste_fcpxml")
+@splicekit_tool("paste_fcpxml", DESTRUCTIVE)
 def paste_fcpxml(xml: str = "") -> str:
     """Import FCPXML content via the pasteboard (no file I/O, no dialogs).
 
@@ -329,13 +318,10 @@ def paste_fcpxml(xml: str = "") -> str:
     params = {}
     if xml:
         params["xml"] = xml
-    r = bridge.call("fcpxml.pasteImport", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("fcpxml.pasteImport", **params)
 
 
-@splicekit_tool("stabilize_subject")
+@splicekit_tool("stabilize_subject", DESTRUCTIVE)
 def stabilize_subject() -> str:
     """Stabilize the selected clip around a tracked subject.
 
@@ -346,13 +332,10 @@ def stabilize_subject() -> str:
     Requirements: a clip must be selected and the playhead should be on a frame
     where the subject is clearly visible.
     """
-    r = bridge.call("stabilize.subject")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("stabilize.subject")
 
 
-@splicekit_tool("insert_title")
+@splicekit_tool("insert_title", DESTRUCTIVE)
 def insert_title(name: str = "", effect_id: str = "") -> str:
     """Insert a title or generator into the timeline.
 
@@ -368,13 +351,10 @@ def insert_title(name: str = "", effect_id: str = "") -> str:
         params["name"] = name
     if effect_id:
         params["effectID"] = effect_id
-    r = bridge.call("titles.insert", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("titles.insert", **params)
 
 
-@splicekit_tool("set_transcript_engine")
+@splicekit_tool("set_transcript_engine", LOCAL_IDEMPOTENT)
 def set_transcript_engine(engine: str) -> str:
     """Set the speech recognition engine for transcript panel.
 
@@ -387,7 +367,4 @@ def set_transcript_engine(engine: str) -> str:
             - "appleSpeech": Apple's SFSpeechRecognizer (slower; needs the Speech
               Recognition permission)
     """
-    r = bridge.call("transcript.setEngine", engine=engine)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.setEngine", engine=engine)

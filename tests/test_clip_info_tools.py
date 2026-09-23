@@ -8,7 +8,6 @@ capture_inspector, the annotations of the new tools, and the absence of a return
 annotation on every tool that may return [text, Image] (FastMCP only emits mixed
 content for unannotated tools).
 """
-import base64
 import inspect
 import os
 import sys
@@ -18,11 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import load_server_module, set_package_global  # noqa: E402
-
-# A valid 1x1 PNG; the tools only pass the bytes through, so the pixel format is irrelevant.
-TINY_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJ"
-                "RU5ErkJggg==")
-TINY_PNG = base64.b64decode(TINY_PNG_B64)
+from support.fake_bridge import FakeBridgeMixin  # noqa: E402
+from support.payloads import capture_clip_frame_response, clip_info_response, TINY_PNG, TINY_PNG_B64  # noqa: E402
 
 
 class _StubImage:
@@ -36,68 +32,7 @@ class _StubImage:
         self.format = format
 
 
-def _cmtime(seconds, timescale=600):
-    return {"value": int(round(seconds * timescale)), "timescale": timescale, "seconds": seconds}
-
-
-def _clip_info_response(params, **overrides):
-    out = {
-        "handle": params["handle"], "name": "Interview A", "class": "FFAnchoredMediaComponent",
-        "kind": "video clip", "onPrimaryStoryline": True, "lane": 0,
-        "startTime": _cmtime(0.0), "endTime": _cmtime(6.0), "duration": _cmtime(6.0),
-        "timeline": {"start": 0.0, "end": 6.0, "duration": 6.0},
-        "enabled": True, "hasVideo": True, "hasAudio": True, "selected": False,
-        "roles": {"video": "Video", "audio": "Dialogue"},
-        "notes": "Good take",
-        "sourceMedia": {
-            "path": "/Volumes/Media/interview_a.mov", "fileName": "interview_a.mov", "exists": True,
-            "representation": "original", "urlSource": "media.originalMediaURL",
-            "sourceStart": 12.5, "sourceStartSelector": "trimStartTime",
-            "mediaOrigin": 0.0, "mediaOriginSelector": "unclippedRange",
-            "fileStart": 12.5, "fileEnd": 18.5,
-        },
-        "effects": [{"class": "FFColorBoardEffect", "name": "Color Board",
-                     "effectID": "FFColorBoardEffect", "handle": "obj_50"}],
-        "effectCount": 1, "effectStackHandle": "obj_49",
-        "title": {"text": "Hello", "fontName": "Helvetica-Bold", "fontFamily": "Helvetica",
-                  "fontSize": 72, "textColor": "1.000 1.000 1.000 1.000",
-                  "channels": [{"text": "Hello", "channelName": "Text"}], "channelCount": 1},
-        "markers": [{"handle": "obj_21", "class": "FFAnchoredMarker", "kind": "todo",
-                     "name": "Fix audio", "time": _cmtime(1.5), "parentHandle": params["handle"]}],
-        "markerCount": 1,
-        "transcript": {
-            "available": True, "status": "ready", "engine": "parakeet", "wordCount": 3,
-            "matchedByHandle": 3, "truncated": False, "speakers": ["Host"],
-            "text": "hello there world",
-            "words": [{"text": "hello", "startTime": 0.5, "endTime": 0.8, "confidence": 0.9, "speaker": "Host"},
-                      {"text": "there", "startTime": 0.9, "endTime": 1.2, "confidence": 0.8, "speaker": "Host"},
-                      {"text": "world", "startTime": 1.3, "endTime": 1.7, "confidence": 0.7, "speaker": "Host"}],
-        },
-        "frame": {"format": "jpeg", "width": 640, "height": 360, "base64": TINY_PNG_B64,
-                  "bytes": len(TINY_PNG), "timelineTime": 3.0, "sourceTime": 15.5, "mediaOrigin": 0.0,
-                  "fileTime": 15.5, "actualFileTime": 15.5, "source": "media file", "maxWidth": 640},
-        "timings": {"mainThreadMs": 4.2, "frameMs": 120.0},
-    }
-    out.update(overrides)
-    return out
-
-
-def _capture_clip_frame_response(params, **overrides):
-    out = {
-        "status": "ok", "handle": params["handle"], "name": "Interview A",
-        "class": "FFAnchoredMediaComponent", "timelineTime": params.get("frameTime", 3.0),
-        "playheadBefore": 10.0, "playheadAtCapture": params.get("frameTime", 3.0),
-        "playheadAfter": 10.0, "playheadRestored": True, "restorePlayhead": True,
-        "path": f"/tmp/splicekit_clip_{params['handle']}.png",
-        "capture": {"width": 1920, "height": 1080, "bytes": 12345, "cropped": True},
-        "frame": {"format": "jpeg", "width": 960, "height": 540, "base64": TINY_PNG_B64,
-                  "bytes": len(TINY_PNG), "source": "viewer", "maxWidth": 960},
-    }
-    out.update(overrides)
-    return out
-
-
-class ClipInfoToolTests(unittest.TestCase):
+class ClipInfoToolTests(FakeBridgeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_server_module()
@@ -111,22 +46,10 @@ class ClipInfoToolTests(unittest.TestCase):
     def tearDown(self):
         set_package_global(self.module, "Image", None)
 
-    def _install_bridge(self, responder):
-        calls = []
-
-        def fake_call(method, params_dict=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
-            return responder(method, params)
-
-        self.module.bridge.call = fake_call
-        return calls
-
     # ── get_clip_info ─────────────────────────────────────────────────────
 
     def test_get_clip_info_forwards_params_and_frame_time_only_when_given(self):
-        calls = self._install_bridge(lambda m, p: _clip_info_response(p))
+        calls = self._install_bridge(lambda m, p: clip_info_response(p))
         self.module.get_clip_info("obj_1")
         self.module.get_clip_info("obj_1", include_frame=False, frame_time=2.5, frame_max_width=320)
         self.assertEqual(
@@ -139,13 +62,13 @@ class ClipInfoToolTests(unittest.TestCase):
         )
 
     def test_get_clip_info_requires_handle_without_calling_bridge(self):
-        calls = self._install_bridge(lambda m, p: _clip_info_response(p))
+        calls = self._install_bridge(lambda m, p: clip_info_response(p))
         out = self.module.get_clip_info("")
         self.assertTrue(out.startswith("Error:"), out)
         self.assertEqual(calls, [])
 
     def test_get_clip_info_renders_every_section_and_returns_image(self):
-        self._install_bridge(lambda m, p: _clip_info_response(p))
+        self._install_bridge(lambda m, p: clip_info_response(p))
         out = self.module.get_clip_info("obj_1")
         self.assertIsInstance(out, list)
         self.assertEqual(len(out), 2)
@@ -177,7 +100,7 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertIsNone(image.path)
 
     def test_get_clip_info_text_only_when_image_class_unavailable(self):
-        self._install_bridge(lambda m, p: _clip_info_response(p))
+        self._install_bridge(lambda m, p: clip_info_response(p))
         set_package_global(self.module, "Image", None)
         out = self.module.get_clip_info("obj_1")
         self.assertIsInstance(out, str)
@@ -186,7 +109,7 @@ class ClipInfoToolTests(unittest.TestCase):
 
     def test_get_clip_info_renders_connected_title_without_media_or_frame(self):
         def responder(method, params):
-            r = _clip_info_response(params, kind="title", onPrimaryStoryline=False, lane=1,
+            r = clip_info_response(params, kind="title", onPrimaryStoryline=False, lane=1,
                                     hasAudio=False, selected=True, enabled=False,
                                     roles={"video": "Titles"},
                                     frameError="no source media file to read a frame from (title, generator or gap clip); use timeline.captureClipFrame for the Viewer",
@@ -214,7 +137,7 @@ class ClipInfoToolTests(unittest.TestCase):
         # QA run 3: a compound (FCP: reference clip) must not be given a source media file or a
         # frame decoded from one; the bridge now answers sourceMediaError + frameError for it.
         def responder(method, params):
-            r = _clip_info_response(params, kind="reference clip", containerKind="reference clip",
+            r = clip_info_response(params, kind="reference clip", containerKind="reference clip",
                                     isReferenceClip=True,
                                     frameError="no single source media file to decode a frame from: this is a "
                                                "reference clip whose contents are clips of their own; "
@@ -238,7 +161,7 @@ class ClipInfoToolTests(unittest.TestCase):
 
     def test_get_clip_info_renders_every_text_layer_and_unknown_range(self):
         def responder(method, params):
-            r = _clip_info_response(params, kind="title",
+            r = clip_info_response(params, kind="title",
                                     title={"text": "Big Title", "fontFamily": "Helvetica", "fontSize": 72,
                                            "channels": [{"text": "Big Title", "channelName": "Title"},
                                                         {"text": "small words", "channelName": "Subtitle"}],
@@ -265,7 +188,7 @@ class ClipInfoToolTests(unittest.TestCase):
     # ── capture_clip_frame ────────────────────────────────────────────────
 
     def test_capture_clip_frame_forwards_params_and_renders_restored_playhead(self):
-        calls = self._install_bridge(lambda m, p: _capture_clip_frame_response(p))
+        calls = self._install_bridge(lambda m, p: capture_clip_frame_response(p))
         out_default = self.module.capture_clip_frame("obj_1")
         out_custom = self.module.capture_clip_frame("obj_1", frame_time=4.0, frame_max_width=480)
         self.assertEqual(
@@ -308,7 +231,7 @@ class ClipInfoToolTests(unittest.TestCase):
                 self.assertIn("WARNING: the captured image is one flat colour (RGB 35,35,35)", out, tool)
 
             def clip_frame_responder(method, params):
-                r = _capture_clip_frame_response(params)
+                r = capture_clip_frame_response(params)
                 r["flat"] = True
                 r["warning"] = warning
                 r["capture"] = dict(r.get("capture") or {}, flat=True, flatColor=[35, 35, 35], warning=warning)
@@ -320,13 +243,13 @@ class ClipInfoToolTests(unittest.TestCase):
             self.assertIn("WARNING: the captured image is one flat colour (RGB 35,35,35)", text)
 
     def test_capture_clip_frame_warns_when_playhead_not_restored_and_reports_failure(self):
-        self._install_bridge(lambda m, p: _capture_clip_frame_response(p, playheadRestored=False, playheadAfter=3.0))
+        self._install_bridge(lambda m, p: capture_clip_frame_response(p, playheadRestored=False, playheadAfter=3.0))
         out = self.module.capture_clip_frame("obj_1")
         self.assertIn("restored: NO", out[0])
         self.assertIn("WARNING: the playhead was not restored; seek_to_time(10.0)", out[0])
 
         def failed(method, params):
-            r = _capture_clip_frame_response(params, status="failed",
+            r = capture_clip_frame_response(params, status="failed",
                                              failure="CGWindowListCreateImage returned nil")
             r.pop("frame")
             return r
@@ -340,7 +263,7 @@ class ClipInfoToolTests(unittest.TestCase):
 
     def test_capture_clip_frame_flags_full_window_fallback_and_unknown_playhead(self):
         def fallback(method, params):
-            r = _capture_clip_frame_response(params)
+            r = capture_clip_frame_response(params)
             r["capture"] = {"width": 2560, "height": 1440, "bytes": 999, "cropped": False}
             return r
 
@@ -350,7 +273,7 @@ class ClipInfoToolTests(unittest.TestCase):
         self.assertNotIn("as rendered in the Viewer (effects included)", text)
 
         def no_before(method, params):
-            r = _capture_clip_frame_response(params, playheadRestored=False)
+            r = capture_clip_frame_response(params, playheadRestored=False)
             for key in ("playheadBefore", "playheadAfter"):
                 r.pop(key, None)
             return r

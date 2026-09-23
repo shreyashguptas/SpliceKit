@@ -1,13 +1,13 @@
 """Tools: the embedded Lua VM."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ── Lua Scripting ────────────────────────────────────────────────────────────
 
 
-@splicekit_tool("lua_execute")
+@splicekit_tool("lua_execute", DESTRUCTIVE, title="Execute Lua Code")
 def lua_execute(code: str) -> str:
     """Execute Lua code in SpliceKit's embedded Lua 5.4 VM running inside FCP.
 
@@ -36,7 +36,7 @@ def lua_execute(code: str) -> str:
     return "\n".join(parts) if parts else "ok"
 
 
-@splicekit_tool("lua_execute_file")
+@splicekit_tool("lua_execute_file", DESTRUCTIVE, title="Execute Lua File")
 def lua_execute_file(path: str) -> str:
     """Execute a Lua script file in SpliceKit's VM.
 
@@ -59,7 +59,7 @@ def lua_execute_file(path: str) -> str:
     return "\n".join(parts) if parts else "ok"
 
 
-@splicekit_tool("lua_reset")
+@splicekit_tool("lua_reset", DESTRUCTIVE, title="Reset Lua VM")
 def lua_reset() -> str:
     """Reset the Lua VM. All state (variables, loaded modules) is cleared and the sk module is re-registered."""
     r = bridge.call("lua.reset")
@@ -68,7 +68,7 @@ def lua_reset() -> str:
     return "Lua VM reset"
 
 
-@splicekit_tool("lua_watch")
+@splicekit_tool("lua_watch", DESTRUCTIVE, title="Watch Lua Files")
 def lua_watch(action: str = "list", path: str = "") -> str:
     """Manage Lua file watching for live coding.
 
@@ -80,16 +80,10 @@ def lua_watch(action: str = "list", path: str = "") -> str:
     The default watched directory is ~/Library/Application Support/SpliceKit/lua/.
     Save .lua files to the auto/ subdirectory and they execute automatically on every save.
     """
-    r = bridge.call("lua.watch", action=action, path=path)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("lua.watch", action=action, path=path)
 
 
-@splicekit_tool("lua_state")
+@splicekit_tool("lua_state", READ, title="Get Lua State")
 def lua_state() -> str:
     """Get Lua VM state: memory usage, user-defined globals, watched paths, scripts directory."""
-    r = bridge.call("lua.getState")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("lua.getState")

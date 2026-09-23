@@ -3,8 +3,8 @@
 import json
 import os
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ============================================================
@@ -14,7 +14,7 @@ from ..bridge import _err, _fmt, bridge
 # editing the text. Delete words to remove video segments,
 # drag words to reorder clips.
 
-@splicekit_tool("open_transcript")
+@splicekit_tool("open_transcript", LOCAL)
 def open_transcript(file_url: str = "", force_retranscribe: bool = False,
                     primary_storyline_only: bool = None) -> str:
     """Open the transcript panel and start transcribing.
@@ -54,10 +54,7 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False,
         params["forceRetranscribe"] = True
     if primary_storyline_only is not None:
         params["primaryStorylineOnly"] = bool(primary_storyline_only)
-    r = bridge.call("transcript.open", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.open", **params)
 
 
 def _transcript_header_lines(r: dict) -> list:
@@ -103,7 +100,7 @@ def _transcript_header_lines(r: dict) -> list:
     return lines
 
 
-@splicekit_tool("get_transcript")
+@splicekit_tool("get_transcript", READ)
 def get_transcript(start_seconds: float = None, end_seconds: float = None,
                    offset: int = 0, limit: int = 1000, fields: str = "",
                    words_only: bool = False, include_silences: bool = True,
@@ -212,7 +209,7 @@ def get_transcript(start_seconds: float = None, end_seconds: float = None,
     return "\n".join(lines)
 
 
-@splicekit_tool("delete_transcript_words")
+@splicekit_tool("delete_transcript_words", DESTRUCTIVE)
 def delete_transcript_words(start_index: int, count: int) -> str:
     """Delete words from the transcript, which removes the corresponding video segments.
 
@@ -228,13 +225,10 @@ def delete_transcript_words(start_index: int, count: int) -> str:
     The timeline gap closes automatically (ripple delete).
     Use timeline_action("undo") to reverse.
     """
-    r = bridge.call("transcript.deleteWords", startIndex=start_index, count=count)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.deleteWords", startIndex=start_index, count=count)
 
 
-@splicekit_tool("move_transcript_words")
+@splicekit_tool("move_transcript_words", DESTRUCTIVE)
 def move_transcript_words(start_index: int, count: int, dest_index: int) -> str:
     """Move words in the transcript to a new position, which reorders clips on the timeline.
 
@@ -251,13 +245,11 @@ def move_transcript_words(start_index: int, count: int, dest_index: int) -> str:
 
     Use timeline_action("undo") to reverse.
     """
-    r = bridge.call("transcript.moveWords", startIndex=start_index, count=count, destIndex=dest_index)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.moveWords", startIndex=start_index, count=count,
+                          destIndex=dest_index)
 
 
-@splicekit_tool("close_transcript")
+@splicekit_tool("close_transcript", LOCAL_IDEMPOTENT, title="Close Transcript Panel")
 def close_transcript() -> str:
     """Close the transcript panel."""
     r = bridge.call("transcript.close")
@@ -266,7 +258,7 @@ def close_transcript() -> str:
     return "Transcript panel closed."
 
 
-@splicekit_tool("search_transcript")
+@splicekit_tool("search_transcript", READ)
 def search_transcript(query: str) -> str:
     """Search the transcript for text or special keywords.
 
@@ -295,7 +287,7 @@ def search_transcript(query: str) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("delete_transcript_silences")
+@splicekit_tool("delete_transcript_silences", DESTRUCTIVE)
 def delete_transcript_silences(min_duration: float = 0.0) -> str:
     """Delete all detected silences/pauses from the timeline.
 
@@ -320,7 +312,7 @@ def delete_transcript_silences(min_duration: float = 0.0) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("set_transcript_speaker")
+@splicekit_tool("set_transcript_speaker", LOCAL)
 def set_transcript_speaker(start_index: int, count: int, speaker: str) -> str:
     """Assign a speaker name to a range of words in the transcript.
 
@@ -331,13 +323,11 @@ def set_transcript_speaker(start_index: int, count: int, speaker: str) -> str:
 
     This updates the speaker labels in the transcript display.
     """
-    r = bridge.call("transcript.setSpeaker", speaker=speaker, startIndex=start_index, count=count)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.setSpeaker", speaker=speaker, startIndex=start_index,
+                          count=count)
 
 
-@splicekit_tool("set_silence_threshold")
+@splicekit_tool("set_silence_threshold", LOCAL_IDEMPOTENT)
 def set_silence_threshold(threshold: float) -> str:
     """Set the minimum gap duration (seconds) to detect as a silence/pause.
 
@@ -348,7 +338,4 @@ def set_silence_threshold(threshold: float) -> str:
     Takes effect immediately — silences are recomputed from existing word
     timings without re-transcription. Returns the updated silence count.
     """
-    r = bridge.call("transcript.setSilenceThreshold", threshold=threshold)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("transcript.setSilenceThreshold", threshold=threshold)

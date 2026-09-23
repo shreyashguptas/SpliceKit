@@ -1,6 +1,6 @@
 """Tools: bridge status, events, async jobs, background render."""
 
-from ..registry import splicekit_tool
+from ..registry import LOCAL, READ, splicekit_tool
 from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
@@ -10,7 +10,7 @@ from ..bridge import _call_or_error, _err, _fmt, bridge
 # The first thing any client should do is call bridge_status() to
 # verify FCP is running and the bridge is responsive.
 
-@splicekit_tool("bridge_status")
+@splicekit_tool("bridge_status", READ)
 def bridge_status() -> str:
     """Check if SpliceKit is running and get FCP version info."""
     r = bridge.call("system.version")
@@ -19,7 +19,7 @@ def bridge_status() -> str:
     return _fmt(r)
 
 
-@splicekit_tool("bridge_alive")
+@splicekit_tool("bridge_alive", READ)
 def bridge_alive() -> str:
     """Cheap liveness probe that does not touch the main thread.
 
@@ -30,7 +30,7 @@ def bridge_alive() -> str:
     return _call_or_error("bridge.alive")
 
 
-@splicekit_tool("bridge_describe")
+@splicekit_tool("bridge_describe", READ)
 def bridge_describe(method: str = "", safety: str = "") -> str:
     """Return self-describing metadata for every known RPC method.
 
@@ -50,13 +50,13 @@ def bridge_describe(method: str = "", safety: str = "") -> str:
     return _call_or_error("bridge.describe", **params)
 
 
-@splicekit_tool("bridge_safety_tags")
+@splicekit_tool("bridge_safety_tags", READ)
 def bridge_safety_tags() -> str:
     """List the safety classifications used by bridge_describe with meanings."""
     return _call_or_error("bridge.safetyTags")
 
 
-@splicekit_tool("events_subscribe")
+@splicekit_tool("events_subscribe", READ)
 def events_subscribe(patterns: list[str] | None = None) -> str:
     """Subscribe this connection to bridge events matching patterns.
 
@@ -74,19 +74,19 @@ def events_subscribe(patterns: list[str] | None = None) -> str:
     return _call_or_error("events.subscribe", patterns=patterns or ["*"])
 
 
-@splicekit_tool("events_unsubscribe")
+@splicekit_tool("events_unsubscribe", READ)
 def events_unsubscribe() -> str:
     """Remove this connection's event pattern allowlist."""
     return _call_or_error("events.unsubscribe")
 
 
-@splicekit_tool("events_status")
+@splicekit_tool("events_status", READ)
 def events_status() -> str:
     """Report this connection's current event subscription state."""
     return _call_or_error("events.status")
 
 
-@splicekit_tool("async_status")
+@splicekit_tool("async_status", READ)
 def async_status() -> str:
     """List in-flight async operations with elapsed time.
 
@@ -97,7 +97,7 @@ def async_status() -> str:
     return _call_or_error("async.status")
 
 
-@splicekit_tool("background_render_status")
+@splicekit_tool("background_render_status", READ)
 def background_render_status() -> str:
     """Inspect Final Cut Pro's live background-render state.
 
@@ -110,13 +110,10 @@ def background_render_status() -> str:
     Use this before and after background_render_control() to see whether FCP
     accepted the requested throttle window.
     """
-    r = bridge.call("backgroundRender.status")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("backgroundRender.status")
 
 
-@splicekit_tool("background_render_control")
+@splicekit_tool("background_render_control", LOCAL)
 def background_render_control(action: str, seconds: float) -> str:
     """Temporarily reduce background-render impact while editing.
 
@@ -135,7 +132,4 @@ def background_render_control(action: str, seconds: float) -> str:
     if seconds <= 0:
         return "Error: seconds must be > 0."
 
-    r = bridge.call("backgroundRender.control", action=normalized, seconds=seconds)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("backgroundRender.control", action=normalized, seconds=seconds)

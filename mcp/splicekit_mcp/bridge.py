@@ -2,7 +2,6 @@
 
 import socket
 import json
-import functools
 import atexit
 import threading
 
@@ -50,8 +49,6 @@ class BridgeConnection:
         deploy_and_restart uses it around killing and relaunching Final Cut Pro."""
         with self._lock:
             self._drop_socket()
-
-    close = reset
 
     def _drop_socket(self):
         sock, self.sock, self._buf = self.sock, None, b""
@@ -145,7 +142,7 @@ class BridgeConnection:
 
 
 bridge = BridgeConnection()  # singleton -- shared by all tool functions below
-atexit.register(bridge.close)
+atexit.register(bridge.reset)
 
 
 # -- Helpers used by every tool function --
@@ -178,37 +175,3 @@ def _call_or_error(method: str, /, **params) -> str:
         # timeline yet, so say that before the JSON (whose key order is not fixed).
         return f"DIALOG PENDING: {r['note']}\n\n{_fmt(r)}"
     return _fmt(r)
-
-
-class BridgeError(Exception):
-    """Raised when a bridge call returns an error."""
-    pass
-
-
-def _call(method: str, /, **params) -> dict:
-    """Call the bridge and return the result dict. Raises BridgeError on failure.
-
-    `method` is positional-only for the same reason as _call_or_error."""
-    r = bridge.call(method, **params)
-    if _err(r):
-        raise BridgeError(r.get("error", str(r)))
-    return r
-
-
-def bridge_tool(fn):
-    """Decorator: catches BridgeError and returns 'Error: ...' string.
-
-    Use with _call() to eliminate the repetitive if-_err-return pattern:
-        @splicekit_tool("my_tool")
-        @bridge_tool
-        def my_tool() -> str:
-            r = _call("my.method")
-            return _fmt(r)
-    """
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except BridgeError as e:
-            return f"Error: {e}"
-    return wrapper

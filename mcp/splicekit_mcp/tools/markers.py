@@ -1,6 +1,6 @@
 """Tools: markers and blades at a list of times."""
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, LOCAL, splicekit_tool
 from ..bridge import _err, bridge
 from ..parsing import _parse_markers_list, _parse_seconds_list
 
@@ -11,7 +11,7 @@ from ..parsing import _parse_markers_list, _parse_seconds_list
 # Bulk marker placement. The bridge handles seeking internally
 # so we don't have to move the playhead for each marker.
 
-@splicekit_tool("add_markers_at_times")
+@splicekit_tool("add_markers_at_times", LOCAL)
 def add_markers_at_times(markers: str) -> str:
     """Add multiple markers at specific times in a single batch call.
     Much faster than seeking + adding markers one at a time.
@@ -39,7 +39,7 @@ def add_markers_at_times(markers: str) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("blade_at_times")
+@splicekit_tool("blade_at_times", DESTRUCTIVE)
 def blade_at_times(times: str) -> str:
     """Blade (cut) the timeline at multiple specific times in a single batch call.
     Much faster than seeking + blading one at a time.

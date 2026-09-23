@@ -1,7 +1,9 @@
 """Tools: Montage Maker."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+import json
+
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error
 
 
 # ============================================================
@@ -11,7 +13,7 @@ from ..bridge import _err, _fmt, bridge
 # -> assemble a montage timeline. Can run as individual steps
 # or as a single montage_auto() call.
 
-@splicekit_tool("montage_analyze_clips")
+@splicekit_tool("montage_analyze_clips", READ, title="Analyze Montage Clips")
 def montage_analyze_clips(event_name: str = "") -> str:
     """Analyze clips in the browser for montage creation.
 
@@ -22,13 +24,10 @@ def montage_analyze_clips(event_name: str = "") -> str:
     Args:
         event_name: Event name to scan (empty = all events).
     """
-    r = bridge.call("montage.analyzeClips", eventName=event_name)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("montage.analyzeClips", eventName=event_name)
 
 
-@splicekit_tool("montage_plan_edit")
+@splicekit_tool("montage_plan_edit", READ, title="Plan Montage Edit")
 def montage_plan_edit(beats: str, clips: str, style: str = "beat",
                       bars: str = "", sections: str = "",
                       total_duration: float = 0) -> str:
@@ -52,12 +51,11 @@ def montage_plan_edit(beats: str, clips: str, style: str = "beat",
 
     Returns an edit decision list with clip assignments, in/out points, and timeline positions.
     """
-    import json as _json
 
     def _arr(value):
         if not value:
             return []
-        return _json.loads(value) if isinstance(value, str) else value
+        return json.loads(value) if isinstance(value, str) else value
 
     beats_arr, bars_arr, sections_arr = _arr(beats), _arr(bars), _arr(sections)
     clips_arr = _arr(clips)
@@ -75,15 +73,11 @@ def montage_plan_edit(beats: str, clips: str, style: str = "beat",
                 f"{len(values)} entries; at least 2 are needed. "
                 "flexmusic_get_timing returns beats, bars and sections for a song.")
 
-    r = bridge.call("montage.planEdit", beats=beats_arr, bars=bars_arr,
-                    sections=sections_arr, clips=clips_arr,
-                    style=style, totalDuration=total_duration)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("montage.planEdit", beats=beats_arr, bars=bars_arr, sections=sections_arr,
+                          clips=clips_arr, style=style, totalDuration=total_duration)
 
 
-@splicekit_tool("montage_assemble")
+@splicekit_tool("montage_assemble", DESTRUCTIVE, title="Assemble Montage")
 def montage_assemble(edit_plan: str, project_name: str = "Montage", song_file: str = "") -> str:
     """Assemble a montage on the timeline from an edit plan.
 
@@ -98,15 +92,12 @@ def montage_assemble(edit_plan: str, project_name: str = "Montage", song_file: s
         project_name: Name for the new project.
         song_file: Path to rendered FlexMusic audio file (from flexmusic_render_to_file).
     """
-    import json as _json
-    plan = _json.loads(edit_plan) if isinstance(edit_plan, str) else edit_plan
-    r = bridge.call("montage.assemble", editPlan=plan, projectName=project_name, songFile=song_file)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    plan = json.loads(edit_plan) if isinstance(edit_plan, str) else edit_plan
+    return _call_or_error("montage.assemble", editPlan=plan, projectName=project_name,
+                          songFile=song_file)
 
 
-@splicekit_tool("montage_auto")
+@splicekit_tool("montage_auto", DESTRUCTIVE, title="Auto Montage")
 def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", project_name: str = "Montage") -> str:
     """One-shot automatic montage creation.
 
@@ -122,8 +113,5 @@ def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", p
         style: Cut rhythm - "beat", "bar" (default), or "section".
         project_name: Name for the new project.
     """
-    r = bridge.call("montage.auto", songUID=song_uid, eventName=event_name,
-                     style=style, projectName=project_name)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("montage.auto", songUID=song_uid, eventName=event_name, style=style,
+                          projectName=project_name)

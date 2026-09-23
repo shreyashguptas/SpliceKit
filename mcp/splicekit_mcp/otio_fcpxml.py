@@ -1,5 +1,10 @@
 """OpenTimelineIO <-> FCPXML conversion helpers (no bridge calls)."""
 
+import copy
+from fractions import Fraction
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
 
 def _otio_prepare_for_fcp(timeline):
     """Prepare an OTIO timeline for FCP import.
@@ -62,12 +67,11 @@ def _otio_with_fcpx_adapter(operation):
 
 def _otio_fcpxml_parse_root(fcpxml_str):
     """Parse FCPXML text into an ElementTree root."""
-    from xml.etree import ElementTree as ET
 
     return ET.fromstring(fcpxml_str)
 
 
-def _otio_fcpx_time_to_seconds(value, default_rate=30):
+def _otio_fcpx_time_to_seconds(value):
     """Convert an FCPXML time attribute (e.g. ``28s``, ``300/30s``) to seconds."""
     if not value:
         return 0.0
@@ -93,7 +97,7 @@ def _otio_fcpx_sequence_rate(sequence_elem, resources_elem, default_rate=30):
     for fmt in resources_elem.findall("format"):
         if fmt.get("id") == format_id:
             frame_duration = fmt.get("frameDuration", "")
-            seconds = _otio_fcpx_time_to_seconds(frame_duration, default_rate)
+            seconds = _otio_fcpx_time_to_seconds(frame_duration)
             if seconds > 0:
                 return round(1.0 / seconds)
     return default_rate
@@ -117,7 +121,6 @@ _FCPX_TIMED_TAGS = {
 
 def _otio_fcpx_fraction(value, default="0s"):
     """An FCPXML time ("1001/30000s", "20s", "0s") as an exact Fraction of seconds."""
-    from fractions import Fraction
 
     text = (value if value is not None else default)
     text = str(text).strip()
@@ -133,7 +136,6 @@ def _otio_fcpx_fraction(value, default="0s"):
 
 def _otio_fcpx_format_time(value):
     """A Fraction of seconds back as an FCPXML time string."""
-    from fractions import Fraction
 
     value = Fraction(value)
     if value.denominator == 1:
@@ -167,9 +169,7 @@ def _otio_fcpx_ref_clip_as_gap(ref_clip):
     honestly and keeps the timeline the right length, which is what the note alongside it
     describes.
     """
-    import copy
-    import xml.etree.ElementTree as _ET
-    gap = _ET.Element("gap")
+    gap = ET.Element("gap")
     gap.set("name", ref_clip.get("name", "gap"))
     gap.set("offset", ref_clip.get("offset", "0s"))
     gap.set("duration", ref_clip.get("duration", "0s"))
@@ -205,7 +205,6 @@ def _otio_fcpx_expand_ref_clip(ref_clip, inner_spine, resources_elem=None,
     Expansion now recurses, carrying the resource index with it, and refuses to follow a
     compound clip that contains itself.
     """
-    import copy
 
     ref_offset = _otio_fcpx_fraction(ref_clip.get("offset"))
     ref_start = _otio_fcpx_fraction(ref_clip.get("start"))
@@ -484,13 +483,7 @@ def _otio_fcpx_asset_for(element, resources):
 
 def _otio_fcpx_media_url(element, resources):
     """The file URL an item plays, following ``ref`` into ``<resources>``."""
-    ref = element.get("ref")
-    if not ref:
-        for child in element:
-            if child.tag in ("video", "audio") and child.get("ref"):
-                ref = child.get("ref")
-                break
-    asset = resources.get(ref) if ref else None
+    asset = _otio_fcpx_asset_for(element, resources)
     if asset is None:
         return None
     src = asset.get("src")
@@ -504,7 +497,6 @@ def _otio_fcpx_media_url(element, resources):
 
 def _otio_fcpx_sequence_format_rate(sequence_elem, resources, default=30):
     """Frames per second for a ``<sequence>``, from its format's frameDuration."""
-    from fractions import Fraction
 
     format_elem = resources.get(sequence_elem.get("format")) if sequence_elem is not None else None
     if format_elem is None:
@@ -633,7 +625,6 @@ def _otio_sanitize_fcpx_project_element(project_elem):
     The published adapter crashes on nested ``<ref-clip>`` compound timelines; a
     gap with the same timing preserves project duration for interchange summaries.
     """
-    from xml.etree import ElementTree as ET
 
     project = ET.fromstring(ET.tostring(project_elem, encoding="unicode"))
     for parent in project.iter():
@@ -654,7 +645,6 @@ def _otio_sanitize_fcpx_project_element(project_elem):
 
 def _otio_build_fcpx_project_document(resources_elem, project_elem, fcpxml_version="1.14"):
     """Wrap resources + project in a standalone ``<fcpxml>`` document."""
-    from xml.etree import ElementTree as ET
 
     root = ET.Element("fcpxml", version=fcpxml_version)
     root.append(ET.fromstring(ET.tostring(resources_elem, encoding="unicode")))
@@ -670,7 +660,6 @@ def _otio_should_skip_fcpx_library_project(project_elem):
 
 def _otio_inject_fcpx_spine_transitions(timeline, spine_elem, default_rate):
     """Insert OTIO ``Transition`` objects for ``<transition>`` spine items."""
-    import copy
 
     import opentimelineio as otio
     from opentimelineio import opentime
@@ -708,7 +697,7 @@ def _otio_inject_fcpx_spine_transitions(timeline, spine_elem, default_rate):
                 clip = clip_items[clip_index]
                 if clip.source_range and clip.source_range.duration.rate > 0:
                     rate = clip.source_range.duration.rate
-            duration_seconds = _otio_fcpx_time_to_seconds(child.get("duration", "0s"), rate)
+            duration_seconds = _otio_fcpx_time_to_seconds(child.get("duration", "0s"))
             half_frames = max(1, round((duration_seconds / 2.0) * rate))
             rebuilt.append(
                 otio.schema.Transition(
@@ -736,10 +725,7 @@ def _otio_apply_fcpx_project_metadata(timeline, project_elem, resources_elem):
     rate = _otio_fcpx_sequence_rate(sequence_elem, resources_elem)
     duration_attr = sequence_elem.get("duration")
     if duration_attr:
-        timeline.metadata["fcpx_sequence_duration_seconds"] = _otio_fcpx_time_to_seconds(
-            duration_attr,
-            rate,
-        )
+        timeline.metadata["fcpx_sequence_duration_seconds"] = _otio_fcpx_time_to_seconds(duration_attr)
     spine_elem = sequence_elem.find("spine")
     _otio_inject_fcpx_spine_transitions(timeline, spine_elem, rate)
 
@@ -805,7 +791,6 @@ def _otio_fcpx_read_project(project_elem, resources_elem, fcpxml_version="1.14")
     up in the timeline's metadata under ``splicekit_notes`` so export_otio can report
     them instead of quietly dropping things.
     """
-    import copy
 
     import opentimelineio as otio
 
@@ -884,7 +869,6 @@ def _otio_write_fcpx_string(timeline, fcpxml_version=None):
 
 def _otio_fcpxmld_info_path(package_path):
     """Return the FCPXML document entrypoint for a `.fcpxmld` package."""
-    from pathlib import Path
 
     package = Path(package_path)
     if not package.exists():
@@ -900,7 +884,6 @@ def _otio_fcpxmld_info_path(package_path):
 
 def _otio_read_fcpx_document(path):
     """Read a `.fcpxml` document or `.fcpxmld` package entrypoint."""
-    from pathlib import Path
 
     document_path = Path(path)
     if document_path.is_dir() or document_path.suffix.lower() == ".fcpxmld":

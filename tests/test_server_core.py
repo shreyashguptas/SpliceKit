@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Unit tests for the behaviour mcp/server.py gained in the move to the mcp 2.x SDK.
+"""Unit tests for the server core (registry, bridge connection, config), much of it added
+in the move to the mcp 2.x SDK.
 
 Runs without the mcp package (the shared fake loader in test_mcp_tool_annotations
 stands in for the SDK): the tool error guard, the tool registration helper, the bridge
@@ -18,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_mcp_tool_annotations import FakeToolError, load_server_module, set_package_global  # noqa: E402
+from support.fake_bridge import FakeBridge  # noqa: E402
+from support.payloads import cmtime, media_spine_item, three_clip_detailed_state  # noqa: E402
 
 
 class FakeSocket:
@@ -80,9 +83,21 @@ class ServerV2Tests(unittest.TestCase):
     def test_splicekit_tool_rejects_a_name_that_does_not_match_the_function(self):
         m = self.module
         with self.assertRaises(ValueError):
-            @m.splicekit_tool("bridge_status")
-            def not_bridge_status():
+            @m.splicekit_tool("brand_new_tool", m.READ)
+            def not_brand_new_tool():
                 return "x"
+        # Nothing was recorded for the refused registration.
+        self.assertNotIn("brand_new_tool", m.READ_ONLY_TOOLS)
+        self.assertNotIn("brand_new_tool", self.tools)
+
+    def test_splicekit_tool_rejects_a_second_registration_and_an_unknown_class(self):
+        m = self.module
+        with self.assertRaises(ValueError):
+            @m.splicekit_tool("bridge_status", m.READ)
+            def bridge_status():
+                return "x"
+        with self.assertRaises(ValueError):
+            m.splicekit_tool("brand_new_tool", "read-only")
 
     def test_guard_rejects_coroutine_functions(self):
         m = self.module
@@ -168,7 +183,7 @@ class ServerV2Tests(unittest.TestCase):
         self.assertIsNone(b.sock)
         self.assertEqual(b._buf, b"")
         self.assertTrue(fake.closed)
-        b.close()  # idempotent
+        b.reset()  # idempotent
 
     def test_refused_connection_is_reported_not_raised(self):
         m = self.module
@@ -190,52 +205,8 @@ class ServerV2Tests(unittest.TestCase):
         self.assertIn("Cannot connect to SpliceKit", r["error"])
 
     # -- batch color / effect: one pass per spine clip -------------------------------
-    def _cmtime(self, seconds, timescale=600):
-        return {
-            "value": int(round(seconds * timescale)),
-            "timescale": timescale,
-            "seconds": seconds,
-        }
-
-    def _media_spine_item(self, index, name, handle, start, end):
-        return {
-            "index": index,
-            "class": "FFAnchoredMediaComponent",
-            "name": name,
-            "duration": self._cmtime(end - start),
-            "lane": 0,
-            "mediaType": 1,
-            "handle": handle,
-            "startTime": self._cmtime(start),
-            "endTime": self._cmtime(end),
-            "hasVideo": True,
-            "hasAudio": True,
-        }
-
-    def _three_clip_detailed_state(self, playhead_seconds, items=None):
-        if items is None:
-            items = [
-                self._media_spine_item(0, "A", "obj_a", 0, 10),
-                self._media_spine_item(1, "B", "obj_b", 10, 20),
-                self._media_spine_item(2, "C", "obj_c", 20, 30),
-            ]
-        return {
-            "sequenceName": "Batch Test",
-            "playheadTime": self._cmtime(playhead_seconds),
-            "duration": self._cmtime(30),
-            "frameRate": 24.0,
-            "itemCount": len(items),
-            "items": items,
-        }
-
-    def _install_batch_bridge(self, detailed_state, *, fail_select_handle=None):
-        m = self.module
-        calls = []
-
-        def fake_call(method, params_dict=None, timeout=None, **params):
-            if params_dict is not None:
-                params = {**params_dict, **params}
-            calls.append((method, params))
+    def _batch_bridge(self, detailed_state, *, fail_select_handle=None):
+        def respond(method, params):
             if method == "timeline.getDetailedState":
                 return detailed_state
             if method in ("timeline.beginEdit", "timeline.endEdit"):
@@ -251,9 +222,7 @@ class ServerV2Tests(unittest.TestCase):
                 return {"status": "ok", "effect": params.get("name") or params.get("effectID")}
             return {"status": "ok"}
 
-        original = m.bridge.call
-        m.bridge.call = fake_call
-        return calls, original
+        return FakeBridge(self.module, respond)
 
     def _batch_applied_total(self, text: str) -> tuple[int, int]:
         m = re.search(r":\s*(\d+)\s+of\s+(\d+)\s+clip", text)
@@ -268,8 +237,8 @@ class ServerV2Tests(unittest.TestCase):
         m = self.module
 
         # (a) playhead at timeline start -> all three clips, once each
-        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
-        try:
+        with self._batch_bridge(three_clip_detailed_state(0.0)) as fake:
+            calls = fake.calls
             out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
             applied, total = self._batch_applied_total(out)
             self.assertEqual(total, 3)
@@ -280,66 +249,55 @@ class ServerV2Tests(unittest.TestCase):
             action_calls = [p for meth, p in calls if meth == "timeline.action"]
             self.assertEqual(len(action_calls), 3)
             self.assertTrue(all(p.get("action") == "addColorBoard" for p in action_calls))
-        finally:
-            m.bridge.call = original
 
         # (b) playhead inside second clip -> second and third only
-        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(15.0))
-        try:
+        with self._batch_bridge(three_clip_detailed_state(15.0)):
             out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
             applied, total = self._batch_applied_total(out)
             self.assertEqual(total, 2)
             self.assertEqual(self._batch_handles(out), ["obj_b", "obj_c"])
-        finally:
-            m.bridge.call = original
 
         # (c) clip_count limits to first target only
-        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0))
-        try:
+        with self._batch_bridge(three_clip_detailed_state(0.0)):
             out = m.batch_color_correct(correction="addColorBoard", clip_count=1)
             applied, total = self._batch_applied_total(out)
             self.assertEqual(total, 1)
             self.assertEqual(self._batch_handles(out), ["obj_a"])
-        finally:
-            m.bridge.call = original
 
         # (d) gap and transition on the spine are skipped
         spine = [
-            self._media_spine_item(0, "A", "obj_a", 0, 8),
+            media_spine_item(0, "A", "obj_a", 0, 8),
             {
                 "index": 1,
                 "class": "FFAnchoredGap",
                 "name": "Gap",
                 "handle": "obj_gap",
-                "startTime": self._cmtime(8),
-                "endTime": self._cmtime(9),
+                "startTime": cmtime(8),
+                "endTime": cmtime(9),
             },
             {
                 "index": 2,
                 "class": "FFAnchoredTransition",
                 "name": "Cross Dissolve",
                 "handle": "obj_xfade",
-                "startTime": self._cmtime(8.5),
-                "endTime": self._cmtime(9.5),
+                "startTime": cmtime(8.5),
+                "endTime": cmtime(9.5),
             },
-            self._media_spine_item(3, "B", "obj_b", 9, 18),
+            media_spine_item(3, "B", "obj_b", 9, 18),
         ]
-        calls, original = self._install_batch_bridge(self._three_clip_detailed_state(0.0, items=spine))
-        try:
+        with self._batch_bridge(three_clip_detailed_state(0.0, items=spine)):
             out = m.batch_apply_effect(name="Gaussian Blur", clip_count=0)
             result_handles = self._batch_handles(out)
             self.assertEqual(result_handles, ["obj_a", "obj_b"])
             self.assertNotIn("obj_gap", result_handles)
             self.assertNotIn("obj_xfade", result_handles)
-        finally:
-            m.bridge.call = original
 
         # (e) exactly one undo group; endEdit even when a clip fails
-        calls, original = self._install_batch_bridge(
-            self._three_clip_detailed_state(0.0),
+        with self._batch_bridge(
+            three_clip_detailed_state(0.0),
             fail_select_handle="obj_b",
-        )
-        try:
+        ) as fake:
+            calls = fake.calls
             out = m.batch_color_correct(correction="addColorBoard", clip_count=0)
             applied, total = self._batch_applied_total(out)
             self.assertEqual(total, 3)
@@ -359,8 +317,6 @@ class ServerV2Tests(unittest.TestCase):
             )
             self.assertLess(begin_idxs[0], first_work)
             self.assertGreater(end_idxs[0], last_work)
-        finally:
-            m.bridge.call = original
 
     # -- environment overrides and version -------------------------------------------------
     def test_bridge_address_defaults_and_overrides(self):
@@ -395,16 +351,11 @@ class ServerV2Tests(unittest.TestCase):
 
     def test_plugin_reload_does_not_register_the_same_tool_twice(self):
         m = self.module
-        original = m.bridge.call
-        m.bridge.call = lambda method, params_dict=None, timeout=None, **p: {
-            "methods": [{"name": "com.example.demo.greet", "description": "Say hi", "readOnly": True}]
-        }
-        try:
+        answer = {"methods": [{"name": "com.example.demo.greet", "description": "Say hi", "readOnly": True}]}
+        with FakeBridge(m, answer):
             before = len(m.mcp.tools)
             first = m._register_plugin_tools()
             second = m._register_plugin_tools()
-        finally:
-            m.bridge.call = original
         self.assertEqual(first, 1)
         self.assertEqual(second, 0)
         self.assertEqual(len(m.mcp.tools), before + 1)

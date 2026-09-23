@@ -21,7 +21,7 @@ Task: Edit the podcast episode{f' "{episode_name}"' if episode_name else ''}{f' 
 
 ## Workflow
 1. **Setup**: Open the project and review the timeline with get_timeline_clips()
-2. **Silence removal**: Use detect_scene_changes() to find dead air, then blade_at_times() to cut silent sections
+2. **Silence removal**: Use open_transcript() to find dead air, then delete_transcript_silences() to cut silent sections
 3. **Audio leveling**: Check levels across participants — use timeline_action("adjustVolumeUp/Down") to balance
 4. **Cleanup**: Remove filler words, long pauses, and false starts by selecting and deleting clips
 5. **Chapter markers**: Add chapter markers at topic transitions using timeline_action("addChapterMarker")
@@ -94,7 +94,7 @@ Task: Reformat{f' "{source_project}"' if source_project else ' the current proje
 ## Social Media Tips
 - Front-load the hook in the first 3 seconds
 - Captions are essential — most viewers watch without sound
-- Use generate_social_captions() for word-by-word highlighting style
+- Use generate_captions() for word-by-word highlighting style
 - Keep text and key visuals in the center safe zone for 9:16
 """
 
@@ -180,7 +180,7 @@ Task: Create captions for the current timeline in {language}, export as {export_
 8. **Export**: export_captions_srt() for SRT or export_captions_txt() for plain text
 
 ## Caption Tips
-- Use generate_social_captions() for word-by-word highlighting (TikTok/Reels style)
+- Use generate_captions() for word-by-word highlighting (TikTok/Reels style)
 - Parakeet v3 supports multilingual transcription
 - SRT is universal; use it for YouTube, Vimeo, social platforms
 - Always verify_captions() before export to catch timing issues

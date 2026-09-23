@@ -1,10 +1,12 @@
 """Tools: SRT subtitles as markers."""
 
-from ..registry import splicekit_tool
+import re
+
+from ..registry import LOCAL, splicekit_tool
 from ..bridge import _err, bridge
 
 
-@splicekit_tool("import_srt_as_markers")
+@splicekit_tool("import_srt_as_markers", LOCAL)
 def import_srt_as_markers(srt_content: str) -> str:
     """Import SRT subtitle content as markers in the current timeline.
     Each subtitle becomes a standard marker at the corresponding timecode.
@@ -18,7 +20,6 @@ def import_srt_as_markers(srt_content: str) -> str:
       00:01:30,500 --> 00:01:35,000
       Second subtitle
     """
-    import re
 
     # Parse SRT format: sequential blocks of "index / timestamp / text"
     blocks = re.split(r'\n\n+', srt_content.strip())

@@ -2,11 +2,11 @@
 
 import json
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, splicekit_tool
 from ..bridge import _err, bridge
 
 
-@splicekit_tool("trim_clips_to_beats")
+@splicekit_tool("trim_clips_to_beats", DESTRUCTIVE)
 def trim_clips_to_beats(
     grid: str = "beat",
     randomize: bool = False,
@@ -165,7 +165,7 @@ def _song_cut_preset(pace: str) -> dict | None:
     return presets.get((pace or "").lower())
 
 
-@splicekit_tool("sync_clips_to_song_beats")
+@splicekit_tool("sync_clips_to_song_beats", DESTRUCTIVE)
 def sync_clips_to_song_beats(
     mode: str = "beat",
     target_mode: str = "auto",
@@ -221,7 +221,7 @@ def sync_clips_to_song_beats(
     return _format_trim_to_beats_result(r, random_min_step, random_max_step, random_seed)
 
 
-@splicekit_tool("build_song_cut")
+@splicekit_tool("build_song_cut", DESTRUCTIVE)
 def build_song_cut(
     pace: str = "natural",
     project_name: str = "Song Beat Cut",
@@ -299,7 +299,7 @@ def build_song_cut(
     return f"{prefix}\n{result}"
 
 
-@splicekit_tool("assemble_random_clips_to_song_beats")
+@splicekit_tool("assemble_random_clips_to_song_beats", DESTRUCTIVE)
 def assemble_random_clips_to_song_beats(
     grid: str = "half_beat",
     project_name: str = "Beat Random Cut",

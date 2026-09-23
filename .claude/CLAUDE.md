@@ -1258,10 +1258,13 @@ and complete cookbook examples.
 
 `mcp/server.py` is one MCP server over stdio on the official MCP Python SDK 2.x
 (`mcp>=2.2,<3` in `mcp/requirements.txt`; `MCPServer` from `mcp.server.mcpserver`,
-protocol revision 2026-07-28, legacy `initialize` handshake still accepted). Every tool
-is registered with `@splicekit_tool("name")`, which attaches the tool's annotations
-(READ_ONLY_TOOLS / DESTRUCTIVE_TOOLS / IDEMPOTENT_LOCAL_WRITE_TOOLS) and turns unexpected
-exceptions into a `ToolError` whose text reaches the client. Tools return `-> str`
+protocol revision 2026-07-28, legacy `initialize` handshake still accepted). It is a thin
+launcher for the `mcp/splicekit_mcp/` package (tools in `tools/`, one module per area,
+imported in registration order by `tools/__init__.py`). Every tool is registered with
+`@splicekit_tool("name", READ | LOCAL | LOCAL_IDEMPOTENT | DESTRUCTIVE, title=...)`, which
+sets the tool's annotations (and fills READ_ONLY_TOOLS / LOCAL_WRITE_TOOLS /
+IDEMPOTENT_LOCAL_WRITE_TOOLS / DESTRUCTIVE_TOOLS) and turns unexpected exceptions into a
+`ToolError` whose text reaches the client. Tools return `-> str`
 (published as structured output `{"result": ...}`); the image tools carry no return
 annotation so they can return text + image content. The 2.x SDK runs sync tools in
 worker threads, so `BridgeConnection.call` holds a lock for each round trip. The server's
@@ -1270,7 +1273,7 @@ worker threads, so `BridgeConnection.call` holds a lock for each round trip. The
 ```
 make mcp-check         # every tool/resource/prompt over MCP against a fake bridge (no FCP)
 make mcp-check-live    # read from the running patched FCP through the MCP server
-python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_mcp_server_v2.py   # offline, no mcp package needed
+python3 -m unittest tests/test_mcp_tool_annotations.py tests/test_server_core.py   # offline, no mcp package needed (Python 3.10+)
 ```
 
 ## Additional Documentation

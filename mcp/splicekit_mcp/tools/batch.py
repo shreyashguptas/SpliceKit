@@ -1,6 +1,6 @@
 """Tools: effects and color corrections on many clips in one call."""
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, splicekit_tool
 from ..bridge import _err, bridge
 from .timeline_reads import _time_seconds
 
@@ -126,7 +126,7 @@ def _batch_select_clip_by_handle(handle: str) -> dict | None:
     return None
 
 
-@splicekit_tool("batch_apply_effect")
+@splicekit_tool("batch_apply_effect", DESTRUCTIVE)
 def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) -> str:
     """Apply one effect to each targeted primary-storyline clip.
 
@@ -206,7 +206,7 @@ def batch_apply_effect(name: str = "", effectID: str = "", clip_count: int = 0) 
     return _format_batch_clip_results("Batch Apply Effect", undo_name, clips_out, applied, effect_line)
 
 
-@splicekit_tool("batch_color_correct")
+@splicekit_tool("batch_color_correct", DESTRUCTIVE)
 def batch_color_correct(correction: str = "addColorBoard", clip_count: int = 0) -> str:
     """Apply one color correction to each targeted primary-storyline clip.
 

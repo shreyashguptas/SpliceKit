@@ -1,7 +1,7 @@
 """Tools: share, create project / event / library, open project, dual timeline."""
 
-from ..registry import splicekit_tool
-from ..bridge import _call_or_error, _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error
 
 
 # ============================================================
@@ -9,7 +9,7 @@ from ..bridge import _call_or_error, _err, _fmt, bridge
 # ============================================================
 # Triggers FCP's share destinations (Export File, YouTube, etc).
 
-@splicekit_tool("share_project")
+@splicekit_tool("share_project", DESTRUCTIVE)
 def share_project(destination: str = "") -> str:
     """Share/export the project using a specific or the default destination.
 
@@ -32,10 +32,7 @@ def share_project(destination: str = "") -> str:
     params = {}
     if destination:
         params["destination"] = destination
-    r = bridge.call("share.export", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("share.export", **params)
 
 
 # ============================================================
@@ -43,7 +40,7 @@ def share_project(destination: str = "") -> str:
 # ============================================================
 # Create new projects, events, and libraries via FCP's internal APIs.
 
-@splicekit_tool("create_project")
+@splicekit_tool("create_project", DESTRUCTIVE)
 def create_project() -> str:
     """Open the New Project dialog in FCP.
 
@@ -61,7 +58,7 @@ def create_project() -> str:
     return _call_or_error("project.create")
 
 
-@splicekit_tool("create_event")
+@splicekit_tool("create_event", DESTRUCTIVE)
 def create_event() -> str:
     """Create a new event in the current library.
 
@@ -79,7 +76,7 @@ def create_event() -> str:
     return _call_or_error("project.createEvent")
 
 
-@splicekit_tool("create_library")
+@splicekit_tool("create_library", DESTRUCTIVE)
 def create_library() -> str:
     """Open the New Library dialog.
 
@@ -103,7 +100,7 @@ def create_library() -> str:
 # Find a sequence by name (and optionally event) and load it
 # into the editor — no manual handle navigation required.
 
-@splicekit_tool("open_project")
+@splicekit_tool("open_project", LOCAL_IDEMPOTENT)
 def open_project(name: str, event: str = "") -> str:
     """Open a project/sequence by name, loading it into the timeline editor.
 
@@ -132,10 +129,7 @@ def open_project(name: str, event: str = "") -> str:
     params = {"name": name}
     if event:
         params["event"] = event
-    r = bridge.call("project.open", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("project.open", **params)
 
 
 # ============================================================
@@ -146,13 +140,13 @@ def open_project(name: str, event: str = "") -> str:
 # Close hides the window (-orderOut:) and retains the container for the app session;
 # open reuses the cached module instead of tearing it down.
 
-@splicekit_tool("dual_timeline_status")
+@splicekit_tool("dual_timeline_status", READ)
 def dual_timeline_status() -> str:
     """Inspect the primary/secondary timeline panes and current focused pane."""
     return _call_or_error("dualTimeline.status")
 
 
-@splicekit_tool("dual_timeline_open")
+@splicekit_tool("dual_timeline_open", LOCAL)
 def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
     """Open a floating secondary timeline window.
 
@@ -169,21 +163,21 @@ def dual_timeline_open(source: str = "primary", focus: bool = False) -> str:
     return _call_or_error("dualTimeline.open", **params)
 
 
-@splicekit_tool("dual_timeline_sync_root")
+@splicekit_tool("dual_timeline_sync_root", LOCAL)
 def dual_timeline_sync_root(source: str = "primary", focus: bool = False) -> str:
     """Clone the source pane's root into the secondary timeline."""
     params = {"source": source, "focus": focus}
     return _call_or_error("dualTimeline.syncRoot", **params)
 
 
-@splicekit_tool("dual_timeline_open_selected_in_secondary")
+@splicekit_tool("dual_timeline_open_selected_in_secondary", LOCAL)
 def dual_timeline_open_selected_in_secondary(source: str = "primary", focus: bool = True) -> str:
     """Open the selection in the secondary timeline."""
     params = {"source": source, "focus": focus}
     return _call_or_error("dualTimeline.openSelectedInSecondary", **params)
 
 
-@splicekit_tool("dual_timeline_focus")
+@splicekit_tool("dual_timeline_focus", LOCAL)
 def dual_timeline_focus(pane: str) -> str:
     """Focus a specific timeline pane so subsequent commands target it.
 
@@ -193,7 +187,7 @@ def dual_timeline_focus(pane: str) -> str:
     return _call_or_error("dualTimeline.focus", pane=pane)
 
 
-@splicekit_tool("dual_timeline_close")
+@splicekit_tool("dual_timeline_close", LOCAL)
 def dual_timeline_close(focus_primary: bool = True) -> str:
     """Hide the floating secondary timeline window (does not destroy the container).
 
@@ -203,7 +197,7 @@ def dual_timeline_close(focus_primary: bool = True) -> str:
     return _call_or_error("dualTimeline.close", focusPrimary=focus_primary)
 
 
-@splicekit_tool("dual_timeline_toggle_panel")
+@splicekit_tool("dual_timeline_toggle_panel", LOCAL)
 def dual_timeline_toggle_panel(panel: str, pane: str = "secondary") -> str:
     """Toggle a container-local panel on a specific timeline pane.
 

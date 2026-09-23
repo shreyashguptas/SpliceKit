@@ -1,7 +1,7 @@
 """Tools: effects and transitions."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ============================================================
@@ -10,7 +10,7 @@ from ..bridge import _err, _fmt, bridge
 # Enumerate FCP's installed effects and apply them to clips.
 # FCP organizes effects by type (filter, generator, title, audio).
 
-@splicekit_tool("list_effects")
+@splicekit_tool("list_effects", READ)
 def list_effects(type: str = "filter", filter: str = "") -> str:
     """List available effects in FCP by type.
 
@@ -46,7 +46,7 @@ def list_effects(type: str = "filter", filter: str = "") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("apply_effect")
+@splicekit_tool("apply_effect", DESTRUCTIVE)
 def apply_effect(name: str = "", effectID: str = "") -> str:
     """Apply a video effect, generator, or title to the selected clip(s).
 
@@ -81,7 +81,7 @@ def apply_effect(name: str = "", effectID: str = "") -> str:
 # FCP has 376+ built-in transitions. These tools enumerate them
 # and apply them at edit points (between adjacent clips).
 
-@splicekit_tool("list_transitions")
+@splicekit_tool("list_transitions", READ)
 def list_transitions(filter: str = "") -> str:
     """List all available video transitions installed in FCP.
 
@@ -118,7 +118,7 @@ def list_transitions(filter: str = "") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("apply_transition")
+@splicekit_tool("apply_transition", DESTRUCTIVE)
 def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = True) -> str:
     """Apply a specific transition at the current edit point.
 
@@ -161,7 +161,7 @@ def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = T
     return msg
 
 
-@splicekit_tool("apply_transition_to_all_clips")
+@splicekit_tool("apply_transition_to_all_clips", DESTRUCTIVE)
 def apply_transition_to_all_clips() -> str:
     """Apply the default transition (Cross Dissolve) between every clip on the timeline.
 
@@ -170,7 +170,4 @@ def apply_transition_to_all_clips() -> str:
 
     Use list_transitions() to see which transition is currently set as default.
     """
-    r = bridge.call("command.execute", action="addTransitionToAll", type="timeline")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("command.execute", action="addTransitionToAll", type="timeline")

@@ -13,38 +13,24 @@ Usage:
 Requires: FCP running with SpliceKit injected, bridge on 127.0.0.1:9876
 """
 
-import socket
 import json
 import sys
 import time
 import argparse
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import live_rpc  # noqa: E402
 
 # ── Connection ──────────────────────────────────────────────
 
 HOST = "127.0.0.1"
 PORT = 9876
-_id = 0
 
 
 def rpc(method, params=None, timeout=90):
     """Send a JSON-RPC request and return the parsed response."""
-    global _id
-    _id += 1
-    req = {"jsonrpc": "2.0", "method": method, "id": _id}
-    if params:
-        req["params"] = params
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(req) + "\n").encode())
-    data = b""
-    while b"\n" not in data:
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    s.close()
-    return json.loads(data.decode().strip())
+    return live_rpc.rpc(method, params, timeout, host=HOST, port=PORT)
 
 
 # ── Test Framework ─────────────────────────────────────────

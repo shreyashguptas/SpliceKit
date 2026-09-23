@@ -1,7 +1,7 @@
 """Tools: debug flags, runtime metadata, breakpoints, tracing, eval."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, READ, splicekit_tool
+from ..bridge import _call_or_error
 
 
 # ============================================================
@@ -11,7 +11,7 @@ from ..bridge import _err, _fmt, bridge
 # ProAppSupport logging, CFPreferences keys) and SpliceKit's own
 # debugging toolkit (breakpoints, tracing, eval, crash handling).
 
-@splicekit_tool("debug_get_config")
+@splicekit_tool("debug_get_config", READ, title="Get Debug Config")
 def debug_get_config() -> str:
     """Get current state of all FCP internal debug/logging settings.
 
@@ -23,13 +23,10 @@ def debug_get_config() -> str:
 
     Use this to see what debug options are currently active before changing them.
     """
-    r = bridge.call("debug.getConfig")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.getConfig")
 
 
-@splicekit_tool("debug_set_config")
+@splicekit_tool("debug_set_config", DESTRUCTIVE, title="Set Debug Config")
 def debug_set_config(key: str, value: str = "true") -> str:
     """Set a single FCP internal debug/logging flag.
 
@@ -91,13 +88,10 @@ def debug_set_config(key: str, value: str = "true") -> str:
         except ValueError:
             parsed = value  # pass as string (for LogLevel names like "trace", "debug", etc.)
 
-    r = bridge.call("debug.setConfig", key=key, value=parsed)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.setConfig", key=key, value=parsed)
 
 
-@splicekit_tool("debug_reset_config")
+@splicekit_tool("debug_reset_config", DESTRUCTIVE, title="Reset Debug Config")
 def debug_reset_config(scope: str = "all") -> str:
     """Reset debug/logging settings to defaults.
 
@@ -108,13 +102,10 @@ def debug_reset_config(scope: str = "all") -> str:
           "cfprefs" - reset CFPreferences debug flags only
           "log" - reset ProAppSupport log settings only
     """
-    r = bridge.call("debug.resetConfig", scope=scope)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.resetConfig", scope=scope)
 
 
-@splicekit_tool("debug_enable_preset")
+@splicekit_tool("debug_enable_preset", DESTRUCTIVE, title="Enable Debug Preset")
 def debug_enable_preset(preset: str) -> str:
     """Enable a preset group of debug settings.
 
@@ -132,13 +123,10 @@ def debug_enable_preset(preset: str) -> str:
                               thread info, and audio logging
           "all_off" - Disable all debug flags and reset to defaults
     """
-    r = bridge.call("debug.enablePreset", preset=preset)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.enablePreset", preset=preset)
 
 
-@splicekit_tool("debug_start_framerate_monitor")
+@splicekit_tool("debug_start_framerate_monitor", LOCAL, title="Start Framerate Monitor")
 def debug_start_framerate_monitor(interval: float = 2.0) -> str:
     """Start FCP's built-in HMD framerate monitor.
 
@@ -150,24 +138,18 @@ def debug_start_framerate_monitor(interval: float = 2.0) -> str:
     Args:
         interval: Seconds between measurements (default 2.0).
     """
-    r = bridge.call("debug.startFramerateMonitor", interval=interval)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.startFramerateMonitor", interval=interval)
 
 
-@splicekit_tool("debug_stop_framerate_monitor")
+@splicekit_tool("debug_stop_framerate_monitor", LOCAL, title="Stop Framerate Monitor")
 def debug_stop_framerate_monitor() -> str:
     """Stop the HMD framerate monitor."""
-    r = bridge.call("debug.stopFramerateMonitor")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.stopFramerateMonitor")
 
 
 # -- Runtime metadata export (for reverse engineering / IDA Pro) --
 
-@splicekit_tool("dump_runtime_metadata")
+@splicekit_tool("dump_runtime_metadata", READ)
 def dump_runtime_metadata(binary: str = "", classes_only: bool = False) -> str:
     """Bulk-export ObjC runtime metadata from a running FCP process for IDA Pro import.
 
@@ -184,13 +166,10 @@ def dump_runtime_metadata(binary: str = "", classes_only: bool = False) -> str:
         params["binary"] = binary
     if classes_only:
         params["classesOnly"] = True
-    r = bridge.call("debug.dumpRuntimeMetadata", params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.dumpRuntimeMetadata", **params)
 
 
-@splicekit_tool("list_loaded_images")
+@splicekit_tool("list_loaded_images", READ)
 def list_loaded_images(filter: str = "") -> str:
     """List all Mach-O images loaded in FCP's process with base addresses and ASLR slides.
 
@@ -203,13 +182,10 @@ def list_loaded_images(filter: str = "") -> str:
     params = {}
     if filter:
         params["filter"] = filter
-    r = bridge.call("debug.listLoadedImages", params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.listLoadedImages", **params)
 
 
-@splicekit_tool("get_image_sections")
+@splicekit_tool("get_image_sections", READ)
 def get_image_sections(binary: str) -> str:
     """Get ObjC section data for a loaded binary: selector refs, class refs, superclass refs.
 
@@ -220,13 +196,10 @@ def get_image_sections(binary: str) -> str:
     Args:
         binary: Binary/framework name to inspect (e.g. "Flexo", "TLKit")
     """
-    r = bridge.call("debug.getImageSections", {"binary": binary})
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.getImageSections", binary=binary)
 
 
-@splicekit_tool("get_image_symbols")
+@splicekit_tool("get_image_symbols", READ)
 def get_image_symbols(binary: str, filter: str = "", demangle: bool = True) -> str:
     """Get exported symbols from a loaded binary's symbol table.
 
@@ -243,13 +216,10 @@ def get_image_symbols(binary: str, filter: str = "", demangle: bool = True) -> s
         params["filter"] = filter
     if not demangle:
         params["demangle"] = False
-    r = bridge.call("debug.getImageSymbols", params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.getImageSymbols", **params)
 
 
-@splicekit_tool("get_notification_names")
+@splicekit_tool("get_notification_names", READ)
 def get_notification_names(binary: str = "") -> str:
     """Enumerate NSNotification name constants from exported symbols.
 
@@ -263,10 +233,7 @@ def get_notification_names(binary: str = "") -> str:
     params = {}
     if binary:
         params["binary"] = binary
-    r = bridge.call("debug.getNotificationNames", params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.getNotificationNames", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +242,7 @@ def get_notification_names(binary: str = "") -> str:
 # True breakpoints that freeze FCP mid-execution. The JSON-RPC server
 # stays alive on a background thread so you can inspect state while paused.
 
-@splicekit_tool("debug_breakpoint")
+@splicekit_tool("debug_breakpoint", LOCAL)
 def debug_breakpoint(action: str = "list", class_name: str = "", selector: str = "",
                      condition: str = "", hit_count: int = 0, one_shot: bool = False,
                      key_path: str = "", store_result: bool = False,
@@ -333,10 +300,7 @@ def debug_breakpoint(action: str = "list", class_name: str = "", selector: str =
         params["storeResult"] = True
     if class_method:
         params["classMethod"] = True
-    r = bridge.call("debug.breakpoint", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.breakpoint", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +309,7 @@ def debug_breakpoint(action: str = "list", class_name: str = "", selector: str =
 # Non-blocking alternative to breakpoints. Swizzles methods to log calls
 # without pausing. Good for understanding call patterns and frequencies.
 
-@splicekit_tool("debug_trace_method")
+@splicekit_tool("debug_trace_method", LOCAL, title="Trace Method")
 def debug_trace_method(action: str = "list", class_name: str = "", selector: str = "",
                        log_stack: bool = False, log_args: bool = True,
                        limit: int = 50, class_method: bool = False) -> str:
@@ -386,10 +350,7 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
         params["limit"] = limit
     if class_method:
         params["classMethod"] = True
-    r = bridge.call("debug.traceMethod", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.traceMethod", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +359,7 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
 # Uses ObjC Key-Value Observing to fire events whenever a property changes.
 # Replaces hardware watchpoints -- works on any KVO-compliant property.
 
-@splicekit_tool("debug_watch")
+@splicekit_tool("debug_watch", LOCAL, title="Watch Property Changes")
 def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
                 key_path: str = "", watch_key: str = "") -> str:
     """Watch ObjC property changes via KVO (Key-Value Observing).
@@ -425,10 +386,7 @@ def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
         params["keyPath"] = key_path
     if watch_key:
         params["watchKey"] = watch_key
-    r = bridge.call("debug.watch", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.watch", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +395,7 @@ def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
 # Catches NSExceptions and Unix signals before the process dies,
 # so you get a stack trace instead of a silent crash.
 
-@splicekit_tool("debug_crash_handler")
+@splicekit_tool("debug_crash_handler", LOCAL, title="Crash Handler")
 def debug_crash_handler(action: str = "install") -> str:
     """Install or query the in-process crash handler.
 
@@ -452,10 +410,7 @@ def debug_crash_handler(action: str = "install") -> str:
             - "getLog": Read captured crash stack traces
             - "clearLog": Clear the crash log
     """
-    r = bridge.call("debug.crashHandler", action=action)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.crashHandler", action=action)
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +418,7 @@ def debug_crash_handler(action: str = "install") -> str:
 # ---------------------------------------------------------------------------
 # Lists all ~45 threads in FCP's process with CPU usage via Mach APIs.
 
-@splicekit_tool("debug_threads")
+@splicekit_tool("debug_threads", READ)
 def debug_threads(detailed: bool = False) -> str:
     """List all threads in FCP's process with CPU usage and state.
 
@@ -479,10 +434,7 @@ def debug_threads(detailed: bool = False) -> str:
     - runState (1=running, 2=stopped, 3=waiting)
     - suspended flag
     """
-    r = bridge.call("debug.threads", detailed=detailed)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.threads", detailed=detailed)
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +442,7 @@ def debug_threads(detailed: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Like lldb's `po` command. Walks ObjC property chains at runtime.
 
-@splicekit_tool("debug_eval")
+@splicekit_tool("debug_eval", READ, title="Evaluate Debug Expression")
 def debug_eval(expression: str = "", chain: str = "", target: str = "",
                store_result: bool = False) -> str:
     """Evaluate ObjC property chains inside FCP's process.
@@ -521,10 +473,7 @@ def debug_eval(expression: str = "", chain: str = "", target: str = "",
         params["target"] = target
     if store_result:
         params["storeResult"] = True
-    r = bridge.call("debug.eval", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.eval", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +481,7 @@ def debug_eval(expression: str = "", chain: str = "", target: str = "",
 # ---------------------------------------------------------------------------
 # dlopen/dlclose for live-patching FCP without restarting.
 
-@splicekit_tool("debug_load_plugin")
+@splicekit_tool("debug_load_plugin", DESTRUCTIVE, title="Load Debug Plugin")
 def debug_load_plugin(action: str = "list", path: str = "") -> str:
     """Load or unload arbitrary native code inside Final Cut Pro's running process.
 
@@ -563,10 +512,7 @@ def debug_load_plugin(action: str = "list", path: str = "") -> str:
     params = {"action": action}
     if path:
         params["path"] = path
-    r = bridge.call("debug.loadPlugin", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.loadPlugin", **params)
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +521,7 @@ def debug_load_plugin(action: str = "list", path: str = "") -> str:
 # Subscribe to NSNotificationCenter events. FCP posts 337+ named
 # notifications internally -- this lets you see them in real time.
 
-@splicekit_tool("debug_observe_notification")
+@splicekit_tool("debug_observe_notification", LOCAL, title="Observe Notifications")
 def debug_observe_notification(action: str = "list", name: str = "",
                                log_object: bool = False) -> str:
     """Subscribe to FCP's internal NSNotification events.
@@ -606,7 +552,4 @@ def debug_observe_notification(action: str = "list", name: str = "",
         params["name"] = name
     if log_object:
         params["logObject"] = True
-    r = bridge.call("debug.observeNotification", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("debug.observeNotification", **params)

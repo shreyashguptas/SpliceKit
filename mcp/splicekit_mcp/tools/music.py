@@ -1,10 +1,12 @@
 """Tools: beat detection, song structure, sections bar, FlexMusic."""
 
 import json
+import subprocess
+import os
 
 from ..config import REPO_ROOT
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
 # ============================================================
@@ -14,7 +16,7 @@ from ..bridge import _err, _fmt, bridge
 # deadlocks inside FCP's hardened runtime). Returns beat/bar/section
 # timestamps for syncing video cuts to music.
 
-@splicekit_tool("detect_beats")
+@splicekit_tool("detect_beats", READ)
 def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0,
                  limit: int = 16) -> str:
     """Detect beats, bars, and sections in any audio file (MP3, WAV, M4A, etc.).
@@ -35,7 +37,6 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
 
     Returns beat timestamps, bar timestamps, section timestamps, BPM, and duration.
     """
-    import subprocess, os
     # Search common install locations for the beat-detector binary
     tool_paths = [
         os.path.join(REPO_ROOT, "build", "beat-detector"),
@@ -113,7 +114,6 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
 
 def _find_structure_analyzer():
     """Find the structure-analyzer binary."""
-    import os
     tool_paths = [
         os.path.join(REPO_ROOT, "build", "structure-analyzer"),
         os.path.expanduser("~/Applications/SpliceKit/tools/structure-analyzer"),
@@ -129,7 +129,6 @@ def _find_structure_analyzer():
 def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
                              min_bpm: float = 60.0, max_bpm: float = 200.0) -> dict:
     """Run structure-analyzer and return parsed JSON dict (or dict with 'error' key)."""
-    import subprocess
     tool = _find_structure_analyzer()
     if not tool:
         return {"error": "structure-analyzer tool not found. Build with: swiftc -O -o build/structure-analyzer tools/structure-analyzer.swift"}
@@ -149,7 +148,7 @@ def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
         return {"error": str(e)}
 
 
-@splicekit_tool("analyze_song_structure")
+@splicekit_tool("analyze_song_structure", READ)
 def analyze_song_structure(file_path: str, sensitivity: float = 0.5,
                            min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Analyze a song's structure — detect verse, chorus, bridge, intro, outro sections.
@@ -166,7 +165,6 @@ def analyze_song_structure(file_path: str, sensitivity: float = 0.5,
 
     Returns labeled song structure, beats, bars, BPM, drops, and energy contour.
     """
-    import os
     data = _run_structure_analyzer(file_path, sensitivity, min_bpm, max_bpm)
     if "error" in data:
         return f"Error: {data['error']}"
@@ -189,7 +187,7 @@ def analyze_song_structure(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@splicekit_tool("beat_sync_blade")
+@splicekit_tool("beat_sync_blade", DESTRUCTIVE)
 def beat_sync_blade(file_path: str, cut_on: str = "bar",
                     sensitivity: float = 0.5, min_bpm: float = 60.0,
                     max_bpm: float = 200.0,
@@ -226,7 +224,6 @@ def beat_sync_blade(file_path: str, cut_on: str = "bar",
 
     Returns summary of cuts applied (or planned if dry_run).
     """
-    import os
     # Run structure analysis (includes beats, bars, structure, drops)
     data = _run_structure_analyzer(file_path, sensitivity, min_bpm, max_bpm)
     if "error" in data:
@@ -351,7 +348,7 @@ def beat_sync_blade(file_path: str, cut_on: str = "bar",
 # elements; Final Cut Pro assigns them to the library's normal SRT caption
 # role (e.g. English), not a separate "structure" role.
 
-@splicekit_tool("song_structure_blocks")
+@splicekit_tool("song_structure_blocks", DESTRUCTIVE)
 def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
                           min_bpm: float = 60.0, max_bpm: float = 200.0,
                           at_seconds: float = 0.0) -> str:
@@ -374,7 +371,6 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
 
     Returns summary of structure blocks placed in the caption lane.
     """
-    import os
     # Run structure analysis
     data = _run_structure_analyzer(file_path, sensitivity, min_bpm, max_bpm)
     if "error" in data:
@@ -423,7 +419,10 @@ def song_structure_blocks(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@splicekit_tool("toggle_structure_blocks")
+# DESTRUCTIVE: deletes the structure storyline whenever one is on the timeline (same code
+# path as remove_structure_blocks). It was READ_ONLY and idempotent, which invited an
+# agent to call it speculatively and silently lose the blocks.
+@splicekit_tool("toggle_structure_blocks", DESTRUCTIVE, title="Remove Structure Blocks (Toggle)")
 def toggle_structure_blocks() -> str:
     """Remove the song structure block storyline from the timeline, if one is there.
 
@@ -443,7 +442,7 @@ def toggle_structure_blocks() -> str:
     return _fmt(r)
 
 
-@splicekit_tool("remove_structure_blocks")
+@splicekit_tool("remove_structure_blocks", DESTRUCTIVE)
 def remove_structure_blocks(dry_run: bool = False) -> str:
     """Remove song structure block storylines, structure captions, and the gap they appended.
 
@@ -534,7 +533,7 @@ def remove_structure_blocks(dry_run: bool = False) -> str:
 # song structure sections. Each section has its own color and can be
 # modified via right-click context menu or these MCP tools.
 
-@splicekit_tool("song_structure_sections")
+@splicekit_tool("song_structure_sections", DESTRUCTIVE)
 def song_structure_sections(file_path: str, sensitivity: float = 0.5,
                              min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
     """Analyze a song and display color-coded sections in a dedicated bar above the timeline.
@@ -555,7 +554,6 @@ def song_structure_sections(file_path: str, sensitivity: float = 0.5,
 
     Returns summary of sections placed in the bar.
     """
-    import os
     data = _run_structure_analyzer(file_path, sensitivity, min_bpm, max_bpm)
     if "error" in data:
         return f"Error: {data['error']}"
@@ -579,16 +577,13 @@ def song_structure_sections(file_path: str, sensitivity: float = 0.5,
     return "\n".join(lines)
 
 
-@splicekit_tool("sections_get")
+@splicekit_tool("sections_get", READ, title="Get Sections")
 def sections_get() -> str:
     """Get the current sections displayed in the timeline sections bar."""
-    r = bridge.call("sections.get")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("sections.get")
 
 
-@splicekit_tool("sections_hide")
+@splicekit_tool("sections_hide", DESTRUCTIVE, title="Hide Sections")
 def sections_hide() -> str:
     """Hide the sections bar from the timeline."""
     r = bridge.call("sections.hide")
@@ -603,7 +598,7 @@ def sections_hide() -> str:
 # FCP's built-in AI music engine. Songs can stretch/shrink to
 # any duration by rearranging their musical sections dynamically.
 
-@splicekit_tool("flexmusic_list_songs")
+@splicekit_tool("flexmusic_list_songs", READ, title="List FlexMusic Songs")
 def flexmusic_list_songs(filter: str = "") -> str:
     """List available FlexMusic songs that can dynamically fit any project duration.
 
@@ -625,7 +620,7 @@ def flexmusic_list_songs(filter: str = "") -> str:
     return _fmt(r)
 
 
-@splicekit_tool("flexmusic_get_song")
+@splicekit_tool("flexmusic_get_song", READ, title="Get FlexMusic Song")
 def flexmusic_get_song(song_uid: str) -> str:
     """Get detailed info about a specific FlexMusic song.
 
@@ -635,13 +630,10 @@ def flexmusic_get_song(song_uid: str) -> str:
     Returns metadata (mood, pace, genres, arousal, valence),
     natural duration, minimum duration, and ideal durations.
     """
-    r = bridge.call("flexmusic.getSong", songUID=song_uid)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("flexmusic.getSong", songUID=song_uid)
 
 
-@splicekit_tool("flexmusic_get_timing")
+@splicekit_tool("flexmusic_get_timing", READ, title="Get FlexMusic Timing")
 def flexmusic_get_timing(song_uid: str, duration_seconds: float) -> str:
     """Get beat, bar, and section timing for a FlexMusic song fitted to a specific duration.
 
@@ -656,13 +648,10 @@ def flexmusic_get_timing(song_uid: str, duration_seconds: float) -> str:
     Returns arrays of beat timestamps, bar timestamps, section timestamps,
     and the actual fitted duration.
     """
-    r = bridge.call("flexmusic.getTiming", songUID=song_uid, durationSeconds=duration_seconds)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("flexmusic.getTiming", songUID=song_uid, durationSeconds=duration_seconds)
 
 
-@splicekit_tool("flexmusic_render_to_file")
+@splicekit_tool("flexmusic_render_to_file", DESTRUCTIVE, title="Render FlexMusic To File")
 def flexmusic_render_to_file(song_uid: str, duration_seconds: float, output_path: str, format: str = "m4a") -> str:
     """Render a FlexMusic song fitted to a specific duration as an audio file.
 
@@ -675,14 +664,11 @@ def flexmusic_render_to_file(song_uid: str, duration_seconds: float, output_path
         output_path: Where to save the rendered audio file.
         format: Audio format - "m4a" (AAC, default) or "wav".
     """
-    r = bridge.call("flexmusic.renderToFile", songUID=song_uid,
-                     durationSeconds=duration_seconds, outputPath=output_path, format=format)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("flexmusic.renderToFile", songUID=song_uid,
+                          durationSeconds=duration_seconds, outputPath=output_path, format=format)
 
 
-@splicekit_tool("flexmusic_add_to_timeline")
+@splicekit_tool("flexmusic_add_to_timeline", DESTRUCTIVE, title="Add FlexMusic To Timeline")
 def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str:
     """Add a FlexMusic song to the current timeline as background music.
 
@@ -693,8 +679,5 @@ def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str
         song_uid: The unique identifier of the song.
         duration_seconds: Target duration (0 = use current timeline duration).
     """
-    r = bridge.call("flexmusic.addToTimeline", songUID=song_uid,
-                     durationSeconds=duration_seconds)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("flexmusic.addToTimeline", songUID=song_uid,
+                          durationSeconds=duration_seconds)

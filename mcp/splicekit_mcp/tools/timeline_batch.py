@@ -3,7 +3,7 @@
 import json
 import time
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
 from ..bridge import _err, bridge
 
 
@@ -12,7 +12,7 @@ from ..bridge import _err, bridge
 # ============================================================
 # Tools for inspecting and applying effects on clips.
 
-@splicekit_tool("get_clip_effects")
+@splicekit_tool("get_clip_effects", READ)
 def get_clip_effects(handle: str = "") -> str:
     """Get the effects applied to a clip. If no handle provided, uses the first selected clip.
     Returns effect names, IDs, classes, and handles for further inspection.
@@ -42,7 +42,7 @@ def get_clip_effects(handle: str = "") -> str:
 # Lets the AI chain many small edits in one round-trip instead
 # of making a separate tool call for each step.
 
-@splicekit_tool("batch_timeline_actions")
+@splicekit_tool("batch_timeline_actions", DESTRUCTIVE)
 def batch_timeline_actions(actions: str, undo_name: str = "Batch Actions") -> str:
     """Execute multiple timeline/playback actions in sequence.
     Much more efficient than calling individual tools.
@@ -148,7 +148,7 @@ def batch_timeline_actions(actions: str, undo_name: str = "Batch Actions") -> st
 # Computes statistics the AI can use to understand the timeline
 # before suggesting edits (pacing, flash frames, etc).
 
-@splicekit_tool("analyze_timeline")
+@splicekit_tool("analyze_timeline", READ)
 def analyze_timeline() -> str:
     """Analyze the current timeline: duration, clip count, pacing stats,
     potential issues (short clips, gaps). Returns a structured report.

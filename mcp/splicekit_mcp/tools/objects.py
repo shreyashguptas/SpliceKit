@@ -2,8 +2,8 @@
 
 import json
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
 def _handle_management_response(action: str, handle: str = "") -> str:
@@ -32,7 +32,7 @@ def _handle_management_response(action: str, handle: str = "") -> str:
 # The swiss army knife — call any ObjC method on any object.
 # Use this when a specific tool doesn't exist for what you need.
 
-@splicekit_tool("call_method_with_args")
+@splicekit_tool("call_method_with_args", DESTRUCTIVE)
 def call_method_with_args(target: str, selector: str, args: str | list = "[]",
                           class_method: bool = True, return_handle: bool = False) -> str:
     """Call any ObjC method with typed arguments via NSInvocation.
@@ -86,12 +86,8 @@ def call_method_with_args(target: str, selector: str, args: str | list = "[]",
                 "Use a dedicated safe wrapper instead."
             )
 
-    r = bridge.call("system.callMethodWithArgs",
-                    target=target, selector=selector, args=parsed_args,
-                    classMethod=class_method, returnHandle=return_handle)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("system.callMethodWithArgs", target=target, selector=selector,
+                          args=parsed_args, classMethod=class_method, returnHandle=return_handle)
 
 
 # ============================================================
@@ -101,13 +97,13 @@ def call_method_with_args(target: str, selector: str, args: str | list = "[]",
 # across multiple tool calls. Think of handles as pointers that
 # survive between requests. Always release_all when you're done.
 
-@splicekit_tool("list_handles")
+@splicekit_tool("list_handles", READ, title="List Object Handles")
 def list_handles() -> str:
     """Use this tool to inspect the currently retained bridge object handles."""
     return _handle_management_response("list")
 
 
-@splicekit_tool("inspect_handle")
+@splicekit_tool("inspect_handle", READ, title="Inspect Object Handle")
 def inspect_handle(handle: str) -> str:
     """Inspect one retained bridge object handle: its class, description and key properties.
 
@@ -124,7 +120,7 @@ def inspect_handle(handle: str) -> str:
     return _handle_management_response("inspect", handle)
 
 
-@splicekit_tool("release_handle")
+@splicekit_tool("release_handle", LOCAL, title="Release Object Handle")
 def release_handle(handle: str) -> str:
     """Release one retained bridge object handle when it is no longer needed.
 
@@ -138,7 +134,7 @@ def release_handle(handle: str) -> str:
     return _handle_management_response("release", handle)
 
 
-@splicekit_tool("release_all_handles")
+@splicekit_tool("release_all_handles", LOCAL)
 def release_all_handles() -> str:
     """Release every retained bridge object handle.
 
@@ -148,7 +144,7 @@ def release_all_handles() -> str:
     return _handle_management_response("release_all")
 
 
-@splicekit_tool("get_object_property")
+@splicekit_tool("get_object_property", READ)
 def get_object_property(handle: str, key: str, return_handle: bool = False) -> str:
     """Use this tool to inspect one property on a retained Objective-C object handle.
 
@@ -168,13 +164,10 @@ def get_object_property(handle: str, key: str, return_handle: bool = False) -> s
 
     Example: get_object_property("obj_3", "displayName")
     """
-    r = bridge.call("object.getProperty", handle=handle, key=key, returnHandle=return_handle)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("object.getProperty", handle=handle, key=key, returnHandle=return_handle)
 
 
-@splicekit_tool("set_object_property")
+@splicekit_tool("set_object_property", DESTRUCTIVE)
 def set_object_property(handle: str, key: str, value: str, value_type: str = "string") -> str:
     """Set a property on an object handle using Key-Value Coding.
 
@@ -203,7 +196,4 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
         val_spec["value"] = float(value)
     elif value_type == "bool":
         val_spec["value"] = value.lower() in ("true", "1", "yes")
-    r = bridge.call("object.setProperty", handle=handle, key=key, value=val_spec)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("object.setProperty", handle=handle, key=key, value=val_spec)

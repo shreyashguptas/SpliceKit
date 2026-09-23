@@ -2,7 +2,7 @@
 
 from ..sdk import Image
 from ..images import _decode_base64_image, _image_content, _maybe_with_image
-from ..registry import splicekit_tool
+from ..registry import LOCAL_IDEMPOTENT, READ, splicekit_tool
 from ..bridge import _err, _fmt, bridge, BridgeConnection
 from .timeline_reads import _time_seconds
 
@@ -148,7 +148,7 @@ def _render_clip_info(r: dict) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_clip_info")
+@splicekit_tool("get_clip_info", READ)
 def get_clip_info(handle: str, include_frame: bool = True, frame_time: float | None = None,
                   frame_max_width: int = 640):
     """Clip information for one clip by handle: the fields Final Cut Pro's Info
@@ -229,7 +229,7 @@ def _capture_flat_note(r: dict) -> str:
     return "\nWARNING: " + str(r.get("warning") or "the captured image is one flat colour: the window may have rendered nothing")
 
 
-@splicekit_tool("capture_clip_frame")
+@splicekit_tool("capture_clip_frame", LOCAL_IDEMPOTENT)
 def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960,
                        render_timeout: float = 5.0):
     """The clip as rendered in the Viewer: effects, color correction and transforms
@@ -330,7 +330,7 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
 # Captures the viewer/canvas contents directly — no external
 # screencapture tool needed, no other windows in the way.
 
-@splicekit_tool("capture_viewer")
+@splicekit_tool("capture_viewer", READ)
 def capture_viewer(path: str = "/tmp/splicekit_viewer.png", return_image: bool = True):
     """Capture the FCP viewer/canvas as a PNG screenshot.
 

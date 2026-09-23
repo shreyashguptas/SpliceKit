@@ -1,7 +1,7 @@
 """Tools: menus, inspector properties, panels, tool selection, roles."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, LOCAL, LOCAL_IDEMPOTENT, READ, splicekit_tool
+from ..bridge import _call_or_error
 
 
 # ============================================================
@@ -10,7 +10,7 @@ from ..bridge import _err, _fmt, bridge
 # Fallback for anything that doesn't have a dedicated tool.
 # Walks FCP's NSMenu hierarchy by title to reach any menu item.
 
-@splicekit_tool("execute_menu_command")
+@splicekit_tool("execute_menu_command", DESTRUCTIVE)
 def execute_menu_command(menu_path: list[str], dry_run: bool = False) -> str:
     """Execute ANY FCP menu command by navigating the menu bar hierarchy.
 
@@ -27,13 +27,10 @@ def execute_menu_command(menu_path: list[str], dry_run: bool = False) -> str:
     that don't have dedicated SpliceKit actions. Menu items are matched
     case-insensitively and trailing ellipsis (...) is ignored.
     """
-    r = bridge.call("menu.execute", menuPath=menu_path, dry_run=dry_run)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("menu.execute", menuPath=menu_path, dry_run=dry_run)
 
 
-@splicekit_tool("list_menus")
+@splicekit_tool("list_menus", READ)
 def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
     """List FCP menu items to discover available commands.
 
@@ -57,10 +54,7 @@ def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
         params["menu"] = menu
     if validate:
         params["validate"] = True
-    r = bridge.call("menu.list", **params)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("menu.list", **params)
 
 
 # ============================================================
@@ -69,7 +63,7 @@ def list_menus(menu: str = "", depth: int = 2, validate: bool = False) -> str:
 # Reads/writes FCP's internal effect parameter channels directly,
 # bypassing the inspector UI. Works on transform, compositing, audio, crop.
 
-@splicekit_tool("get_inspector_properties")
+@splicekit_tool("get_inspector_properties", READ)
 def get_inspector_properties(property: str = "all") -> str:
     """Read properties of the selected clip from the inspector.
 
@@ -86,13 +80,10 @@ def get_inspector_properties(property: str = "all") -> str:
     Returns actual numeric values from FCP's internal effect parameter channels.
     Requires a clip to be selected first (use timeline_action("selectClipAtPlayhead")).
     """
-    r = bridge.call("inspector.get", property=property)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("inspector.get", property=property)
 
 
-@splicekit_tool("set_inspector_property")
+@splicekit_tool("set_inspector_property", DESTRUCTIVE)
 def set_inspector_property(property: str, value: float | str | bool) -> str:
     """Set a property on the selected clip's effect parameters.
 
@@ -115,13 +106,10 @@ def set_inspector_property(property: str, value: float | str | bool) -> str:
     Changes are undoable (Cmd+Z). Creates the transform effect if it doesn't exist yet.
     Requires a clip to be selected first.
     """
-    r = bridge.call("inspector.set", property=property, value=value)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("inspector.set", property=property, value=value)
 
 
-@splicekit_tool("get_title_text")
+@splicekit_tool("get_title_text", READ)
 def get_title_text() -> str:
     """Read text content, font, and size from the selected Motion title clip.
 
@@ -134,13 +122,10 @@ def get_title_text() -> str:
 
     Requires a title clip to be selected first (use timeline_action("selectClipAtPlayhead")).
     """
-    r = bridge.call("inspector.getTitle")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("inspector.getTitle")
 
 
-@splicekit_tool("verify_captions")
+@splicekit_tool("verify_captions", READ)
 def verify_captions() -> str:
     """Verify that generated captions rendered correctly on the timeline.
 
@@ -151,10 +136,7 @@ def verify_captions() -> str:
     Run this after generate_captions() to confirm titles have visible text at
     the correct font size, without needing to ask the user to check manually.
     """
-    r = bridge.call("captions.verify")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("captions.verify")
 
 
 # ============================================================
@@ -162,7 +144,7 @@ def verify_captions() -> str:
 # ============================================================
 # Show/hide FCP's various panels and viewers.
 
-@splicekit_tool("toggle_panel")
+@splicekit_tool("toggle_panel", LOCAL)
 def toggle_panel(panel: str) -> str:
     """Show or hide a panel/viewer in the FCP interface.
 
@@ -176,23 +158,17 @@ def toggle_panel(panel: str) -> str:
                multicamViewer, 360viewer, fullscreenViewer,
                backgroundTasks, voiceover, comparisonViewer
     """
-    r = bridge.call("view.toggle", panel=panel)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("view.toggle", panel=panel)
 
 
-@splicekit_tool("set_workspace")
+@splicekit_tool("set_workspace", LOCAL_IDEMPOTENT)
 def set_workspace(workspace: str) -> str:
     """Switch to a predefined workspace layout.
 
     Args:
         workspace: "default", "organize", "colorEffects", or "dualDisplays"
     """
-    r = bridge.call("view.workspace", workspace=workspace)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("view.workspace", workspace=workspace)
 
 
 # ============================================================
@@ -200,7 +176,7 @@ def set_workspace(workspace: str) -> str:
 # ============================================================
 # Switch the active editing tool (blade, trim, range, etc).
 
-@splicekit_tool("select_tool")
+@splicekit_tool("select_tool", LOCAL_IDEMPOTENT)
 def select_tool(tool: str) -> str:
     """Switch to a specific editing tool.
 
@@ -208,10 +184,7 @@ def select_tool(tool: str) -> str:
         tool: "select", "trim", "blade", "position", "hand", "zoom",
               "range", "crop", "distort", "transform"
     """
-    r = bridge.call("tool.select", tool=tool)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("tool.select", tool=tool)
 
 
 # ============================================================
@@ -220,7 +193,7 @@ def select_tool(tool: str) -> str:
 # Roles control how clips appear in the timeline index and
 # how they're grouped during export (e.g. separate Dialogue/Music stems).
 
-@splicekit_tool("assign_role")
+@splicekit_tool("assign_role", LOCAL_IDEMPOTENT)
 def assign_role(type: str, role: str) -> str:
     """Assign a role to the selected clip.
 
@@ -228,7 +201,4 @@ def assign_role(type: str, role: str) -> str:
         type: "audio", "video", or "caption"
         role: Role name (e.g. "Dialogue", "Music", "Effects", "Titles", "Video")
     """
-    r = bridge.call("roles.assign", type=type, role=role)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("roles.assign", type=type, role=role)

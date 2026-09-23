@@ -2,11 +2,11 @@
 
 import time
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, LOCAL_IDEMPOTENT, READ, splicekit_tool
 from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
-@splicekit_tool("seek_to_time")
+@splicekit_tool("seek_to_time", LOCAL_IDEMPOTENT)
 def seek_to_time(seconds: float) -> str:
     """Use this tool to jump the playhead to an exact time before another operation.
 
@@ -130,7 +130,7 @@ def _marker_table_lines(markers):
     return lines
 
 
-@splicekit_tool("get_timeline_clips")
+@splicekit_tool("get_timeline_clips", READ)
 def get_timeline_clips(limit: int = 100, include_connected: bool = True,
                        include_markers: bool = True) -> str:
     """Get a structured view of everything in the current timeline.
@@ -250,7 +250,7 @@ def get_timeline_clips(limit: int = 100, include_connected: bool = True,
     return "\n".join(lines)
 
 
-@splicekit_tool("list_markers")
+@splicekit_tool("list_markers", READ)
 def list_markers(kind: str = "") -> str:
     """List all markers on the current timeline with time, kind, name, completion, handle.
 
@@ -304,7 +304,7 @@ def list_markers(kind: str = "") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_selected_clips")
+@splicekit_tool("get_selected_clips", READ)
 def get_selected_clips() -> str:
     """Get only the currently selected clips in the timeline.
     Includes selected connected clips (titles, B-roll, music), marked with "connected": true.
@@ -319,7 +319,7 @@ def get_selected_clips() -> str:
     return _fmt({"selectedCount": len(items), "items": items})
 
 
-@splicekit_tool("set_timeline_range")
+@splicekit_tool("set_timeline_range", LOCAL_IDEMPOTENT)
 def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
     """Set the timeline in/out range (mark in/out) to specific times in seconds.
     This positions the playhead and marks the range start and end points.
@@ -343,7 +343,7 @@ def set_timeline_range(start_seconds: float, end_seconds: float) -> str:
     )
 
 
-@splicekit_tool("batch_export")
+@splicekit_tool("batch_export", DESTRUCTIVE, title="Batch Export Clips")
 def batch_export(scope: str = "all", folder: str = "") -> str:
     """Batch export every clip from the active timeline as individual files.
 
@@ -380,7 +380,7 @@ def batch_export(scope: str = "all", folder: str = "") -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("verify_action")
+@splicekit_tool("verify_action", READ, title="Verify Timeline Action")
 def verify_action(description: str = "") -> str:
     """Capture timeline state for before/after verification.
 

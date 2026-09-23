@@ -205,7 +205,7 @@ def resource_instructions() -> str:
 2. **Discover before editing.** Call get_timeline_clips() or read splicekit://timeline/clips before making changes.
 3. **Select before acting.** Color correction, effects, retiming, and titles require a clip to be selected first.
 4. **Verify after editing.** Use verify_action(), capture_timeline(), or capture_viewer() to confirm results.
-5. **Prefer non-destructive workflows.** Use undo via timeline_action("undo") if something goes wrong.
+5. **Prefer non-destructive workflows.** Use undo via history_action("undo") if something goes wrong.
 
 ## Standard Workflow
 1. bridge_status() — verify FCP is connected
@@ -249,7 +249,7 @@ Items are FFAnchoredMediaComponent (clips), FFAnchoredTransition, etc.
 get_timeline_clips() returns handles for each item — use handles in subsequent calls.
 
 ## Error Recovery
-- timeline_action("undo") to reverse the last edit
+- history_action("undo") to reverse the last edit
 - release_all_handles() to clean up leaked object handles
 - bridge_status() to check if the connection is still alive
 """

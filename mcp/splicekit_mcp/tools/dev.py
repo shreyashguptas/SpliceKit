@@ -1,7 +1,11 @@
 """Tools: build, deploy and restart Final Cut Pro."""
 
+import subprocess
+import os
+import time
+
 from ..config import REPO_ROOT
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, splicekit_tool
 from ..bridge import _err, bridge
 
 
@@ -11,7 +15,7 @@ from ..bridge import _err, bridge
 # One-shot command to resolve modded app, quit FCP, build/deploy, relaunch,
 # and wait for the bridge to come back online.
 
-@splicekit_tool("deploy_and_restart")
+@splicekit_tool("deploy_and_restart", DESTRUCTIVE, title="Deploy And Restart FCP")
 def deploy_and_restart(skip_build: bool = False) -> str:
     """Build SpliceKit, deploy to the modded FCP app, and restart FCP.
 
@@ -28,7 +32,6 @@ def deploy_and_restart(skip_build: bool = False) -> str:
 
     Returns success/failure status and bridge connection state.
     """
-    import subprocess, os, time as _time
 
     project_dir = REPO_ROOT
     results = []
@@ -102,12 +105,12 @@ def deploy_and_restart(skip_build: bool = False) -> str:
             except Exception as e:
                 return f"Error sending quit to Final Cut Pro: {e}"
 
-        quit_deadline = _time.time() + 30
-        while _time.time() < quit_deadline:
+        quit_deadline = time.time() + 30
+        while time.time() < quit_deadline:
             if not _fcp_is_running():
                 results.append("Quit FCP: OK")
                 break
-            _time.sleep(0.5)
+            time.sleep(0.5)
         else:
             return (
                 "Error: Final Cut Pro did not exit within 30s after SIGTERM. "
@@ -150,10 +153,10 @@ def deploy_and_restart(skip_build: bool = False) -> str:
     bridge.reset()
 
     max_wait = 30
-    start = _time.time()
+    start = time.time()
     connected = False
-    while _time.time() - start < max_wait:
-        _time.sleep(2)
+    while time.time() - start < max_wait:
+        time.sleep(2)
         try:
             r = bridge.call("system.version")
             if not _err(r):

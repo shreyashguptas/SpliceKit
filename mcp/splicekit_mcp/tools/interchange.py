@@ -1,7 +1,10 @@
 """Tools: FCPXML export and OpenTimelineIO import / export."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+import tempfile
+import os
+
+from ..registry import DESTRUCTIVE, splicekit_tool
+from ..bridge import _call_or_error, _err, _fmt, bridge
 from ..otio_fcpxml import (
     _otio_all_timelines, _otio_detect_rate, _otio_fcpxml_clean_for_paste, _otio_first_timeline,
     _otio_normalize_rate, _otio_prepare_for_fcp, _otio_read_fcpx_document,
@@ -14,7 +17,9 @@ from ..otio_fcpxml import (
 # ============================================================
 # Export the current project to FCPXML without the save dialog.
 
-@splicekit_tool("export_xml")
+# DESTRUCTIVE: writes to a caller-supplied path and overwrites whatever is there, with no
+# existence check and no dry run — the same disk-write risk export_captions_srt/txt carry.
+@splicekit_tool("export_xml", DESTRUCTIVE, title="Export FCPXML")
 def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
     """Export the current project/sequence as FCPXML to a file — no save dialog.
 
@@ -37,10 +42,7 @@ def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
     - Backing up before destructive edits
     - Transferring projects between systems
     """
-    r = bridge.call("fcpxml.export", path=path)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("fcpxml.export", path=path)
 
 
 # ============================================================
@@ -52,7 +54,9 @@ def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
 # as the primary format tools.
 
 
-@splicekit_tool("export_otio")
+# DESTRUCTIVE: writes to a caller-supplied path and overwrites whatever is there, with no
+# existence check and no dry run — the same disk-write risk export_captions_srt/txt carry.
+@splicekit_tool("export_otio", DESTRUCTIVE, title="Export OpenTimelineIO")
 def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> str:
     """Export the current project/sequence via OpenTimelineIO.
 
@@ -92,7 +96,6 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
     except ImportError:
         return "Error: opentimelineio not installed. Run: pip install opentimelineio otio-fcpxml-adapter (or legacy otio-fcpx-xml-adapter)"
 
-    import tempfile, os
 
     # For .fcpxml/.fcpxmld output, use FCP's native exporter directly for maximum fidelity.
     if path.lower().endswith((".fcpxml", ".fcpxmld")):
@@ -164,7 +167,7 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
     return _fmt(summary)
 
 
-@splicekit_tool("import_otio")
+@splicekit_tool("import_otio", DESTRUCTIVE, title="Import OpenTimelineIO")
 def import_otio(path: str = "", otio_json: str = "", rate: float = 0, event: str = "") -> str:
     """Import a timeline file into FCP via OpenTimelineIO.
 

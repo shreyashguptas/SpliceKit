@@ -1,10 +1,11 @@
 """Tools: audio levels of timeline clips."""
 
 import json
+import math
 
 from ..config import _LOG
 from ..images import _image_content, _maybe_with_image, _png_encode
-from ..registry import splicekit_tool
+from ..registry import READ, splicekit_tool
 from ..bridge import _err, _fmt, bridge
 from .timeline_reads import _s3
 
@@ -266,9 +267,8 @@ def _render_audio_levels_png(r: dict, width: int = 1200):
         if span / cand <= 16:
             tick = float(cand)
             break
-    import math as _m
     if span / tick <= width:
-        k = _m.ceil(t0 / tick)
+        k = math.ceil(t0 / tick)
         drawn = 0
         while k * tick <= t1 and drawn <= width:
             fill(X(k * tick), 0, X(k * tick) + 1, height, tick_col)
@@ -334,7 +334,7 @@ def _render_audio_levels_png(r: dict, width: int = 1200):
     return _png_encode(width, height, buf), legend
 
 
-@splicekit_tool("get_audio_levels")
+@splicekit_tool("get_audio_levels", READ)
 def get_audio_levels(handle: str = "", handles: list[str] | None = None,
                      start_seconds: float | None = None, end_seconds: float | None = None,
                      slice_ms: int = 50, channels: str = "mix", edge_ms: int = 100,

@@ -2,8 +2,8 @@
 
 import json
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from ..registry import DESTRUCTIVE, READ, splicekit_tool
+from ..bridge import _call_or_error, _err, _fmt, bridge
 
 
 # ============================================================
@@ -12,7 +12,7 @@ from ..bridge import _err, _fmt, bridge
 # Reverse-engineering tools — enumerate classes, explore methods,
 # inspect the class hierarchy. Use these to discover new APIs.
 
-@splicekit_tool("get_classes")
+@splicekit_tool("get_classes", READ)
 def get_classes(filter: str = "") -> str:
     """List ObjC classes loaded in FCP's process.
 
@@ -32,7 +32,7 @@ def get_classes(filter: str = "") -> str:
     return f"Found {count} classes:\n" + "\n".join(classes)
 
 
-@splicekit_tool("get_methods")
+@splicekit_tool("get_methods", READ)
 def get_methods(class_name: str, include_super: bool = False) -> str:
     """List all methods on an ObjC class with type encodings.
 
@@ -59,7 +59,7 @@ def get_methods(class_name: str, include_super: bool = False) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_properties")
+@splicekit_tool("get_properties", READ)
 def get_properties(class_name: str) -> str:
     """List declared @property definitions on an ObjC class.
 
@@ -79,7 +79,7 @@ def get_properties(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_ivars")
+@splicekit_tool("get_ivars", READ)
 def get_ivars(class_name: str) -> str:
     """List instance variables of an ObjC class with their types.
 
@@ -99,7 +99,7 @@ def get_ivars(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("get_protocols")
+@splicekit_tool("get_protocols", READ)
 def get_protocols(class_name: str) -> str:
     """List protocols adopted by an ObjC class.
 
@@ -116,7 +116,7 @@ def get_protocols(class_name: str) -> str:
     return f"{class_name}: {r.get('count', 0)} protocols\n" + "\n".join(f"  {p}" for p in r.get("protocols", []))
 
 
-@splicekit_tool("get_superchain")
+@splicekit_tool("get_superchain", READ)
 def get_superchain(class_name: str) -> str:
     """Get the inheritance chain for an ObjC class, from it up to NSObject.
 
@@ -133,7 +133,7 @@ def get_superchain(class_name: str) -> str:
     return " -> ".join(r.get("superchain", []))
 
 
-@splicekit_tool("explore_class")
+@splicekit_tool("explore_class", READ)
 def explore_class(class_name: str) -> str:
     """Comprehensive overview of an ObjC class: inheritance, protocols, properties, ivars, key methods.
 
@@ -181,7 +181,7 @@ def explore_class(class_name: str) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("search_methods")
+@splicekit_tool("search_methods", READ)
 def search_methods(class_name: str, keyword: str) -> str:
     """Search for methods on a class by keyword.
 
@@ -214,7 +214,7 @@ def search_methods(class_name: str, keyword: str) -> str:
 
 # -- Low-level escape hatches for arbitrary ObjC calls --
 
-@splicekit_tool("call_method")
+@splicekit_tool("call_method", DESTRUCTIVE)
 def call_method(class_name: str, selector: str, class_method: bool = True) -> str:
     """Call a zero-argument ObjC method. For methods WITH arguments, use call_method_with_args instead.
 
@@ -224,13 +224,11 @@ def call_method(class_name: str, selector: str, class_method: bool = True) -> st
         class_method: When True (default), invoke the class method ``+[class_name selector]``;
             when False, not supported here — use call_method_with_args with a handle target.
     """
-    r = bridge.call("system.callMethod", className=class_name, selector=selector, classMethod=class_method)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("system.callMethod", className=class_name, selector=selector,
+                          classMethod=class_method)
 
 
-@splicekit_tool("raw_call")
+@splicekit_tool("raw_call", DESTRUCTIVE, title="Raw JSON-RPC Call")
 def raw_call(method: str, params: str = "{}") -> str:
     """Send a raw JSON-RPC call to SpliceKit. Last resort when no other tool fits.
 

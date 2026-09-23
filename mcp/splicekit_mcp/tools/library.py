@@ -1,7 +1,9 @@
 """Tools: active libraries and library update state."""
 
-from ..registry import splicekit_tool
-from ..bridge import _err, _fmt, bridge
+from urllib.parse import unquote, urlparse
+
+from ..registry import READ, splicekit_tool
+from ..bridge import _call_or_error, _err, bridge
 
 
 # ============================================================
@@ -9,10 +11,9 @@ from ..bridge import _err, _fmt, bridge
 # ============================================================
 # Thin wrappers around FCP's FFLibraryDocument class methods.
 
-@splicekit_tool("get_active_libraries")
+@splicekit_tool("get_active_libraries", READ)
 def get_active_libraries() -> str:
     """Get list of currently open libraries in FCP."""
-    from urllib.parse import unquote, urlparse
 
     def _objc(target, selector, args=None, return_handle=False):
         return bridge.call(
@@ -123,11 +124,8 @@ def get_active_libraries() -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("is_library_updating")
+@splicekit_tool("is_library_updating", READ, title="Check Library Updating")
 def is_library_updating() -> str:
     """Check if any library is currently being updated/saved."""
-    r = bridge.call("system.callMethod", className="FFLibraryDocument",
-                    selector="isAnyLibraryUpdating", classMethod=True)
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    return _call_or_error("system.callMethod", className="FFLibraryDocument",
+                          selector="isAnyLibraryUpdating", classMethod=True)

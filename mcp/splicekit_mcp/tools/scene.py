@@ -1,6 +1,6 @@
 """Tools: scene change detection, markers and blades at the cuts."""
 
-from ..registry import splicekit_tool
+from ..registry import DESTRUCTIVE, LOCAL, READ, splicekit_tool
 from ..bridge import _err, bridge
 
 
@@ -49,7 +49,7 @@ def _format_scene_detect_result(r: dict) -> str:
     return "\n".join(lines)
 
 
-@splicekit_tool("detect_scene_changes")
+@splicekit_tool("detect_scene_changes", READ)
 def detect_scene_changes(
     threshold: float = 0.35,
     action: str = "detect",
@@ -102,7 +102,7 @@ def detect_scene_changes(
     return _format_scene_detect_result(r)
 
 
-@splicekit_tool("mark_scene_changes")
+@splicekit_tool("mark_scene_changes", LOCAL)
 def mark_scene_changes(
     threshold: float = 0.35,
     sample_interval: float = 0.1,
@@ -132,7 +132,7 @@ def mark_scene_changes(
     return _format_scene_detect_result(r)
 
 
-@splicekit_tool("blade_scene_changes")
+@splicekit_tool("blade_scene_changes", DESTRUCTIVE)
 def blade_scene_changes(
     threshold: float = 0.35,
     sample_interval: float = 0.1,

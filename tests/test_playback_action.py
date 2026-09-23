@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Offline checks that unknown-value errors list accepted values (Part 1)."""
+"""Offline checks for playback_action: an unknown action lists every accepted one."""
 
 import importlib.util
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))

@@ -16,18 +16,18 @@ Requires: FCP running with SpliceKit injected, bridge on 127.0.0.1:9876
 """
 
 import os
-import socket
-import json
 import sys
 import time
 import argparse
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import live_rpc  # noqa: E402
+
 # ── Connection ──────────────────────────────────────────────
 
 HOST = os.environ.get("SPLICEKIT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SPLICEKIT_PORT", "9876"))
-_id = 0
 
 # Live Final Cut Pro (default 127.0.0.1:9876) vs mcp_server_check's fake bridge (version "check").
 LIVE_PROJECT_BRIDGE = True
@@ -91,23 +91,7 @@ def _skip_live_mutating_timeline_action(test_name, action):
 
 def rpc(method, params=None, timeout=10):
     """Send a JSON-RPC request and return the parsed response."""
-    global _id
-    _id += 1
-    req = {"jsonrpc": "2.0", "method": method, "id": _id}
-    if params:
-        req["params"] = params
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(req) + "\n").encode())
-    data = b""
-    while b"\n" not in data:
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    s.close()
-    return json.loads(data.decode().strip())
+    return live_rpc.rpc(method, params, timeout, host=HOST, port=PORT)
 
 
 # ── Test helpers ────────────────────────────────────────────
