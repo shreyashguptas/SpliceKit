@@ -61,6 +61,9 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 // Transcription
 - (void)transcribeTimeline;                    // auto-detect clips from current timeline
+// Primary storyline only: connected clips (B-roll, music, lanes != 0) are left out.
+// Remembered for later timeline runs until changed.
+@property (nonatomic) BOOL primaryStorylineOnly;
 - (void)transcribeFromURL:(NSURL *)audioURL;   // transcribe a specific audio/video file
 - (void)transcribeFromURL:(NSURL *)audioURL
        timelineStart:(double)timelineStart
@@ -69,6 +72,7 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 // State
 - (NSDictionary *)getState;
+- (NSDictionary *)getStateWithOptions:(NSDictionary *)options;  // paging / field filters, see .m
 - (void)restorePersistedStateForCurrentSequenceIfNeeded;
 - (void)ensurePersistedStateLoaded;  // restore if needed, handles project switches
 - (void)clearTranscript;  // clear all words/silences from memory and disk cache
@@ -77,6 +81,10 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 @property (nonatomic, readonly) NSArray<SpliceKitTranscriptSilence *> *silences;
 @property (nonatomic, readonly, copy) NSString *fullText;
 @property (nonatomic, readonly, copy) NSString *errorMessage;
+// Set while the words in memory came from transcribeFromURL: (file mode) rather
+// than from the open timeline. The timeline persistence checks leave them alone.
+@property (nonatomic, readonly, copy) NSString *sourceFilePath;
+- (void)leaveFileMode;  // forget the file transcript so the timeline's can be restored
 
 // Editing operations - return result dictionaries
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;

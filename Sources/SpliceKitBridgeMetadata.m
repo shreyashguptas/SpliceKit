@@ -17,6 +17,21 @@
 #import "SpliceKit.h"
 
 extern NSDictionary *SpliceKit_getPluginMetadataSnapshot(void);  // defined in SpliceKitServer.m
+// Generated from the handlers by tools/gen_bridge_params.py (SpliceKitBridgeParams.m).
+extern NSDictionary<NSString *, NSString *> *SpliceKit_bridgeParamsForMethod(NSString *method);
+
+// The entry bridge.describe returns for one method: its metadata plus `params`, the
+// keys its handler reads (with a description where one was written), so a caller
+// does not find out by trial and error that fcpxml.import wants `xml` or `path`.
+static NSMutableDictionary *SpliceKit_describeEntry(NSString *name, NSDictionary *entry) {
+    NSMutableDictionary *out = [entry mutableCopy] ?: [NSMutableDictionary dictionary];
+    out[@"name"] = name;
+    if (!out[@"params"]) {
+        NSDictionary *params = SpliceKit_bridgeParamsForMethod(name);
+        if (params) out[@"params"] = params;
+    }
+    return out;
+}
 
 // Safety classifications:
 //   safe              — read-only, no side effects on project/library/UI
@@ -96,7 +111,8 @@ static void SpliceKit_initBuiltinMetadata(void) {
             @"playback.shuttle": meta(@"state_dependent", @"Smooth shuttle at variable speed."),
 
             // fcpxml.*
-            @"fcpxml.import": meta(@"destructive", @"Import FCPXML (new project or into current)."),
+            @"fcpxml.import": meta(@"destructive", @"Import FCPXML from xml or a file path (new project or into current); async=true returns a job id."),
+            @"fcpxml.importStatus": meta(@"safe", @"State of async FCPXML import jobs, plus FCP's on-screen windows while one runs (read off the main thread)."),
             @"fcpxml.pasteImport": meta(@"destructive", @"Paste FCPXML from clipboard."),
             @"otio.toFCPXML": meta(@"safe", @"Convert OTIO to FCPXML in memory."),
 
@@ -345,9 +361,7 @@ static NSDictionary *SpliceKit_handleBridgeDescribe(NSDictionary *params) {
     if (wanted) {
         NSDictionary *entry = merged[wanted];
         if (!entry) return @{@"error": [NSString stringWithFormat:@"No metadata for %@", wanted]};
-        NSMutableDictionary *out = [entry mutableCopy];
-        out[@"name"] = wanted;
-        return out;
+        return SpliceKit_describeEntry(wanted, entry);
     }
 
     NSMutableArray *methods = [NSMutableArray arrayWithCapacity:merged.count];
@@ -356,9 +370,7 @@ static NSDictionary *SpliceKit_handleBridgeDescribe(NSDictionary *params) {
         NSDictionary *entry = merged[name];
         NSString *safety = entry[@"safety"] ?: @"unclassified";
         if (safetyFilter && ![safety isEqualToString:safetyFilter]) continue;
-        NSMutableDictionary *out = [entry mutableCopy];
-        out[@"name"] = name;
-        [methods addObject:out];
+        [methods addObject:SpliceKit_describeEntry(name, entry)];
         if (![safety isEqualToString:@"unclassified"]) classified += 1;
     }
     [methods sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {

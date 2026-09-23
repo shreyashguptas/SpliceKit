@@ -13,6 +13,7 @@ SpliceKitVP9.mm
 SpliceKitMKV.m
 SpliceKitServer.m
 SpliceKitBridgeMetadata.m
+SpliceKitBridgeParams.m
 SpliceKitBridgeEnums.m
 SpliceKitAsync.m
 SpliceKitLogPanel.m

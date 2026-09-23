@@ -189,8 +189,9 @@ HEAR it: get_audio_levels(handle) (its primary-storyline neighbours come along, 
   cut between two analysed primary-storyline clips. Not FCP's audio meters or waveforms: FCP's
   volume, fades, effects, retiming and the mix of all concurrent clips are not applied. Read-only.
 SEE it: capture_timeline, capture_viewer, capture_inspector, capture_clip_frame(handle) (the clip
-  as rendered in the Viewer, effects included; moves the playhead and restores it). Captures are
-  in-process from FCP's views; a one-colour content region comes back with flat:true and a WARNING.
+  as rendered in the Viewer, effects included; moves the playhead and restores it, waits until the
+  Viewer shows the new frame and says stale:true when it never did). Captures are in-process from
+  FCP's views; a one-colour content region comes back with flat:true and a WARNING.
 SOURCE CLIPS (browser -> timeline): browser_list_clips() then
   add_clip_to_timeline(handle, edit="insert"|"connect"|"append", start_seconds, end_seconds,
   at_seconds, backtimed, dry_run): a range of a source clip (seconds from its first frame)
@@ -229,7 +230,9 @@ AUDIO: get_audio_levels first (where is it loud, silent, at full scale; which cu
   first), trim_clip to move an edit point off a hard audio cut, assign_role (FCP roles),
   timeline_edit_action("detachAudio" | "expandAudio").
 SPEECH / TEXT-BASED EDITING (SpliceKit's Text-Based Editor, not FCP's Transcribe to Captions):
-  open_transcript, get_transcript, search_transcript, delete_transcript_words,
+  open_transcript (timeline, or file_url = a path or file:// URL; primary_storyline_only;
+  clips with no audio track or muted are skipped and listed), get_transcript (one page of words:
+  start_seconds/end_seconds, offset/limit, fields, words_only), search_transcript, delete_transcript_words,
   move_transcript_words, delete_transcript_silences, set_transcript_speaker,
   set_silence_threshold. Captions: open_captions, set_caption_style, set_caption_grouping,
   generate_captions, verify_captions, generate_native_captions, remove_captions,
@@ -239,15 +242,18 @@ UNDO / GROUPING: history_action("undo" | "redo"). begin_edit("Rough cut") ... en
   call end_edit.
 SCENES, BEATS, WHOLE EDITS: detect_scene_changes() lists the cuts (read-only), then
   blade_scene_changes() / mark_scene_changes(); detect_beats(file), beat_sync_blade,
-  trim_clips_to_beats; import_srt_as_markers; generate_fcpxml + import_fcpxml (a project from
-  XML); build_song_cut / assemble_random_clips_to_song_beats (beat-synced cuts).
+  trim_clips_to_beats; import_srt_as_markers; generate_fcpxml + import_fcpxml (xml, or path= a
+  .fcpxml on this Mac; runs as a job, import_fcpxml_status(job_id) while FCP imports remote media;
+  never re-import a running job); build_song_cut / assemble_random_clips_to_song_beats (beat-synced cuts).
 EXPORT / EXCHANGE: export_xml, export_otio / import_otio (.otio, .fcpxml, .edl, .aaf),
   share_project, batch_export, export_captions_srt / export_captions_txt.
 PROJECTS / LIBRARY / BROWSER: open_project, create_project, create_event, create_library,
   get_active_libraries, browser_list_clips, import_media, dual_timeline_* (a second timeline
   window).
 FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_panel,
-  set_workspace, select_tool, get_viewer_zoom / set_viewer_zoom, detect_dialog then
+  set_workspace, select_tool, get_viewer_zoom / set_viewer_zoom, detect_dialog (answers from the
+  window server when FCP's main thread is busy: mainThreadBusy, titles only; overlays such as the
+  Viewer's on-screen controls are listed apart, not as dialogs) then
   click_dialog_button / fill_dialog_field / select_dialog_popup / toggle_dialog_checkbox /
   dismiss_dialog (cancels by default; save/open panels cannot be confirmed from the bridge),
   search_commands / execute_command (the Command
@@ -409,6 +415,7 @@ READ_ONLY_TOOLS = {
     "reload_plugin_tools",
     "mixer_get_state",
     "import_url_status",
+    "import_fcpxml_status",
     "bridge_alive",
     "bridge_describe",
     "bridge_safety_tags",
@@ -615,6 +622,7 @@ CUSTOM_TOOL_TITLES = {
     "get_object_property": "Get Object Property",
     "set_object_property": "Set Object Property",
     "import_fcpxml": "Import FCPXML",
+    "import_fcpxml_status": "FCPXML Import Status",
     "generate_fcpxml": "Generate FCPXML",
     "batch_timeline_actions": "Batch Timeline Actions",
     "import_srt_as_markers": "Import SRT As Markers",
@@ -2340,16 +2348,114 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
 # generate it programmatically and import it to create complex
 # timelines without clicking through FCP's UI.
 
+def _format_import_job(job: dict) -> str:
+    lines = [f"Import job {job.get('jobId', '?')}: {job.get('state', '?')}"
+             + (f" after {job.get('elapsedSeconds')}s" if job.get("elapsedSeconds") is not None else "")]
+    if job.get("path"):
+        lines.append(f"  file: {job['path']}")
+    res = job.get("result") if isinstance(job.get("result"), dict) else {}
+    if res.get("library"):
+        lines.append(f"  library: {res['library']} (chosen by {res.get('libraryChosenBy', '?')})")
+    if res.get("libraryNote"):
+        lines.append(f"  NOTE: {res['libraryNote']}")
+    if res.get("routeNote"):
+        lines.append(f"  NOTE: {res['routeNote']}")
+    if job.get("message") and job.get("state") == "handedToFCP":
+        lines.append(f"  {job['message']}")
+    if job.get("importError") or job.get("error"):
+        lines.append(f"  error: {job.get('importError') or job.get('error')}")
+    windows = job.get("windows") or []
+    if job.get("state") == "running" and windows:
+        titles = [w.get("title") or "(untitled)" for w in windows if isinstance(w, dict)]
+        lines.append(f"  Final Cut Pro windows now: {', '.join(titles)}")
+        if any("Import" in t for t in titles):
+            lines.append("  (an import progress sheet is up: media on a network volume can take minutes; "
+                         "do not start the import again)")
+    if job.get("state") == "running":
+        lines.append(f"  Poll again: import_fcpxml_status(job_id=\"{job.get('jobId')}\")")
+    return "\n".join(lines)
+
+
 @splicekit_tool("import_fcpxml")
-def import_fcpxml(xml: str, internal: bool = True) -> str:
-    """Import FCPXML into FCP. If internal=True, uses PEAppController's import method
-    (imports into the running instance without restart). If internal=False, opens via NSWorkspace.
-    Provide valid FCPXML as a string.
+def import_fcpxml(xml: str = "", path: str = "", internal: bool = True,
+                  library: str = "", wait_seconds: float = 60) -> str:
+    """Import FCPXML into Final Cut Pro, from a file on this Mac or from a string.
+
+    Args:
+        xml: the FCPXML document as a string (this or path).
+        path: a .fcpxml file on this Mac — plain path, "~/..." or file:// URL. Read on
+            the Mac side, so a large document does not have to travel through the client.
+        internal: True (default) imports through FCP's own pasteboard importer into an
+            open library: no restart and no "Which library do you want to import into?"
+            chooser. False opens the file with FCP (NSWorkspace), which shows that
+            chooser as a modal panel whenever FCP asks, blocking the bridge until it is
+            answered; avoid it unless the library is not open.
+        library: name of the open library to import into. Default: the library the
+            XML's <library location> names when it is open, else the first open library
+            (the answer says which was used and why).
+        wait_seconds: how long to wait for the import to finish (default 60). The import
+            runs as a job on the Mac either way: an FCPXML whose media sits on a network
+            volume keeps FCP's "Importing Remote Resources" sheet up for minutes. If it is
+            still running when the wait ends, the answer gives the job id; poll
+            import_fcpxml_status(job_id) and do NOT import again (it would import twice).
+
+    Returns the job state (ok / error / running), the library it went into, and the
+    error text when it failed. Raw RPC: fcpxml.import (xml | path, internal, library,
+    async=true) and fcpxml.importStatus(jobId).
     """
-    r = bridge.call("fcpxml.import", xml=xml, internal=internal)
+    # With neither, the bridge answers "xml or path parameter required".
+    params = {"internal": bool(internal), "async": True}
+    if xml:
+        params["xml"] = xml
+    elif path:
+        params["path"] = path
+    if library:
+        params["library"] = library
+    r = bridge.call("fcpxml.import", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
-    return _fmt(r)
+    job_id = r.get("jobId")
+    if not job_id:
+        return _fmt(r)
+    deadline = time.time() + max(0.0, float(wait_seconds or 0))
+    job = {"jobId": job_id, "state": "running"}
+    delay = 0.25
+    while True:
+        st = bridge.call("fcpxml.importStatus", jobId=job_id)
+        if not _err(st):
+            job = st
+        if job.get("state") != "running" or time.time() >= deadline:
+            break
+        time.sleep(delay)
+        delay = min(2.0, delay * 1.5)
+    return _format_import_job(job)
+
+
+@splicekit_tool("import_fcpxml_status")
+def import_fcpxml_status(job_id: str = "") -> str:
+    """State of an FCPXML import started by import_fcpxml (running / ok / error).
+
+    Answers without Final Cut Pro's main thread, so it works while an import's progress
+    sheet has that thread busy; while a job runs it also lists FCP's on-screen windows
+    (the "Import XML" sheet shows up there). Omit job_id to list every job since FCP
+    started.
+    """
+    params = {"jobId": job_id} if job_id else {}
+    r = bridge.call("fcpxml.importStatus", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    if job_id:
+        return _format_import_job(r)
+    jobs = r.get("jobs") or []
+    if not jobs:
+        return "No FCPXML import jobs since Final Cut Pro started."
+    windows = r.get("windows") or []
+    out = []
+    for j in jobs:
+        if j.get("state") == "running" and windows:
+            j = {**j, "windows": windows}
+        out.append(_format_import_job(j))
+    return "\n".join(out)
 
 
 @splicekit_tool("import_url")
@@ -3741,7 +3847,8 @@ def raw_call(method: str, params: str = "{}") -> str:
 # drag words to reorder clips.
 
 @splicekit_tool("open_transcript")
-def open_transcript(file_url: str = "", force_retranscribe: bool = False) -> str:
+def open_transcript(file_url: str = "", force_retranscribe: bool = False,
+                    primary_storyline_only: bool = None) -> str:
     """Open the transcript panel and start transcribing.
 
     If no file_url is provided, transcribes all clips on the current timeline.
@@ -3749,7 +3856,21 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False) -> str
 
     By default, if a persisted transcript exists it will be restored without
     re-running analysis. Set force_retranscribe=True to discard the cache
-    and run a fresh transcription.
+    and run a fresh transcription (a run still in progress is stopped).
+
+    Args:
+        file_url: a media file to transcribe instead of the timeline: a plain path
+            ("/Users/me/a b.wav"), "~/..." or a file:// URL ("file:///Users/me/a%20b.wav").
+            A file that does not exist is refused at once. File mode needs no project open.
+        force_retranscribe: discard the cached transcript and transcribe again.
+        primary_storyline_only: timeline mode: True transcribes only the primary storyline
+            (connected clips such as B-roll and music are left out), False includes them.
+            Omit to keep the current setting (default: include). Clips turned down to
+            -60 dB or lower (muted, e.g. -96 dB) are always left out.
+
+    Clips that cannot be transcribed (no audio track, e.g. a screen recording; media on
+    an unmounted volume; a file the transcriber cannot decode) are skipped and listed by
+    get_transcript() with the reason, instead of failing the whole run.
 
     The transcript panel allows text-based editing:
     - Clicking a word jumps the playhead to that time
@@ -3763,37 +3884,27 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False) -> str
         params["fileURL"] = file_url
     if force_retranscribe:
         params["forceRetranscribe"] = True
+    if primary_storyline_only is not None:
+        params["primaryStorylineOnly"] = bool(primary_storyline_only)
     r = bridge.call("transcript.open", **params)
     if _err(r):
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
 
 
-@splicekit_tool("get_transcript")
-def get_transcript() -> str:
-    """Get the current transcript state, including all words with timestamps, speakers, and silences.
-
-    Returns:
-    - status: idle/transcribing/ready/error
-    - wordCount: number of transcribed words
-    - silenceCount: number of detected pauses/silences
-    - text: full transcript text (with segment headers and silence markers)
-    - words: array of {index, text, startTime, endTime, duration, confidence, speaker}
-    - silences: array of {startTime, endTime, duration, startTimecode, endTimecode}
-    - progress: {completed, total} when transcribing
-
-    Use this after open_transcript() to check when transcription is complete
-    and to get the word list for editing operations.
-    """
-    r = bridge.call("transcript.getState")
-    if _err(r):
-        return f"Error: {r.get('error', r)}"
-
-    # Format nicely
+def _transcript_header_lines(r: dict) -> list:
+    """Status lines shared by every form of get_transcript."""
     lines = [f"Status: {r.get('status', 'unknown')}"]
+    src = r.get("source") if isinstance(r.get("source"), dict) else {}
+    if src.get("mode") == "file":
+        lines.append(f"Source: file {src.get('path', '?')}")
+    elif src:
+        lines.append("Source: timeline" + (" (primary storyline only)" if src.get("primaryStorylineOnly") else ""))
     lines.append(f"Words: {r.get('wordCount', 0)}")
     lines.append(f"Silences: {r.get('silenceCount', 0)}")
     lines.append(f"Silence threshold: {r.get('silenceThreshold', 0.3):.1f}s")
+    if r.get("frameRate") is None and r.get("frameRateNote"):
+        lines.append(f"Frame rate: {r['frameRateNote']}")
 
     if r.get('gapBuckets'):
         gb = r['gapBuckets']
@@ -3802,27 +3913,122 @@ def get_transcript() -> str:
 
     if r.get('progress'):
         p = r['progress']
-        lines.append(f"Progress: {p.get('completed', 0)}/{p.get('total', 0)} clips")
+        line = f"Progress: {p.get('completed', 0)}/{p.get('total', 0)} files"
+        if p.get("fraction") is not None:
+            line += f", {float(p.get('fraction') or 0) * 100:.0f}%"
+        if p.get("message"):
+            line += f" — {p['message']}"
+        if p.get("elapsedSeconds") is not None:
+            line += f" ({p['elapsedSeconds']}s elapsed)"
+        lines.append(line)
+
+    skipped = r.get("skippedClips") or []
+    if skipped:
+        lines.append(f"Skipped clips ({len(skipped)}; not in the transcript):")
+        for c in skipped[:40]:
+            where = f"{float(c.get('timelineStart') or 0):.2f}s"
+            lane = "connected" if c.get("connected") else "primary"
+            name = c.get("name") or os.path.basename(str(c.get("file") or "")) or "?"
+            lines.append(f"  {where} [{lane}] {name}: {c.get('reason', '?')}")
+        if len(skipped) > 40:
+            lines.append(f"  ... and {len(skipped) - 40} more")
+    return lines
+
+
+@splicekit_tool("get_transcript")
+def get_transcript(start_seconds: float = None, end_seconds: float = None,
+                   offset: int = 0, limit: int = 1000, fields: str = "",
+                   words_only: bool = False, include_silences: bool = True,
+                   include_text: bool = False, format: str = "text") -> str:
+    """Get the transcript: status, words with timestamps and speakers, and silences.
+
+    A long timeline's full state is hundreds of thousands of characters, more than an
+    MCP answer can carry, so this returns one page of words at a time.
+
+    Args:
+        start_seconds / end_seconds: only words and silences overlapping this timeline
+            window (seconds). Omit both for the whole transcript.
+        offset: skip this many words of the (windowed) list; the answer ends with the
+            offset of the next page while there are more.
+        limit: at most this many words (default 1000; 0 = no limit).
+        fields: comma-separated word keys to return, e.g. "text,startTime,endTime"
+            (index,text,startTime,endTime,duration,confidence,speaker). Default all.
+        words_only: words and counts only (no silences, gap histogram or panel text).
+        include_silences: list the pauses in the window (default True).
+        include_text: also return the panel's rendered text (segment headers, silence
+            markers) in full, for the whole transcript. Default False.
+        format: "text" (default, one line per word) or "json" (the bridge's answer as
+            compact JSON, for parsing).
+
+    Status: idle / transcribing / ready / error. While transcribing, the progress line
+    gives files done, percent, the transcriber's current step and the elapsed time.
+    "Skipped clips" lists what the last run left out and why (no audio track, muted,
+    unreadable). Raw RPC: transcript.getState with wordsOnly, fields, startSeconds,
+    endSeconds, offset, limit, includeSilences, includeText, includeGapBuckets.
+    """
+    params = {"offset": max(0, int(offset or 0))}
+    if limit and int(limit) > 0:
+        params["limit"] = int(limit)
+    if start_seconds is not None:
+        params["startSeconds"] = float(start_seconds)
+    if end_seconds is not None:
+        params["endSeconds"] = float(end_seconds)
+    field_list = [f.strip() for f in str(fields or "").split(",") if f.strip()]
+    if field_list:
+        params["fields"] = field_list
+    if words_only:
+        params["wordsOnly"] = True
+    params["includeSilences"] = bool(include_silences) and not words_only
+    params["includeText"] = bool(include_text) and not words_only
+    r = bridge.call("transcript.getState", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    if str(format).lower() == "json":
+        return json.dumps(r, separators=(",", ":"), ensure_ascii=False)
+
+    lines = _transcript_header_lines(r)
+    # Say up front when this is not the whole list: get_transcript() used to return
+    # every word, and a caller that stops reading after the header must not take a
+    # first page for the full transcript.
+    page = r.get('words') or []
+    if r.get("nextOffset") is not None and page:
+        first = r.get("wordsOffset", 0)
+        lines.insert(2, f"PARTIAL: this answer lists words {first}–{first + len(page) - 1} of "
+                        f"{r.get('wordsMatched', r.get('wordCount', '?'))}; next page: "
+                        f"get_transcript(offset={r['nextOffset']}), or limit=0 for all")
 
     if r.get('text'):
-        text = r['text']
-        if len(text) > 2000:
-            text = text[:2000] + "..."
-        lines.append(f"\nTranscript:\n{text}")
+        lines.append(f"\nTranscript:\n{r['text']}")
 
     if r.get('silences'):
-        lines.append(f"\nSilences ({len(r['silences'])} pauses):")
-        for s in r['silences']:
-            lines.append(f"  {s.get('startTimecode', '?')} - {s.get('endTimecode', '?')} "
-                         f"({s['duration']:.1f}s) after word [{s.get('afterWordIndex', '?')}]")
+        lines.append(f"\nSilences ({len(r['silences'])} pauses"
+                     + (" in the window" if (start_seconds is not None or end_seconds is not None) else "") + "):")
+        for s_ in r['silences']:
+            lines.append(f"  {s_.get('startTimecode', '?')} - {s_.get('endTimecode', '?')} "
+                         f"({s_['duration']:.1f}s) after word [{s_.get('afterWordIndex', '?')}]")
 
-    if r.get('words'):
-        lines.append(f"\nWord list ({len(r['words'])} words):")
-        for w in r['words']:
-            conf = w.get('confidence', 0) * 100
+    words = r.get('words') or []
+    if words:
+        matched = r.get("wordsMatched", len(words))
+        first = r.get("wordsOffset", 0)
+        lines.append(f"\nWord list ({len(words)} words, {first}–{first + len(words) - 1} of {matched}"
+                     + (" in the window" if (start_seconds is not None or end_seconds is not None) else "") + "):")
+        for w in words:
+            if field_list:
+                lines.append("  " + " ".join(
+                    f"{k}={w[k]!r}" if isinstance(w.get(k), str)
+                    else f"{k}={w[k]:.3f}" if isinstance(w.get(k), float)
+                    else f"{k}={w.get(k)}" for k in field_list if k in w))
+                continue
+            conf = (w.get('confidence') or 0) * 100
             speaker = w.get('speaker', 'Unknown')
             lines.append(f"  [{w['index']:3d}] {w['startTime']:7.2f}s - {w['endTime']:7.2f}s "
                          f"({conf:3.0f}%) [{speaker}] \"{w['text']}\"")
+        if r.get("nextOffset") is not None:
+            lines.append(f"\nMore words: get_transcript(offset={r['nextOffset']}"
+                         + (f", start_seconds={start_seconds}" if start_seconds is not None else "")
+                         + (f", end_seconds={end_seconds}" if end_seconds is not None else "")
+                         + (f", limit={limit}" if limit else "") + ")")
 
     # The bridge reports the failure reason in `errorMessage` (see
     # SpliceKitTranscriptPanel getState). Reading only `error` meant every failed
@@ -5545,6 +5751,8 @@ def _render_clip_info(r: dict) -> str:
                      f"({'exists' if sm.get('exists') else 'missing on disk (FCP: Missing File)'}; "
                      f"media representation: {sm.get('representation', '?')})")
         lines.append(f"    path: {sm.get('path', '')}")
+        if sm.get("isSymlink") and sm.get("resolvedPath") and sm.get("resolvedPath") != sm.get("path"):
+            lines.append(f"    resolvedPath: {sm.get('resolvedPath')} (the path above is a symlink to this file)")
         if sm.get("sourceStartKnown") is False:
             lines.append(f"    start point in the source media: not read (FCP's clip object answered none of "
                          f"clippedRange / trimStartTime / trimmedOffset); media starts at "
@@ -5718,7 +5926,8 @@ def _capture_flat_note(r: dict) -> str:
 
 
 @splicekit_tool("capture_clip_frame")
-def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960):
+def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_width: int = 960,
+                       render_timeout: float = 5.0):
     """The clip as rendered in the Viewer: effects, color correction and transforms
     included. Moves the playhead to the frame time and restores it afterwards.
 
@@ -5740,6 +5949,11 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
         frame_time: absolute timeline time in seconds; default the clip's midpoint;
                     clamped into the clip.
         frame_max_width: longest side of the returned JPEG in pixels (64-1920, default 960).
+        render_timeout: seconds to wait for the Viewer to show the new frame (default 5, max 15).
+                    SpliceKit captures the Viewer before the seek, then keeps capturing until
+                    the picture has changed and holds still. If it never changes the answer
+                    says `stale` (the Viewer still showed the old frame; 60 fps or non-16:9
+                    media with a Fill conform renders slowly), so retry with a longer wait.
 
     Reports playheadBefore / playheadAtCapture and whether the playhead was restored
     (within half a frame). If it was not, seek_to_time(playheadBefore) puts it back.
@@ -5747,10 +5961,14 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
     """
     if not handle:
         return "Error: handle is required (get it from get_timeline_clips())"
-    params = {"handle": handle, "frameMaxWidth": int(frame_max_width)}
+    render_timeout = max(0.35, min(15.0, float(render_timeout)))
+    params = {"handle": handle, "frameMaxWidth": int(frame_max_width),
+              "renderTimeout": render_timeout}
     if frame_time is not None:
         params["frameTime"] = float(frame_time)
-    r = bridge.call("timeline.captureClipFrame", **params)
+    # The Viewer render wait can take the full render_timeout on the main thread.
+    r = bridge.call("timeline.captureClipFrame", params,
+                    timeout=max(BridgeConnection.READ_TIMEOUT, render_timeout + 25))
     if _err(r) and "status" not in r:
         return f"Error: {r.get('error', r)}"
 
@@ -5775,6 +5993,17 @@ def capture_clip_frame(handle: str, frame_time: float | None = None, frame_max_w
         where = ("as rendered in the Viewer (effects included)" if capture.get("cropped", True)
                  else "of the whole FCP window (the Viewer could not be isolated; effects included)")
         lines.append(f"  frame: {frame.get('width')}x{frame.get('height')} JPEG {where}")
+    if r.get("renderWaitSeconds") is not None:
+        if r.get("staleCheck"):
+            lines.append(f"  render wait: {r['renderWaitSeconds']}s ({r['staleCheck']})")
+        else:
+            lines.append(f"  render wait: {r['renderWaitSeconds']}s (the Viewer "
+                         + ("changed from the pre-seek frame" if r.get("changedFromBefore") else "did NOT change") + ")")
+    if r.get("stale"):
+        lines.append("  WARNING: stale: " + str(r.get("staleWarning") or
+                     "the Viewer still showed the frame from before the seek"))
+    elif r.get("renderStillChanging"):
+        lines.append("  NOTE: the Viewer was still changing when the wait ended; the frame may be mid-render")
     if capture.get("flat") or r.get("flat"):
         lines.append("  WARNING: " + str(capture.get("warning") or r.get("warning")
                                          or "the Viewer image is one flat colour: not a verified frame"))
@@ -7988,6 +8217,12 @@ def detect_dialog(view_tree: bool = False) -> str:
 
     Call this before/after any action that might trigger a dialog,
     or to check if a dialog needs to be handled before proceeding.
+
+    Non-modal overlay windows with nothing to answer (FFOSCOverlayWindow, the Viewer's
+    on-screen controls) are listed under `overlays`, not as dialogs, so hasDialog is a
+    usable "clear to proceed" signal. When Final Cut Pro's main thread does not answer
+    within 3 s (a long import's progress sheet), the answer comes from the window server
+    instead: mainThreadBusy: true, window titles and sizes only.
 
     Args:
         view_tree: Also dump each dialog's raw view hierarchy (class, title, frame,
@@ -10277,8 +10512,12 @@ def set_transcript_engine(engine: str) -> str:
 
     Args:
         engine: One of:
+            - "parakeet" (= "parakeetV3"): NVIDIA Parakeet TDT 0.6B v3, multilingual,
+              on-device; the panel's default and the fastest
+            - "parakeetV2": the English-optimized Parakeet model
             - "fcpNative": FCP's built-in AASpeechAnalyzer
-            - "appleSpeech": Apple's SFSpeechRecognizer (slower, network-capable)
+            - "appleSpeech": Apple's SFSpeechRecognizer (slower; needs the Speech
+              Recognition permission)
     """
     r = bridge.call("transcript.setEngine", engine=engine)
     if _err(r):

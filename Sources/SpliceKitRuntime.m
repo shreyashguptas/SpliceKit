@@ -73,36 +73,62 @@ BOOL SpliceKit_isMainThreadInRPCDispatch(void) {
     return [NSThread isMainThread] && sMainThreadRPCDispatchDepth > 0;
 }
 
-void SpliceKit_executeOnMainThread(dispatch_block_t block) {
+static __thread int sLastTimeoutState = 0;
+
+int SpliceKit_lastMainThreadTimeoutState(void) {
+    return sLastTimeoutState;
+}
+
+void SpliceKit_resetMainThreadTimeoutState(void) {
+    sLastTimeoutState = 0;
+}
+
+BOOL SpliceKit_executeOnMainThreadWithTimeout(dispatch_block_t block, double seconds, BOOL countAsTimeout) {
     if ([NSThread isMainThread]) {
         sMainThreadRPCDispatchDepth++;
         block();
         sMainThreadRPCDispatchDepth--;
-    } else {
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
-            sMainThreadRPCDispatchDepth++;
-            block();
-            sMainThreadRPCDispatchDepth--;
-            dispatch_semaphore_signal(sem);
-        });
-        CFRunLoopWakeUp(CFRunLoopGetMain());
-
-        // 20s timeout — better than a silent deadlock.
-        // This can happen during startup (CompressorKit load) or heavy modal dialogs.
-        long waitResult = dispatch_semaphore_wait(sem,
-            dispatch_time(DISPATCH_TIME_NOW, 20LL * NSEC_PER_SEC));
-        if (waitResult != 0) {
-            // A timed-out block leaves its handler's result nil, and a handler's
-            // fallback for nil is a generic message like "Failed to add transitions to
-            // all clips". That reads as "the operation was attempted and did not work"
-            // when what actually happened is that the main thread never ran it. The
-            // counter lets SpliceKit_handleRequest say which it was.
-            sMainThreadDispatchTimeouts++;
-            NSLog(@"[SpliceKit] WARNING: Main thread dispatch timed out (20s). "
-                  @"Main thread may be blocked by startup or modal dialog.");
-        }
+        return YES;
     }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    // 0 = queued, 1 = running, 2 = finished. Heap-held so the block may outlive
+    // this frame when the caller stops waiting.
+    __block _Atomic int phase = 0;
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+        phase = 1;
+        sMainThreadRPCDispatchDepth++;
+        block();
+        sMainThreadRPCDispatchDepth--;
+        phase = 2;
+        dispatch_semaphore_signal(sem);
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
+
+    long waitResult = dispatch_semaphore_wait(sem,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)));
+    if (waitResult == 0) return YES;
+
+    int seen = phase;
+    if (seen == 2) return YES;  // finished between the timeout and this read
+    if (countAsTimeout) {
+        // A timed-out block leaves its handler's result nil, and a handler's
+        // fallback for nil is a generic message like "Failed to add transitions to
+        // all clips". That reads as "the operation was attempted and did not work"
+        // when what actually happened is that the main thread never ran it (or is
+        // still inside it). The counter and the state let SpliceKit_handleRequest
+        // say which.
+        sMainThreadDispatchTimeouts++;
+        sLastTimeoutState = (seen == 1) ? 2 : 1;
+        NSLog(@"[SpliceKit] WARNING: Main thread dispatch timed out (%.0fs); the block is %@.",
+              seconds, seen == 1 ? @"still running" : @"still queued");
+    }
+    return NO;
+}
+
+void SpliceKit_executeOnMainThread(dispatch_block_t block) {
+    // 20s timeout — better than a silent deadlock.
+    // This can happen during startup (CompressorKit load) or heavy modal dialogs.
+    SpliceKit_executeOnMainThreadWithTimeout(block, 20.0, YES);
 }
 
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block) {

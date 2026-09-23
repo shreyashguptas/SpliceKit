@@ -70,8 +70,19 @@ NSArray<NSString *> *SpliceKit_captionStylePresetIDs(void);
 // Uses CFRunLoopPerformBlock so it works even during modal dialogs
 // (dispatch_sync deadlocks in that situation because the main queue stalls).
 void SpliceKit_executeOnMainThread(dispatch_block_t block);
-// Running total of main-thread dispatches abandoned at the 20s timeout.
+// Running total of main-thread dispatches the caller stopped waiting for at the 20s
+// timeout. The block itself is not cancelled: it is still queued, or still running.
 unsigned SpliceKit_mainThreadDispatchTimeoutCount(void);
+// What the calling thread's most recent timed-out dispatch was doing when the caller
+// gave up: 0 = no timeout on this thread, 1 = still queued (the main thread was busy
+// and never picked it up), 2 = running (blocked inside it, e.g. a modal progress sheet).
+// Reset by SpliceKit_resetMainThreadTimeoutState().
+int SpliceKit_lastMainThreadTimeoutState(void);
+void SpliceKit_resetMainThreadTimeoutState(void);
+// Like SpliceKit_executeOnMainThread, with the wait chosen by the caller. Returns YES
+// when the block finished in time. countAsTimeout NO keeps a short, expected wait (a
+// probe that falls back to off-main data) out of the "main thread blocked" error.
+BOOL SpliceKit_executeOnMainThreadWithTimeout(dispatch_block_t block, double seconds, BOOL countAsTimeout);
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block);
 BOOL SpliceKit_isMainThreadInRPCDispatch(void);
 

@@ -477,6 +477,21 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 @property (nonatomic) double frameRate;
 @property (nonatomic) BOOL suppressPersistenceWrites;
 @property (nonatomic, copy) NSString *lastRestoredSequenceKey;
+// NO until a timeline run read the sequence's frame duration; getState then
+// reports the rate as unknown instead of the 24 fps default.
+@property (nonatomic) BOOL frameRateKnown;
+@property (nonatomic, readwrite, copy) NSString *sourceFilePath;
+// Live progress for getState: the helper's last PROGRESS line and when the run began.
+@property (atomic, copy) NSString *progressMessage;
+@property (atomic) double progressFraction;
+@property (atomic, strong) NSDate *transcriptionStartDate;
+// Clips/files a timeline run left out, with the reason (no audio track, missing,
+// the helper could not read it). Reported by getState so a partial transcript says so.
+@property (atomic, copy) NSArray<NSDictionary *> *skippedSources;
+// Each run takes a number; a helper that finishes after a newer run started (a
+// forced re-run over a stuck one) drops its result instead of overwriting.
+@property (atomic) NSUInteger runGeneration;
+@property (atomic, strong) NSTask *activeHelperTask;
 @end
 
 @implementation SpliceKitTranscriptPanel
@@ -873,6 +888,11 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 - (void)ensurePersistedStateLoaded {
     if (self.status == SpliceKitTranscriptStatusTranscribing) return;
+    // A file transcript (transcript.open with fileURL) belongs to no sequence.
+    // Checking it against the open timeline treated it as stale and wiped it:
+    // with no project open every getState emptied the words the run had just
+    // produced, so file mode reported idle with 0 words and no error.
+    if (self.sourceFilePath.length > 0) return;
 
     // Check if the current sequence matches what we have in memory.
     // If the sequence changed (project switch), we need to restore/clear even if words exist.
@@ -923,6 +943,26 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     [self restorePersistedStateForCurrentSequenceIfNeeded];
 }
 
+- (void)leaveFileMode {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{ [self leaveFileMode]; });
+        return;
+    }
+    if (self.sourceFilePath.length == 0) return;
+    self.sourceFilePath = nil;
+    @synchronized (self.mutableWords) {
+        [self.mutableWords removeAllObjects];
+    }
+    [self.mutableSilences removeAllObjects];
+    self.fullText = nil;
+    self.lastRestoredSequenceKey = nil;
+    if (self.status != SpliceKitTranscriptStatusTranscribing) {
+        self.status = SpliceKitTranscriptStatusIdle;
+        self.errorMessage = nil;
+    }
+    if (self.panel) [self rebuildTextView];
+}
+
 - (NSDictionary *)transcriptPersistenceSection {
     NSMutableArray *wordDicts = [NSMutableArray array];
     @synchronized (self.mutableWords) {
@@ -960,6 +1000,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 - (void)persistTranscriptStateForCurrentSequence {
     if (self.suppressPersistenceWrites || self.mutableWords.count == 0) return;
+    // A file transcript is not this sequence's; saving it there would restore it
+    // as the timeline's transcript the next time the project is opened.
+    if (self.sourceFilePath.length > 0) return;
 
     id sequence = [self currentSequence];
     if (!sequence) return;
@@ -980,6 +1023,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         });
         return;
     }
+
+    if (self.sourceFilePath.length > 0) return;  // file mode: see ensurePersistedStateLoaded
 
     id sequence = [self currentSequence];
     if (!sequence) return;
@@ -1081,7 +1126,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     if ([transcript[@"parakeetModel"] isKindOfClass:[NSString class]]) {
         self.parakeetModelVersion = transcript[@"parakeetModel"];
     }
-    if (transcript[@"frameRate"]) self.frameRate = [transcript[@"frameRate"] doubleValue];
+    if (transcript[@"frameRate"]) {
+        self.frameRate = [transcript[@"frameRate"] doubleValue];
+        self.frameRateKnown = YES;
+    }
     if (transcript[@"silenceThreshold"]) self.silenceThreshold = [transcript[@"silenceThreshold"] doubleValue];
     self.speakerDetectionEnabled = [transcript[@"speakerDetectionEnabled"] boolValue];
     self.fullText = [transcript[@"text"] isKindOfClass:[NSString class]] ? transcript[@"text"] : nil;
@@ -1576,7 +1624,20 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 //
 
 - (void)transcribeTimeline {
-    SpliceKit_log(@"[Transcript] Starting timeline transcription");
+    SpliceKit_log(@"[Transcript] Starting timeline transcription%@",
+        self.primaryStorylineOnly ? @" (primary storyline only)" : @"");
+
+    // Back to timeline mode: this run's words belong to the open sequence.
+    [self beginRun];
+    self.sourceFilePath = nil;
+    self.skippedSources = nil;
+    self.completedTranscriptions = 0;
+    self.totalTranscriptions = 0;
+    self.progressFraction = 0;
+    self.progressMessage = @"Analyzing timeline";
+    self.transcriptionStartDate = [NSDate date];
+    self.status = SpliceKitTranscriptStatusTranscribing;
+    self.errorMessage = nil;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         self.status = SpliceKitTranscriptStatusTranscribing;
@@ -1648,11 +1709,19 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                                into:clipInfos];
         }
 
-        for (id anchoredItem in [self anchoredItemsForTimelineItem:item]) {
-            [self addTimelineObject:anchoredItem
-                   defaultTimeline:itemTimelineStart
-                      primaryObject:primaryObject
-                               into:clipInfos];
+        // Connected clips (B-roll, music, a muted reference take) are left out when
+        // only the primary storyline is wanted — the cut is judged on the spine.
+        if (!self.primaryStorylineOnly) {
+            for (id anchoredItem in [self anchoredItemsForTimelineItem:item]) {
+                NSUInteger before = clipInfos.count;
+                [self addTimelineObject:anchoredItem
+                       defaultTimeline:itemTimelineStart
+                          primaryObject:primaryObject
+                                   into:clipInfos];
+                for (NSUInteger i = before; i < clipInfos.count; i++) {
+                    clipInfos[i][@"connected"] = @YES;
+                }
+            }
         }
 
         if (!isTransition) {
@@ -1755,28 +1824,82 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     if (!innerMedia) return;
 
     double collTrimStart = 0;
-    SEL crSel = NSSelectorFromString(@"clippedRange");
-    if ([item respondsToSelector:crSel]) {
-        NSMethodSignature *sig = [item methodSignatureForSelector:crSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitTranscript_CMTimeRange)) {
-            SpliceKitTranscript_CMTimeRange range;
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:item];
-            [inv setSelector:crSel];
-            [inv invoke];
-            [inv getReturnValue:&range];
-            collTrimStart = CMTimeToSeconds(range.start);
-            SpliceKit_log(@"[Transcript]   collection clippedRange: start=%.2fs dur=%.2fs",
-                          collTrimStart, CMTimeToSeconds(range.duration));
+    SpliceKitTranscript_CMTimeRange collClipped;
+    if ([self readTimeRange:@"clippedRange" of:item into:&collClipped]) {
+        collTrimStart = CMTimeToSeconds(collClipped.start);
+        SpliceKit_log(@"[Transcript]   collection clippedRange: start=%.2fs dur=%.2fs",
+                      collTrimStart, CMTimeToSeconds(collClipped.duration));
+    }
+
+    // A clip whose frame rate FCP conforms to the project's (30 fps media in a 29.97
+    // project) keeps the collection's ranges in conformed time and the media
+    // component's in the file's own time: 30 fps media starting at timecode 74435 s
+    // reads 74509.435 s on the collection. Subtracting one from the other put the
+    // transcript window 74 s into a 45 s file, so the clip got no words. The two
+    // full (unclipped) ranges give the factor between the spaces.
+    // Only for a collection that wraps one clip's media (an asset-clip). A compound
+    // or multicam clip holds a whole timeline, so its range against its first inner
+    // clip's says nothing about rate: a 120 s compound over a 40 s clip read as 3x.
+    // FCP's automatic rate conform only joins close rates (23.98/24/25, 29.97/30),
+    // so a real factor is within a few percent of 1.
+    double rateFactor = 1.0;
+    BOOL isContainerOfClips = NO;
+    for (NSString *flag in @[@"isReferenceClip", @"isCompoundClip", @"isMultiAngle", @"isMulticam"]) {
+        SEL sel = NSSelectorFromString(flag);
+        NSMethodSignature *sig = [item respondsToSelector:sel] ? [item methodSignatureForSelector:sel] : nil;
+        if (sig && sig.methodReturnLength == sizeof(BOOL) && sig.numberOfArguments == 2) {
+            @try {
+                if (((BOOL (*)(id, SEL))objc_msgSend)(item, sel)) { isContainerOfClips = YES; break; }
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    SpliceKitTranscript_CMTimeRange collFull, mediaFull;
+    if (!isContainerOfClips &&
+        [self readTimeRange:@"unclippedRange" of:item into:&collFull] &&
+        [self readTimeRange:@"unclippedRange" of:innerMedia into:&mediaFull]) {
+        double collStart = CMTimeToSeconds(collFull.start), collDur = CMTimeToSeconds(collFull.duration);
+        double mediaStart = CMTimeToSeconds(mediaFull.start), mediaDur = CMTimeToSeconds(mediaFull.duration);
+        if (collDur > 0 && mediaDur > 0) {
+            double factor = collDur / mediaDur;
+            BOOL spacesDiffer = fabs(factor - 1.0) > 1e-5 || fabs(collStart - mediaStart) > 0.001;
+            if (spacesDiffer && isfinite(factor) && factor > 0.95 && factor < 1.05) {
+                double mediaTrim = mediaStart + (collTrimStart - collStart) / factor;
+                SpliceKit_log(@"[Transcript]   rate conform: collection %.3fs+%.3fs vs media %.3fs+%.3fs "
+                              @"(factor %.6f); trim %.3fs -> %.3fs in media time",
+                              collStart, collDur, mediaStart, mediaDur, factor, collTrimStart, mediaTrim);
+                collTrimStart = mediaTrim;
+                rateFactor = factor;
+            }
         }
     }
 
+    NSUInteger before = clipInfos.count;
     [self addMediaClip:innerMedia
           timelineObject:item
                duration:effectiveDuration
               trimStart:collTrimStart
              atTimeline:timelineStart
                    into:clipInfos];
+    if (rateFactor != 1.0) {
+        for (NSUInteger i = before; i < clipInfos.count; i++) clipInfos[i][@"rateFactor"] = @(rateFactor);
+    }
+}
+
+- (BOOL)readTimeRange:(NSString *)selectorName of:(id)object into:(SpliceKitTranscript_CMTimeRange *)out {
+    SEL sel = NSSelectorFromString(selectorName);
+    if (!object || ![object respondsToSelector:sel]) return NO;
+    @try {
+        NSMethodSignature *sig = [object methodSignatureForSelector:sel];
+        if (!sig || [sig methodReturnLength] != sizeof(SpliceKitTranscript_CMTimeRange)) return NO;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:object];
+        [inv setSelector:sel];
+        [inv invoke];
+        [inv getReturnValue:out];
+        return out->start.timescale > 0 && out->duration.timescale > 0;
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
 }
 
 - (id)findFirstMediaInContainer:(id)container {
@@ -1810,18 +1933,9 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
 - (void)addMediaClip:(id)clip timelineObject:(id)timelineObject duration:(double)clipDuration atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
     double trimStart = 0;
-    SEL unclippedSel = NSSelectorFromString(@"unclippedRange");
-    if ([clip respondsToSelector:unclippedSel]) {
-        NSMethodSignature *sig = [clip methodSignatureForSelector:unclippedSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitTranscript_CMTimeRange)) {
-            SpliceKitTranscript_CMTimeRange range;
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:clip];
-            [inv setSelector:unclippedSel];
-            [inv invoke];
-            [inv getReturnValue:&range];
-            trimStart = CMTimeToSeconds(range.start);
-        }
+    SpliceKitTranscript_CMTimeRange unclipped;
+    if ([self readTimeRange:@"unclippedRange" of:clip into:&unclipped]) {
+        trimStart = CMTimeToSeconds(unclipped.start);
     }
     [self addMediaClip:clip
           timelineObject:timelineObject
@@ -1841,9 +1955,47 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                    into:clipInfos];
 }
 
+// The clip's volume in dB, or NAN when the object has no readable volume. The
+// Volume channel (CHChannelDecibel) holds linear gain: 1.0 is 0 dB and -96 dB, FCP's
+// floor, reads as ~0. A clip that FCP wraps in a collection (an asset-clip with
+// connected clips, most imported clips) keeps it on -audioEffects; a bare media
+// component on -effectStack. Verified on FCP 12.3.
+- (double)volumeDBForTimelineObject:(id)item {
+    if (!item) return NAN;
+    for (NSString *stackName in @[@"audioEffects", @"effectStack"]) {
+        @try {
+            SEL stackSel = NSSelectorFromString(stackName);
+            id stack = [item respondsToSelector:stackSel] ? ((id (*)(id, SEL))objc_msgSend)(item, stackSel) : nil;
+            SEL volSel = NSSelectorFromString(@"audioLevelChannel");
+            id channel = [stack respondsToSelector:volSel] ? ((id (*)(id, SEL))objc_msgSend)(stack, volSel) : nil;
+            if (!channel) continue;
+            SpliceKitTranscript_CMTime indefinite = {0, 0, 17, 0};
+            double gain = NAN;
+            SEL curveSel = NSSelectorFromString(@"curveDoubleValueAtTime:");
+            SEL valSel = NSSelectorFromString(@"doubleValueAtTime:");
+            if ([channel respondsToSelector:curveSel]) {
+                gain = ((double (*)(id, SEL, SpliceKitTranscript_CMTime))objc_msgSend)(channel, curveSel, indefinite);
+            } else if ([channel respondsToSelector:valSel]) {
+                gain = ((double (*)(id, SEL, SpliceKitTranscript_CMTime))objc_msgSend)(channel, valSel, indefinite);
+            }
+            if (!isfinite(gain)) continue;
+            return gain > 1e-6 ? 20.0 * log10(gain) : -INFINITY;
+        } @catch (__unused NSException *e) {
+        }
+    }
+    return NAN;
+}
+
 - (void)addMediaClip:(id)clip timelineObject:(id)timelineObject duration:(double)clipDuration trimStart:(double)trimStart
           atTimeline:(double)timelinePos into:(NSMutableArray *)clipInfos {
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    // The wrapper and the component can each carry a level; the quieter one wins.
+    double volumeDB = [self volumeDBForTimelineObject:timelineObject];
+    if (clip != timelineObject) {
+        double inner = [self volumeDBForTimelineObject:clip];
+        if (!isnan(inner) && (isnan(volumeDB) || inner < volumeDB)) volumeDB = inner;
+    }
+    if (!isnan(volumeDB)) info[@"volumeDB"] = @(isinf(volumeDB) ? -200.0 : volumeDB);
     info[@"timelineStart"] = @(timelinePos);
     info[@"duration"] = @(clipDuration);
     info[@"handle"] = SpliceKit_storeHandle(clip);
@@ -1856,18 +2008,9 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     // FCP stores times in the source media's timecode space, but external ASR tools
     // like Parakeet return file-relative timestamps starting from 0.
     double mediaOrigin = 0;
-    SEL ucSel = NSSelectorFromString(@"unclippedRange");
-    if ([clip respondsToSelector:ucSel]) {
-        NSMethodSignature *sig = [clip methodSignatureForSelector:ucSel];
-        if (sig && [sig methodReturnLength] == sizeof(SpliceKitTranscript_CMTimeRange)) {
-            SpliceKitTranscript_CMTimeRange range;
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:clip];
-            [inv setSelector:ucSel];
-            [inv invoke];
-            [inv getReturnValue:&range];
-            mediaOrigin = CMTimeToSeconds(range.start);
-        }
+    SpliceKitTranscript_CMTimeRange originRange;
+    if ([self readTimeRange:@"unclippedRange" of:clip into:&originRange]) {
+        mediaOrigin = CMTimeToSeconds(originRange.start);
     }
     info[@"mediaOrigin"] = @(mediaOrigin);
 
@@ -1985,6 +2128,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;
+                    self.frameRateKnown = YES;
                 }
             }
 
@@ -2359,6 +2503,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;
+                    self.frameRateKnown = YES;
                 }
             }
 
@@ -2731,6 +2876,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                     timeline, @selector(sequenceFrameDuration));
                 if (fd.timescale > 0 && fd.value > 0) {
                     self.frameRate = (double)fd.timescale / fd.value;
+                    self.frameRateKnown = YES;
                 }
             }
 
@@ -2767,8 +2913,12 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     // Filter to clips with media URLs
     NSMutableArray *transcribableClips = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *skipped = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSString *> *fileProblems = [NSMutableDictionary dictionary];
     NSUInteger skippedNoMedia = 0;
     NSUInteger skippedTooShort = 0;
+    NSUInteger skippedMuted = 0;
+    NSUInteger skippedUnreadable = 0;
     for (NSDictionary *clipInfo in clips) {
         if (!clipInfo[@"mediaURL"]) {
             skippedNoMedia++;
@@ -2781,7 +2931,45 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                 dur, [clipInfo[@"mediaURL"] lastPathComponent]);
             continue;
         }
+        // A clip turned all the way down (-96 dB, FCP's floor) is not heard in the
+        // edit, so its words would only be noise in the transcript of the cut.
+        if (clipInfo[@"volumeDB"] && [clipInfo[@"volumeDB"] doubleValue] <= -60.0) {
+            skippedMuted++;
+            [skipped addObject:@{
+                @"name": clipInfo[@"name"] ?: @"",
+                @"file": [clipInfo[@"mediaURL"] path] ?: @"",
+                @"timelineStart": clipInfo[@"timelineStart"] ?: @0,
+                @"connected": clipInfo[@"connected"] ?: @NO,
+                @"reason": [clipInfo[@"volumeDB"] doubleValue] <= -199.0 ? @"muted (volume at the -96 dB floor)"
+                    : [NSString stringWithFormat:@"muted (volume %.0f dB)", [clipInfo[@"volumeDB"] doubleValue]],
+            }];
+            continue;
+        }
+        // Screen recordings with no audio track, media on an unmounted volume and
+        // unreadable files used to go to the helper, which failed the whole batch
+        // on the first one. Check each file once and leave the bad ones out.
+        NSString *path = [clipInfo[@"mediaURL"] path];
+        if (path && !fileProblems[path]) {
+            fileProblems[path] = [SpliceKitTranscriptPanel audioProblemForFileAtPath:path] ?: @"";
+        }
+        NSString *problem = path ? fileProblems[path] : @"no file path";
+        if (problem.length > 0) {
+            skippedUnreadable++;
+            [skipped addObject:@{
+                @"name": clipInfo[@"name"] ?: @"",
+                @"file": path ?: @"",
+                @"timelineStart": clipInfo[@"timelineStart"] ?: @0,
+                @"connected": clipInfo[@"connected"] ?: @NO,
+                @"reason": problem,
+            }];
+            SpliceKit_log(@"[Transcript] Skipping %@: %@", path.lastPathComponent, problem);
+            continue;
+        }
         [transcribableClips addObject:clipInfo];
+    }
+    self.skippedSources = skipped;
+    if (skippedMuted > 0) {
+        SpliceKit_log(@"[Transcript] Skipped %lu muted clips", (unsigned long)skippedMuted);
     }
 
     if (skippedNoMedia > 0) {
@@ -2820,7 +3008,17 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     if (transcribableClips.count == 0) {
         NSString *reason = @"No transcribable clips found on timeline.";
-        if (skippedTooShort > 0 && skippedNoMedia == 0) {
+        if (skippedUnreadable > 0 || skippedMuted > 0) {
+            NSMutableArray *why = [NSMutableArray array];
+            for (NSDictionary *entry in skipped) {
+                NSString *line = [NSString stringWithFormat:@"%@: %@",
+                    [entry[@"file"] lastPathComponent] ?: entry[@"name"], entry[@"reason"]];
+                if (![why containsObject:line]) [why addObject:line];
+                if (why.count >= 8) break;
+            }
+            reason = [NSString stringWithFormat:@"No clip on the timeline has audio that can be transcribed. %@",
+                [why componentsJoinedByString:@"; "]];
+        } else if (skippedTooShort > 0 && skippedNoMedia == 0) {
             reason = [NSString stringWithFormat:
                 @"All %lu clips are too short for transcription (< 0.5 seconds). "
                 @"Parakeet needs at least 1 second of audio.", (unsigned long)skippedTooShort];
@@ -2901,11 +3099,19 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         }
     };
 
-    // Read stderr asynchronously for live progress updates
+    // Read stderr asynchronously for live progress updates. Keep every byte: the
+    // handler consumes the pipe, so reading it again after exit found nothing and
+    // every failure came back as a bare "exit code 1" without the helper's reason.
     NSUInteger totalClips = transcribableClips.count;
+    self.totalTranscriptions = uniqueFiles.count;
+    self.completedTranscriptions = 0;
+    __block NSMutableData *stderrAccum = [NSMutableData data];
     stderrPipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
         NSData *data = handle.availableData;
         if (data.length == 0) return;
+        @synchronized (stderrAccum) {
+            [stderrAccum appendData:data];
+        }
 
         NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (!text) return;
@@ -2917,6 +3123,15 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                     double frac = [parts[1] doubleValue];
                     NSString *msg = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)]
                         componentsJoinedByString:@":"];
+                    self.progressFraction = frac;
+                    self.progressMessage = msg;
+                    // "Transcribing 3/7: name..." — the helper's per-file counter.
+                    NSRegularExpression *re = [NSRegularExpression
+                        regularExpressionWithPattern:@"^Transcribing (\\d+)/(\\d+)" options:0 error:nil];
+                    NSTextCheckingResult *m = [re firstMatchInString:msg options:0 range:NSMakeRange(0, msg.length)];
+                    if (m) {
+                        self.completedTranscriptions = (NSUInteger)MAX(0, [[msg substringWithRange:[m rangeAtIndex:1]] integerValue] - 1);
+                    }
                     dispatch_async(dispatch_get_main_queue(), ^{
                         self.progressBar.indeterminate = NO;
                         self.progressBar.doubleValue = frac;
@@ -2952,8 +3167,10 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     SpliceKit_log(@"[Transcript] Launching: %@ %@", binaryPath,
         [taskArgs componentsJoinedByString:@" "]);
 
+    NSUInteger generation = self.runGeneration;
     @try {
         [task launch];
+        self.activeHelperTask = task;
         SpliceKit_log(@"[Transcript] Parakeet process started (PID %d)", task.processIdentifier);
         [task waitUntilExit];
     } @catch (NSException *e) {
@@ -2972,6 +3189,12 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     stdoutPipe.fileHandleForReading.readabilityHandler = nil;
     stderrPipe.fileHandleForReading.readabilityHandler = nil;
+    if (generation != self.runGeneration) {
+        SpliceKit_log(@"[Transcript] Dropping the result of a superseded timeline run");
+        [[NSFileManager defaultManager] removeItemAtPath:manifestPath error:nil];
+        return;
+    }
+    if (self.activeHelperTask == task) self.activeHelperTask = nil;
 
     NSData *remaining = [stdoutPipe.fileHandleForReading readDataToEndOfFile];
     if (remaining.length > 0) {
@@ -3017,9 +3240,22 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     if (exitCode != 0) {
         SpliceKit_log(@"[Transcript] ─── Parakeet failed (exit code %d) ───", exitCode);
 
-        // Collect all stderr output for diagnostics
+        // Collect all stderr output for diagnostics: what the handler kept plus
+        // anything still in the pipe.
+        NSMutableData *stderrAll;
+        @synchronized (stderrAccum) {
+            stderrAll = [stderrAccum mutableCopy];
+        }
         NSData *stderrRemaining = [stderrPipe.fileHandleForReading readDataToEndOfFile];
-        NSString *stderrText = [[NSString alloc] initWithData:stderrRemaining encoding:NSUTF8StringEncoding] ?: @"";
+        if (stderrRemaining.length) [stderrAll appendData:stderrRemaining];
+        NSString *stderrText = [[NSString alloc] initWithData:stderrAll encoding:NSUTF8StringEncoding] ?: @"";
+        // PROGRESS lines carry file names ("Transcribing 2/5: Connecting rods.mov"),
+        // which the keyword matching below would misread as a network/disk error.
+        NSMutableArray *nonProgress = [NSMutableArray array];
+        for (NSString *line in [stderrText componentsSeparatedByString:@"\n"]) {
+            if (line.length && ![line hasPrefix:@"PROGRESS:"]) [nonProgress addObject:line];
+        }
+        stderrText = nonProgress.count ? [[nonProgress componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"] : @"";
 
         // Also check stdout for error JSON
         NSString *stdoutText = nil;
@@ -3040,11 +3276,34 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
             SpliceKit_log(@"[Transcript]   (no output from parakeet-transcriber)");
         }
 
-        // Build a user-friendly error with specific guidance
+        // Build a user-friendly error with specific guidance. Classify on stderr only:
+        // when every file fails the helper prints the per-file results (with their
+        // paths) on stdout, and a path like ".../Connecting rods.mov" matched the
+        // network keywords below.
         NSString *userError = nil;
-        NSString *allLower = [allOutput lowercaseString];
+        NSString *allLower = [stderrText lowercaseString];
 
-        if ([allLower containsString:@"invalid audio"] || [allLower containsString:@"at least 1 second"]) {
+        id failedFiles = stdoutText.length
+            ? [NSJSONSerialization JSONObjectWithData:[stdoutText dataUsingEncoding:NSUTF8StringEncoding]
+                                              options:0 error:nil]
+            : nil;
+        if ([failedFiles isKindOfClass:[NSArray class]]) {
+            NSMutableArray *why = [NSMutableArray array];
+            for (NSDictionary *entry in (NSArray *)failedFiles) {
+                if (![entry isKindOfClass:[NSDictionary class]] || ![entry[@"error"] isKindOfClass:[NSString class]]) continue;
+                [why addObject:[NSString stringWithFormat:@"%@: %@",
+                    [entry[@"file"] description].lastPathComponent, entry[@"error"]]];
+                if (why.count >= 8) break;
+            }
+            if (why.count > 0) {
+                userError = [NSString stringWithFormat:@"Parakeet could not transcribe any clip. %@",
+                    [why componentsJoinedByString:@"; "]];
+            }
+        }
+
+        if (userError) {
+            // per-file reasons from the helper, above
+        } else if ([allLower containsString:@"invalid audio"] || [allLower containsString:@"at least 1 second"]) {
             userError = @"Audio clips are too short for transcription. Parakeet requires at least 1 second of audio per clip.";
         } else if ([allLower containsString:@"no such file"] || [allLower containsString:@"file not found"]) {
             userError = @"Source media file not found. The media may have been moved or is offline. Check File > Relink Files in FCP.";
@@ -3073,10 +3332,22 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         } else if (exitCode == 6) {
             userError = @"Parakeet crashed (SIGABRT). This may be a compatibility issue. Try switching to Apple Speech engine.";
         } else {
-            // Generic fallback with the actual output
+            // Generic fallback with the actual output: the helper's ERROR: lines
+            // (without its TIP: lines), else its last line.
             NSString *lastLine = @"";
-            NSArray *lines = [allOutput componentsSeparatedByString:@"\n"];
+            NSArray *lines = [stderrText componentsSeparatedByString:@"\n"];
+            NSMutableArray *errorLines = [NSMutableArray array];
+            for (NSString *line in lines) {
+                if (![line hasPrefix:@"ERROR:"]) continue;
+                NSString *body = [line substringFromIndex:6];
+                if ([body hasPrefix:@"TIP:"] || [body hasPrefix:@"INFO:"]) continue;
+                if (![errorLines containsObject:body]) [errorLines addObject:body];
+            }
+            if (errorLines.count > 0) {
+                lastLine = [errorLines componentsJoinedByString:@" | "];
+            }
             for (NSString *line in [lines reverseObjectEnumerator]) {
+                if (lastLine.length > 0) break;
                 if (line.length > 0 && ![line hasPrefix:@"PROGRESS:"]) {
                     lastLine = line;
                     break;
@@ -3147,11 +3418,44 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     // Map results back to clips by file path
     NSMutableDictionary *resultsByFile = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *errorsByFile = [NSMutableDictionary dictionary];
     for (NSDictionary *result in batchResults) {
         NSString *file = result[@"file"];
         NSArray *words = result[@"words"];
+        if ([result[@"error"] isKindOfClass:[NSString class]] && file) {
+            errorsByFile[file] = result[@"error"];
+            continue;
+        }
         if (file && [words isKindOfClass:[NSArray class]]) {
             resultsByFile[file] = words;
+        }
+    }
+    // A file the helper could not read no longer fails the batch; it comes back
+    // with its own error. Report those clips as skipped, with the helper's reason.
+    if (errorsByFile.count > 0) {
+        NSMutableArray *skippedNow = [self.skippedSources mutableCopy] ?: [NSMutableArray array];
+        for (NSDictionary *clipInfo in transcribableClips) {
+            NSString *path = [clipInfo[@"mediaURL"] path];
+            NSString *err = path ? errorsByFile[path] : nil;
+            if (!err) continue;
+            [skippedNow addObject:@{
+                @"name": clipInfo[@"name"] ?: @"",
+                @"file": path,
+                @"timelineStart": clipInfo[@"timelineStart"] ?: @0,
+                @"connected": clipInfo[@"connected"] ?: @NO,
+                @"reason": [NSString stringWithFormat:@"transcriber could not read it: %@", err],
+            }];
+        }
+        self.skippedSources = skippedNow;
+        if (resultsByFile.count == 0) {
+            NSMutableArray *why = [NSMutableArray array];
+            for (NSString *file in errorsByFile) {
+                [why addObject:[NSString stringWithFormat:@"%@: %@", file.lastPathComponent, errorsByFile[file]]];
+                if (why.count >= 8) break;
+            }
+            [self setErrorState:[NSString stringWithFormat:@"Parakeet could not transcribe any clip. %@",
+                [why componentsJoinedByString:@"; "]]];
+            return;
         }
     }
 
@@ -3163,6 +3467,10 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
             double trimStart = [clipInfo[@"trimStart"] doubleValue];
             double clipDuration = [clipInfo[@"duration"] doubleValue];
             double mediaOrigin = [clipInfo[@"mediaOrigin"] doubleValue];
+            // Timeline seconds per second of the file (conformed frame rate); 1 normally.
+            double rateFactor = clipInfo[@"rateFactor"] ? [clipInfo[@"rateFactor"] doubleValue] : 1.0;
+            if (!(rateFactor > 0)) rateFactor = 1.0;
+            double fileSpan = clipDuration / rateFactor;
             NSString *clipHandle = clipInfo[@"handle"];
 
             NSArray *wordDicts = resultsByFile[mediaURL.path];
@@ -3197,11 +3505,11 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
                     speaker = [NSString stringWithFormat:@"Speaker %@", [speaker substringFromIndex:1]];
                 }
 
-                if (startTime >= fileRelativeTrimStart && startTime < fileRelativeTrimStart + clipDuration) {
+                if (startTime >= fileRelativeTrimStart && startTime < fileRelativeTrimStart + fileSpan) {
                     SpliceKitTranscriptWord *word = [[SpliceKitTranscriptWord alloc] init];
                     word.text = text;
-                    word.startTime = timelineStart + (startTime - fileRelativeTrimStart);
-                    word.duration = MIN(endTime - startTime, (fileRelativeTrimStart + clipDuration) - startTime);
+                    word.startTime = timelineStart + (startTime - fileRelativeTrimStart) * rateFactor;
+                    word.duration = MIN(endTime - startTime, (fileRelativeTrimStart + fileSpan) - startTime) * rateFactor;
                     word.confidence = confidence;
                     word.clipHandle = clipHandle;
                     word.clipTimelineStart = timelineStart;
@@ -3251,6 +3559,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         [self detectSilences];
         [self assignSpeakers];
 
+        self.completedTranscriptions = self.totalTranscriptions;
         self.status = SpliceKitTranscriptStatusReady;
         [self rebuildTextView];
         [self startPlayheadTimer];
@@ -3261,8 +3570,10 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         self.refreshButton.enabled = YES;
         self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
-        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)",
-            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count]];
+        NSUInteger skippedCount = self.skippedSources.count;
+        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)%@",
+            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count,
+            skippedCount ? [NSString stringWithFormat:@", %lu clips skipped", (unsigned long)skippedCount] : @""]];
 
         SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
@@ -3858,7 +4169,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 // that applies to a single file handed over by transcript.open(fileURL:), and
 // reusing it would mean threading a synthetic clip through several hundred
 // lines of timeline-specific code. Single-file mode is one CLI invocation.
-- (void)transcribeFileWithParakeet:(NSURL *)audioURL timelineStart:(double)timelineStart {
+- (void)transcribeFileWithParakeet:(NSURL *)audioURL timelineStart:(double)timelineStart generation:(NSUInteger)generation {
     NSString *binaryPath = [self parakeetTranscriberPath];
     if (!binaryPath) {
         [self setErrorState:@"Parakeet transcriber not installed.\n\n"
@@ -3904,6 +4215,8 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
             double fraction = [parts[1] doubleValue];
             NSString *message = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)]
                                     componentsJoinedByString:@":"];
+            self.progressFraction = fraction;
+            self.progressMessage = message;
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.progressBar.indeterminate = NO;
                 self.progressBar.doubleValue = fraction * 100.0;
@@ -3914,6 +4227,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     @try {
         [task launch];
+        self.activeHelperTask = task;
         [task waitUntilExit];
     } @catch (NSException *e) {
         [self setErrorState:[NSString stringWithFormat:@"Could not run parakeet-transcriber: %@", e.reason]];
@@ -3921,6 +4235,11 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     }
     outPipe.fileHandleForReading.readabilityHandler = nil;
     errPipe.fileHandleForReading.readabilityHandler = nil;
+    if (generation != self.runGeneration) {
+        SpliceKit_log(@"[Transcript] Dropping the result of a superseded file run (%@)", audioURL.lastPathComponent);
+        return;
+    }
+    if (self.activeHelperTask == task) self.activeHelperTask = nil;
 
     NSData *stdoutData; NSData *stderrData;
     @synchronized (outData) { stdoutData = [outData copy]; }
@@ -3928,13 +4247,25 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     NSString *stderrText = [[NSString alloc] initWithData:stderrData encoding:NSUTF8StringEncoding] ?: @"";
 
     if (task.terminationStatus != 0) {
-        // Surface the tool's own last words rather than a bare exit code.
-        NSString *detail = @"";
-        for (NSString *line in [[stderrText componentsSeparatedByString:@"\n"] reverseObjectEnumerator]) {
-            if (line.length && ![line hasPrefix:@"PROGRESS:"]) {
-                detail = [line hasPrefix:@"ERROR:"] ? [line substringFromIndex:6] : line;
-                break;
+        // Surface the tool's own ERROR: lines (not its TIP:/INFO: advice or the
+        // FluidAudio "[Profiling]" chatter, which is what the last line often is).
+        NSMutableArray *errors = [NSMutableArray array];
+        NSString *lastLine = @"";
+        for (NSString *line in [stderrText componentsSeparatedByString:@"\n"]) {
+            if (line.length == 0 || [line hasPrefix:@"PROGRESS:"]) continue;
+            if ([line hasPrefix:@"ERROR:"]) {
+                NSString *body = [line substringFromIndex:6];
+                if (![body hasPrefix:@"TIP:"] && ![body hasPrefix:@"INFO:"] && ![errors containsObject:body]) {
+                    [errors addObject:body];
+                }
+            } else if (![line hasPrefix:@"[Profiling]"]) {
+                lastLine = line;
             }
+        }
+        NSString *detail = errors.count ? [errors componentsJoinedByString:@" | "] : lastLine;
+        if (task.terminationReason == NSTaskTerminationReasonUncaughtSignal) {
+            detail = [NSString stringWithFormat:@"the transcriber was stopped by signal %d%@%@",
+                      task.terminationStatus, detail.length ? @"; " : @"", detail];
         }
         [self setErrorState:[NSString stringWithFormat:
             @"Parakeet failed (exit %d)%@%@", task.terminationStatus,
@@ -4000,6 +4331,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         [self detectSilences];
         [self assignSpeakers];
 
+        self.completedTranscriptions = 1;
         self.status = SpliceKitTranscriptStatusReady;
         self.errorMessage = nil;
         [self rebuildTextView];
@@ -4019,6 +4351,55 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     [self transcribeFromURL:audioURL timelineStart:0 trimStart:0 trimDuration:HUGE_VAL];
 }
 
+// Start a new run: stop a helper still working on the previous one (it may be
+// stuck, e.g. waiting on a privacy prompt) and return this run's number.
+- (NSUInteger)beginRun {
+    NSUInteger generation = self.runGeneration + 1;
+    self.runGeneration = generation;
+    NSTask *previous = self.activeHelperTask;
+    self.activeHelperTask = nil;
+    @try {
+        if (previous.isRunning) {
+            SpliceKit_log(@"[Transcript] Stopping the previous transcriber (pid %d): a new run started",
+                previous.processIdentifier);
+            [previous terminate];
+        }
+    } @catch (__unused NSException *e) {
+    }
+    return generation;
+}
+
+// Why a media file cannot be transcribed, or nil when it can: missing, a folder,
+// unreadable, or without an audio track (a screen recording). Both file mode and
+// the timeline batch ask this first, so the reason reaches the caller instead of
+// the helper failing on it.
++ (NSString *)audioProblemForFileAtPath:(NSString *)path {
+    if (path.length == 0) return @"no file path";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
+        // A dangling symlink (media on an unmounted volume) also lands here.
+        NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
+        if (dest.length) return [NSString stringWithFormat:@"file not found (link to %@, which is not reachable)", dest];
+        return @"file not found";
+    }
+    if (isDir) return @"is a folder, not a media file";
+    if (![fm isReadableFileAtPath:path]) return @"file is not readable (permissions)";
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+    @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        NSArray *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        NSArray *allTracks = asset.tracks;
+#pragma clang diagnostic pop
+        // No tracks at all means AVFoundation could not parse it; let the helper
+        // try (it has its own decoder) rather than refusing a file it may read.
+        if (allTracks.count > 0 && audioTracks.count == 0) return @"no audio track";
+    } @catch (__unused NSException *e) {
+    }
+    return nil;
+}
+
 - (void)transcribeFromURL:(NSURL *)audioURL
        timelineStart:(double)timelineStart
        trimStart:(double)trimStart
@@ -4026,7 +4407,27 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 
     SpliceKit_log(@"[Transcript] Transcribing file: %@", audioURL.path);
 
+    // File mode from here on: the persistence checks must not replace these words
+    // with (or wipe them for) whatever timeline is open. Set synchronously so a
+    // getState racing the main-queue block below already sees it.
+    NSUInteger generation = [self beginRun];
+    self.sourceFilePath = audioURL.path;
+    self.skippedSources = nil;
+    self.completedTranscriptions = 0;
+    self.totalTranscriptions = 1;
+    self.progressFraction = 0;
+    self.progressMessage = @"Starting";
+    self.transcriptionStartDate = [NSDate date];
+    self.status = SpliceKitTranscriptStatusTranscribing;
+    self.errorMessage = nil;
+    @synchronized (self.mutableWords) {
+        [self.mutableWords removeAllObjects];
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self.mutableSilences removeAllObjects];
+        self.fullText = nil;
+        [self rebuildTextView];
         self.status = SpliceKitTranscriptStatusTranscribing;
         self.errorMessage = nil;
         [self updateStatusUI:@"Transcribing audio file..."];
@@ -4046,7 +4447,13 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     // one. Parakeet needs no permission, so route it there when it is selected.
     if (self.engine == SpliceKitTranscriptEngineParakeet) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            [self transcribeFileWithParakeet:audioURL timelineStart:timelineStart];
+            NSString *problem = [SpliceKitTranscriptPanel audioProblemForFileAtPath:audioURL.path];
+            if (problem) {
+                [self setErrorState:[NSString stringWithFormat:@"Cannot transcribe %@: %@",
+                    audioURL.path, problem]];
+                return;
+            }
+            [self transcribeFileWithParakeet:audioURL timelineStart:timelineStart generation:generation];
         });
         return;
     }
@@ -5314,7 +5721,59 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
 }
 
 - (NSDictionary *)getState {
+    return [self getStateWithOptions:nil];
+}
+
+static BOOL SpliceKitTranscript_optBool(NSDictionary *opts, NSString *key, BOOL fallback) {
+    id v = opts[key];
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+    return fallback;
+}
+
+static double SpliceKitTranscript_optDouble(NSDictionary *opts, NSString *key, double fallback) {
+    id v = opts[key];
+    if ([v isKindOfClass:[NSNumber class]] || [v isKindOfClass:[NSString class]]) {
+        NSString *str = [v description];
+        if (str.length) return [v doubleValue];
+    }
+    return fallback;
+}
+
+// Options (all optional; with none the answer is the full state, as before):
+//   includeWords / includeSilences / includeText / includeGapBuckets / includeSkipped (bool, default YES)
+//   wordsOnly     — words and the counts only: no text, silences or gap histogram
+//   fields        — word keys to return, e.g. ["text","startTime","endTime"]
+//   startSeconds / endSeconds — only words (and silences) overlapping this timeline window
+//   offset / limit — page through the (windowed) word list; nextOffset says where to go on
+// A 40-minute transcript is ~1.8 M characters in full; a page of words with three
+// fields is a few KB, which is what an MCP client can take in one answer.
+- (NSDictionary *)getStateWithOptions:(NSDictionary *)opts {
     [self ensurePersistedStateLoaded];
+    if (![opts isKindOfClass:[NSDictionary class]]) opts = @{};
+
+    BOOL wordsOnly = SpliceKitTranscript_optBool(opts, @"wordsOnly", NO);
+    BOOL includeWords = SpliceKitTranscript_optBool(opts, @"includeWords", YES);
+    BOOL includeSilences = SpliceKitTranscript_optBool(opts, @"includeSilences", !wordsOnly);
+    BOOL includeText = SpliceKitTranscript_optBool(opts, @"includeText", !wordsOnly);
+    BOOL includeGapBuckets = SpliceKitTranscript_optBool(opts, @"includeGapBuckets", !wordsOnly);
+    BOOL includeSkipped = SpliceKitTranscript_optBool(opts, @"includeSkipped", YES);
+    double windowStart = SpliceKitTranscript_optDouble(opts, @"startSeconds", -INFINITY);
+    double windowEnd = SpliceKitTranscript_optDouble(opts, @"endSeconds", INFINITY);
+    BOOL windowed = isfinite(windowStart) || isfinite(windowEnd);
+    NSInteger offset = MAX(0, (NSInteger)SpliceKitTranscript_optDouble(opts, @"offset", 0));
+    double limitValue = SpliceKitTranscript_optDouble(opts, @"limit", -1);
+    NSInteger limit = limitValue > 0 ? (NSInteger)limitValue : -1;
+    NSSet *fields = nil;
+    if ([opts[@"fields"] isKindOfClass:[NSArray class]] && [opts[@"fields"] count] > 0) {
+        fields = [NSSet setWithArray:opts[@"fields"]];
+    } else if ([opts[@"fields"] isKindOfClass:[NSString class]] && [opts[@"fields"] length] > 0) {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (NSString *part in [opts[@"fields"] componentsSeparatedByString:@","]) {
+            NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (trimmed.length) [parts addObject:trimmed];
+        }
+        if (parts.count) fields = [NSSet setWithArray:parts];
+    }
 
     NSMutableDictionary *state = [NSMutableDictionary dictionary];
 
@@ -5329,7 +5788,22 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     state[@"wordCount"] = @(self.mutableWords.count);
     state[@"silenceCount"] = @(self.mutableSilences.count);
     state[@"silenceThreshold"] = @(self.silenceThreshold);
-    state[@"frameRate"] = @(self.frameRate);
+    // The 24 fps default is not a reading: say so until a timeline run (or a
+    // restored transcript) has told us the sequence's rate.
+    if (self.frameRateKnown) {
+        state[@"frameRate"] = @(self.frameRate);
+    } else {
+        state[@"frameRate"] = [NSNull null];
+        state[@"frameRateNote"] = [NSString stringWithFormat:
+            @"unknown (no timeline transcribed yet); timecodes use %.0f fps", self.frameRate];
+    }
+    if (self.sourceFilePath.length > 0) {
+        state[@"source"] = @{@"mode": @"file", @"path": self.sourceFilePath};
+    } else {
+        NSMutableDictionary *source = [@{@"mode": @"timeline"} mutableCopy];
+        if (self.primaryStorylineOnly) source[@"primaryStorylineOnly"] = @YES;
+        state[@"source"] = source;
+    }
     state[@"engine"] = (self.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
                        (self.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
     if (self.engine == SpliceKitTranscriptEngineParakeet) {
@@ -5342,42 +5816,77 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
         state[@"errorMessage"] = self.errorMessage;
     }
 
-    if (self.fullText) {
+    if (includeText && self.fullText) {
         state[@"text"] = self.fullText;
     }
 
     if (self.status == SpliceKitTranscriptStatusTranscribing) {
-        state[@"progress"] = @{
+        NSMutableDictionary *progress = [@{
             @"completed": @(self.completedTranscriptions),
-            @"total": @(self.totalTranscriptions)
-        };
+            @"total": @(self.totalTranscriptions),
+            @"fraction": @(self.progressFraction),
+        } mutableCopy];
+        if (self.progressMessage.length) progress[@"message"] = self.progressMessage;
+        if (self.transcriptionStartDate) {
+            progress[@"elapsedSeconds"] = @(round(-[self.transcriptionStartDate timeIntervalSinceNow] * 10) / 10);
+        }
+        state[@"progress"] = progress;
     }
 
-    if (self.mutableWords.count > 0) {
+    NSArray *skipped = self.skippedSources;
+    if (includeSkipped && skipped.count > 0) {
+        state[@"skippedClips"] = skipped;
+    }
+
+    if (includeWords && self.mutableWords.count > 0) {
         NSMutableArray *wordList = [NSMutableArray array];
+        NSInteger matched = 0;
         @synchronized (self.mutableWords) {
             for (SpliceKitTranscriptWord *word in self.mutableWords) {
-                [wordList addObject:@{
+                if (windowed && (word.endTime <= windowStart || word.startTime >= windowEnd)) continue;
+                NSInteger position = matched++;
+                if (position < offset) continue;
+                if (limit >= 0 && (NSInteger)wordList.count >= limit) continue;
+                // Times to the millisecond (a frame is 17-42 ms): the helper's float32
+                // times printed as 5.199999809265137 made up much of the payload.
+                NSDictionary *full = @{
                     @"index": @(word.wordIndex),
                     @"text": word.text ?: @"",
-                    @"startTime": @(word.startTime),
-                    @"endTime": @(word.endTime),
-                    @"duration": @(word.duration),
-                    @"confidence": @(word.confidence),
+                    @"startTime": @(round(word.startTime * 1000.0) / 1000.0),
+                    @"endTime": @(round(word.endTime * 1000.0) / 1000.0),
+                    @"duration": @(round(word.duration * 1000.0) / 1000.0),
+                    @"confidence": @(round(word.confidence * 1000.0) / 1000.0),
                     @"speaker": word.speaker ?: @"Unknown"
-                }];
+                };
+                if (fields) {
+                    NSMutableDictionary *picked = [NSMutableDictionary dictionary];
+                    for (NSString *key in full) {
+                        if ([fields containsObject:key]) picked[key] = full[key];
+                    }
+                    [wordList addObject:picked];
+                } else {
+                    [wordList addObject:full];
+                }
             }
         }
         state[@"words"] = wordList;
+        if (windowed || offset > 0 || limit >= 0) {
+            state[@"wordsMatched"] = @(matched);
+            state[@"wordsOffset"] = @(offset);
+            state[@"wordsReturned"] = @(wordList.count);
+            NSInteger next = offset + (NSInteger)wordList.count;
+            state[@"nextOffset"] = next < matched ? @(next) : [NSNull null];
+        }
     }
 
-    if (self.mutableSilences.count > 0) {
+    if (includeSilences && self.mutableSilences.count > 0) {
         NSMutableArray *silenceList = [NSMutableArray array];
         for (SpliceKitTranscriptSilence *silence in self.mutableSilences) {
+            if (windowed && (silence.endTime <= windowStart || silence.startTime >= windowEnd)) continue;
             [silenceList addObject:@{
-                @"startTime": @(silence.startTime),
-                @"endTime": @(silence.endTime),
-                @"duration": @(silence.duration),
+                @"startTime": @(round(silence.startTime * 1000.0) / 1000.0),
+                @"endTime": @(round(silence.endTime * 1000.0) / 1000.0),
+                @"duration": @(round(silence.duration * 1000.0) / 1000.0),
                 @"afterWordIndex": @(silence.afterWordIndex),
                 @"startTimecode": SpliceKitTranscript_timecodeFromSeconds(silence.startTime, self.frameRate),
                 @"endTimecode": SpliceKitTranscript_timecodeFromSeconds(silence.endTime, self.frameRate),
@@ -5387,7 +5896,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     }
 
     // Gap histogram — helps users pick a useful silence threshold
-    if (self.mutableWords.count >= 2) {
+    if (includeGapBuckets && self.mutableWords.count >= 2) {
         NSUInteger gaps01 = 0, gaps03 = 0, gaps05 = 0, gaps10 = 0, gaps20 = 0, gaps50 = 0;
         @synchronized (self.mutableWords) {
             for (NSUInteger i = 0; i < self.mutableWords.count - 1; i++) {
