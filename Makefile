@@ -44,7 +44,7 @@ MODDED_APP_STANDARD = $(HOME)/Applications/SpliceKit/Final Cut Pro.app
 MODDED_APP_CREATOR = $(HOME)/Applications/SpliceKit/Final Cut Pro Creator Studio.app
 MODDED_APP = $(shell if [ -d "$(MODDED_APP_MODIFIED)" ]; then echo "$(MODDED_APP_MODIFIED)"; elif [ -d "$(MODDED_APP_STANDARD)" ]; then echo "$(MODDED_APP_STANDARD)"; elif [ -d "$(MODDED_APP_CREATOR)" ]; then echo "$(MODDED_APP_CREATOR)"; else echo "$(MODDED_APP_MODIFIED)"; fi)
 FW_DIR = $(MODDED_APP)/Contents/Frameworks/SpliceKit.framework
-ENTITLEMENTS = entitlements.plist
+ENTITLEMENTS = patcher/entitlements.plist
 
 # $(call plist_set,Key,Value): set a string key in the patched app's Info.plist.
 plist_set = /usr/libexec/PlistBuddy -c "Set :$(1) '$(2)'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null \
@@ -56,31 +56,32 @@ AUDIO_LEVELS = $(BUILD_DIR)/audio-levels
 BEAT_DETECTOR = $(BUILD_DIR)/beat-detector
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
 # Transcription helpers (Parakeet for the transcript panel, Whisper for the
-# caption panel), built from tools/<name> by Scripts/build-transcribers.sh and
+# caption panel), built from helpers/<name> by scripts/build-transcribers.sh and
 # cached in build/.
 PARAKEET_BIN = $(BUILD_DIR)/parakeet-transcriber
 WHISPER_BIN = $(BUILD_DIR)/whisper-transcriber
 
-# --- VP9 codec bundle (Plugins/VP9 → FCP.app/Contents/PlugIns/Codecs) --------
-VP9_SOURCE_DIR = Plugins/VP9/Sources
+# --- VP9 codec bundle (plugins/vp9 → FCP.app/Contents/PlugIns/Codecs) --------
+VP9_SOURCE_DIR = plugins/vp9/Sources
 VP9_PRIVATE_DIR = $(VP9_SOURCE_DIR)/Private
+# SPI headers shared by the VP9 decoder and the MKV reader (plugins/common/Private).
+PLUGIN_COMMON_DIR = plugins/common
 VP9_BUILD_DIR = $(BUILD_DIR)/vp9
 VP9_DECODER_BUNDLE = $(VP9_BUILD_DIR)/Codecs/SpliceKitVP9Decoder.bundle
 VP9_DECODER_EXEC = $(VP9_DECODER_BUNDLE)/Contents/MacOS/SpliceKitVP9Decoder
-VP9_DECODER_INFO = Plugins/VP9/Codecs/SpliceKitVP9Decoder.bundle/Contents/Info.plist
+VP9_DECODER_INFO = plugins/vp9/Codecs/SpliceKitVP9Decoder.bundle/Contents/Info.plist
 VP9_DECODER_SOURCES = $(VP9_SOURCE_DIR)/VP9VideoDecoder.mm
 VP9_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox
-VP9_CFLAGS = $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -I $(VP9_SOURCE_DIR) -I $(VP9_PRIVATE_DIR)
+VP9_CFLAGS = $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -I $(VP9_SOURCE_DIR) -I $(VP9_PRIVATE_DIR) -I $(PLUGIN_COMMON_DIR) -I $(PLUGIN_COMMON_DIR)/Private
 VP9_LDFLAGS = -bundle $(CPP_LIBS)
 
-# --- MKV/WebM format reader (Plugins/MKV → FCP.app/Contents/PlugIns/FormatReaders) ---
-MKV_SOURCE_DIR = Plugins/MKV/Sources
-MKV_PRIVATE_DIR = $(MKV_SOURCE_DIR)/Private
+# --- MKV/WebM format reader (plugins/mkv → FCP.app/Contents/PlugIns/FormatReaders) ---
+MKV_SOURCE_DIR = plugins/mkv/Sources
 MKV_LIBWEBM_DIR = $(MKV_SOURCE_DIR)/libwebm
 MKV_BUILD_DIR = $(BUILD_DIR)/mkv
 MKV_IMPORT_BUNDLE = $(MKV_BUILD_DIR)/FormatReaders/SpliceKitMKVImport.bundle
 MKV_IMPORT_EXEC = $(MKV_IMPORT_BUNDLE)/Contents/MacOS/SpliceKitMKVImport
-MKV_IMPORT_INFO = Plugins/MKV/FormatReaders/SpliceKitMKVImport.bundle/Contents/Info.plist
+MKV_IMPORT_INFO = plugins/mkv/FormatReaders/SpliceKitMKVImport.bundle/Contents/Info.plist
 MKV_IMPORT_SOURCES = $(MKV_SOURCE_DIR)/MKVCommon.mm \
                       $(MKV_SOURCE_DIR)/MKVFormatReader.mm \
                       $(MKV_LIBWEBM_DIR)/mkvparser/mkvparser.cc \
@@ -88,7 +89,7 @@ MKV_IMPORT_SOURCES = $(MKV_SOURCE_DIR)/MKVCommon.mm \
 MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework MediaToolbox -framework AudioToolbox
 # libwebm uses its own exceptions/assert flow; keep default C++ settings but
 # disable ObjC ARC for the .mm so we can freely mix with C++ heap types.
-MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
+MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(PLUGIN_COMMON_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
 # A bare `make` builds the dylib. `install` is listed first below for readers, but
@@ -103,16 +104,16 @@ MKV_LDFLAGS = -bundle $(CPP_LIBS)
 # tests/mcp_server_check.py before it is wired into Claude), and the patched
 # app opened and read from through that server. Safe to re-run.
 install:
-	@bash Scripts/install.sh
+	@bash scripts/install.sh
 
 install-check:
-	@bash Scripts/install.sh --check
+	@bash scripts/install.sh --check
 
 # Build the Parakeet/Whisper CLI helpers on their own and install them into the
 # patched app plus Application Support. `make install` does this already; this
 # target exists for retrying after a failed dependency download.
 transcribers:
-	@bash Scripts/build-transcribers.sh --framework "$(FW_DIR)"
+	@bash scripts/build-transcribers.sh --framework "$(FW_DIR)"
 
 all: $(OUTPUT)
 
@@ -218,7 +219,7 @@ mcp-doctor:
 			echo "[warn] .mcp.json command: $$CMD (expected $(MCP_PYTHON))"; \
 		fi; \
 	else \
-		echo "[warn] .mcp.json not found in repo root — run ./Scripts/setup-mcp.sh"; \
+		echo "[warn] .mcp.json not found in repo root — run ./scripts/setup-mcp.sh"; \
 	fi
 	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then \
 		echo "[ok] FCP bridge listening on 127.0.0.1:9876 — run 'make mcp-check-live' to drive it through the MCP server"; \
@@ -260,23 +261,23 @@ $(BUILD_DIR)/lua: | $(BUILD_DIR)
 $(BUILD_DIR)/obj: | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/obj
 
-$(SILENCE_DETECTOR): tools/silence-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(SILENCE_DETECTOR) tools/silence-detector.swift
+$(SILENCE_DETECTOR): helpers/silence-detector.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(SILENCE_DETECTOR) helpers/silence-detector.swift
 	@echo "Built: $(SILENCE_DETECTOR)"
 
-$(STRUCTURE_ANALYZER): tools/structure-analyzer.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) tools/structure-analyzer.swift
+$(STRUCTURE_ANALYZER): helpers/structure-analyzer.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) helpers/structure-analyzer.swift
 	@echo "Built: $(STRUCTURE_ANALYZER)"
 
-$(BEAT_DETECTOR): tools/beat-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) tools/beat-detector.swift
+$(BEAT_DETECTOR): helpers/beat-detector.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) helpers/beat-detector.swift
 	@codesign --force --sign - $(BEAT_DETECTOR) >/dev/null 2>&1 || true
 	@echo "Built: $(BEAT_DETECTOR)"
 
 # Peak/RMS levels of a media file's audio (timeline.getAudioLevels shells out to it:
 # in-process AVFoundation audio decoding deadlocks inside Final Cut Pro).
-$(AUDIO_LEVELS): tools/audio-levels.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(AUDIO_LEVELS) tools/audio-levels.swift
+$(AUDIO_LEVELS): helpers/audio-levels.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(AUDIO_LEVELS) helpers/audio-levels.swift
 	@codesign --force --sign - $(AUDIO_LEVELS) >/dev/null 2>&1 || true
 	@echo "Built: $(AUDIO_LEVELS)"
 
@@ -383,7 +384,7 @@ deploy: $(OUTPUT)
 	done
 	@# Build (cached) and install the Parakeet/Whisper CLIs into both the
 	@# framework Resources and Application Support. Non-fatal by design.
-	@bash Scripts/build-transcribers.sh --framework "$(FW_DIR)" || \
+	@bash scripts/build-transcribers.sh --framework "$(FW_DIR)" || \
 		echo "[!] Transcription helpers unavailable — see build/*-build.log"
 	@cp "$(PARAKEET_BIN)" "$(TOOLS_DIR)/parakeet-transcriber" 2>/dev/null || true
 	@cp "$(WHISPER_BIN)" "$(TOOLS_DIR)/whisper-transcriber" 2>/dev/null || true
@@ -391,7 +392,7 @@ deploy: $(OUTPUT)
 	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/plugins"
 	@for d in examples menu lib auto; do mkdir -p "$(HOME)/Library/Application Support/SpliceKit/lua/$$d"; done
 	@for d in examples menu lib; do \
-		cp -n Scripts/lua/$$d/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/$$d/" 2>/dev/null || true; \
+		cp -n lua/$$d/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/$$d/" 2>/dev/null || true; \
 	done
 	@# Plugin bundles, when they built.
 	@if [ -d "$(VP9_DECODER_BUNDLE)" ]; then \
@@ -406,5 +407,5 @@ deploy: $(OUTPUT)
 		cp -R "$(MKV_IMPORT_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"; \
 		echo "MKV/WebM format reader installed"; \
 	fi
-	@bash Scripts/sign-app.sh "$(MODDED_APP)" "$(ENTITLEMENTS)"
+	@bash scripts/sign-app.sh "$(MODDED_APP)" "$(ENTITLEMENTS)"
 	@echo "=== Deployed successfully ==="

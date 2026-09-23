@@ -4,7 +4,7 @@
 #
 # The transcript panel (Parakeet engine) and the caption panel (Whisper engines)
 # both shell out to a small Swift CLI rather than linking the ASR stack into the
-# injected dylib. Those CLIs live in tools/<name>/ as SwiftPM packages and have
+# injected dylib. Those CLIs live in helpers/<name>/ as SwiftPM packages and have
 # to be compiled and placed somewhere the injected code looks for them.
 #
 # Install locations, matching the runtime search order in
@@ -23,7 +23,7 @@
 # does not re-download the ASR dependencies.
 #
 # Usage:
-#   ./Scripts/build-transcribers.sh [--framework <SpliceKit.framework path>]
+#   ./scripts/build-transcribers.sh [--framework <SpliceKit.framework path>]
 #                                   [--only <name>] [--all] [--force]
 #
 # By default only parakeet-transcriber is built — it is what the transcript
@@ -86,11 +86,11 @@ needs_rebuild() {
 
 build_one() {
     local name="$1"
-    local pkg_dir="$REPO_DIR/tools/$name"
+    local pkg_dir="$REPO_DIR/helpers/$name"
     local cached="$BUILD_DIR/$name"
 
     if [[ ! -f "$pkg_dir/Package.swift" ]]; then
-        warn "$name: no package at tools/$name — skipping"
+        warn "$name: no package at helpers/$name — skipping"
         return 1
     fi
 

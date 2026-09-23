@@ -25,9 +25,9 @@
     // 2. Standard tool locations (portable — no user-specific paths)
     NSString *home = NSHomeDirectory();
     NSArray *searchPaths = @[
-        [home stringByAppendingPathComponent:@"Applications/SpliceKit/tools/parakeet-transcriber"],
-        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/parakeet-transcriber"],
-        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/tools/parakeet-transcriber/.build/release/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Applications/SpliceKit/helpers/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/helpers/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/helpers/parakeet-transcriber/.build/release/parakeet-transcriber"],
     ];
     SpliceKit_log(@"[Transcript] Searching for parakeet-transcriber binary...");
     for (NSString *path in searchPaths) {
@@ -44,8 +44,8 @@
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *home = NSHomeDirectory();
     NSArray *candidates = @[
-        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/tools/parakeet-transcriber"],
-        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/helpers/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/helpers/parakeet-transcriber"],
     ];
     SpliceKit_log(@"[Transcript] Searching for Parakeet source project (Package.swift)...");
     for (NSString *path in candidates) {
@@ -493,7 +493,7 @@
         if ([e.reason containsString:@"launch path"]) {
             hint = @"\n\nThe binary may be corrupted. Try re-running the SpliceKit patcher.";
         } else if ([e.reason containsString:@"Permission"]) {
-            hint = @"\n\nTry: chmod +x ~/Applications/SpliceKit/tools/parakeet-transcriber";
+            hint = @"\n\nTry: chmod +x ~/Applications/SpliceKit/helpers/parakeet-transcriber";
         }
         [self setErrorState:[NSString stringWithFormat:@"Could not launch Parakeet transcriber: %@%@", e.reason, hint]];
         return;

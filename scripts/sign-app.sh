@@ -1,19 +1,19 @@
 #!/bin/bash
 #
 # Sign a patched Final Cut Pro: SpliceKit's plugin bundles, the SpliceKit
-# framework, then the app itself with entitlements.plist. Used by `make deploy`,
+# framework, then the app itself with patcher/entitlements.plist. Used by `make deploy`,
 # which `make install` (patcher/patch_fcp.sh) runs too.
 #
 # Apple's own frameworks and helpers keep their original signatures. Re-signing
 # them trips Final Cut Pro's internal integrity checks (ProAppSupport's
 # +[PCApp isiMovie], for one) and the app aborts on launch.
 #
-# Usage: Scripts/sign-app.sh <patched app> [entitlements.plist]
+# Usage: scripts/sign-app.sh <patched app> [entitlements.plist]
 
 set -u
 
 APP="${1:?usage: sign-app.sh <patched app> [entitlements.plist]}"
-ENTITLEMENTS="${2:-$(cd "$(dirname "$0")/.." && pwd)/entitlements.plist}"
+ENTITLEMENTS="${2:-$(cd "$(dirname "$0")/.." && pwd)/patcher/entitlements.plist}"
 
 if [[ ! -d "$APP" ]]; then
     echo "[X] No app at $APP" >&2

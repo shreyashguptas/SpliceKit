@@ -13,7 +13,7 @@
 //    2. On the main thread each clip resolves to its source media file and the
 //       point in that file where the clip starts (SpliceKit_audioSourceForItem,
 //       the same resolution timeline.getClipInfo reports).
-//    3. Off the main thread the `audio-levels` helper (tools/audio-levels.swift)
+//    3. Off the main thread the `audio-levels` helper (helpers/audio-levels.swift)
 //       decodes just that range of the file and returns per-slice levels.
 //       AVFoundation audio decoding inside Final Cut Pro's process deadlocks
 //       (see the beat-detector note in SpliceKitServerMusic.m), hence the helper.

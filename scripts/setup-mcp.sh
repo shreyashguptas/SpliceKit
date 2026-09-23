@@ -11,8 +11,8 @@
 # valid on the machine that generated it.
 #
 # Usage:
-#   ./Scripts/setup-mcp.sh
-#   ./Scripts/setup-mcp.sh --check    # report status, change nothing
+#   ./scripts/setup-mcp.sh
+#   ./scripts/setup-mcp.sh --check    # report status, change nothing
 #
 set -euo pipefail
 

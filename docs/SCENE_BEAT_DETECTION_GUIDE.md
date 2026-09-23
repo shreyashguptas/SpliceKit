@@ -154,7 +154,7 @@ The beat detector is a standalone Swift tool that must be built first:
 
 ```bash
 cd SpliceKit
-swiftc -O -o build/beat-detector tools/beat-detector.swift
+swiftc -O -o build/beat-detector helpers/beat-detector.swift
 ```
 
 The tool is searched in these locations:

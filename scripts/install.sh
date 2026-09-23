@@ -20,9 +20,9 @@
 #
 # Usage:
 #   make install                    # guided, asks before installing anything
-#   ./Scripts/install.sh --check    # report status, change nothing
-#   ./Scripts/install.sh --yes      # assume yes, never prompt (CI / scripting)
-#   ./Scripts/install.sh --no-launch  # do everything except open Final Cut Pro
+#   ./scripts/install.sh --check    # report status, change nothing
+#   ./scripts/install.sh --yes      # assume yes, never prompt (CI / scripting)
+#   ./scripts/install.sh --no-launch  # do everything except open Final Cut Pro
 #
 set -euo pipefail
 
@@ -44,7 +44,7 @@ LAUNCH_WAIT_SECONDS="${SPLICEKIT_LAUNCH_WAIT:-180}"
 LIVE_STATUS="skipped"          # verified | skipped | failed  (set by verify_live)
 CLAUDE_DESKTOP_SKIPPED=false   # set when setup-mcp.sh could not write its config
 
-# The MCP virtualenv, resolved the same way Scripts/setup-mcp.sh and the
+# The MCP virtualenv, resolved the same way scripts/setup-mcp.sh and the
 # Makefile resolve it, so every step agrees on which interpreter runs the server.
 VENV_DIR="${MCP_VENV:-$HOME/.venvs/splicekit-mcp}"
 case "$VENV_DIR" in
@@ -424,11 +424,11 @@ ensure_patched_app() {
 ensure_mcp() {
     step "MCP server"
     if $CHECK_ONLY; then
-        "$REPO_DIR/Scripts/setup-mcp.sh" --check
+        "$REPO_DIR/scripts/setup-mcp.sh" --check
         return $?
     fi
     local rc=0
-    "$REPO_DIR/Scripts/setup-mcp.sh" || rc=$?
+    "$REPO_DIR/scripts/setup-mcp.sh" || rc=$?
     case $rc in
         0) ;;
         3) CLAUDE_DESKTOP_SKIPPED=true ;;   # everything else done; Claude Desktop was running

@@ -50,7 +50,7 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
             tool = p
             break
     if not tool:
-        return "Error: beat-detector tool not found. Re-run the SpliceKit patcher to install tools, or build from source with: swiftc -O -o build/beat-detector tools/beat-detector.swift"
+        return "Error: beat-detector tool not found. Re-run the SpliceKit patcher to install tools, or build from source with: swiftc -O -o build/beat-detector helpers/beat-detector.swift"
 
     try:
         result = subprocess.run(
@@ -131,7 +131,7 @@ def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
     """Run structure-analyzer and return parsed JSON dict (or dict with 'error' key)."""
     tool = _find_structure_analyzer()
     if not tool:
-        return {"error": "structure-analyzer tool not found. Build with: swiftc -O -o build/structure-analyzer tools/structure-analyzer.swift"}
+        return {"error": "structure-analyzer tool not found. Build with: swiftc -O -o build/structure-analyzer helpers/structure-analyzer.swift"}
     try:
         result = subprocess.run(
             [tool, file_path, str(sensitivity), str(min_bpm), str(max_bpm)],

@@ -93,7 +93,7 @@ usage() {
     - Launch: the renamed copy in /Applications
     - Connect: 127.0.0.1:9876 (JSON-RPC)
     - MCP config: .mcp.json is created in the repo root
-    - Claude Desktop: run ./Scripts/setup-mcp.sh
+    - Claude Desktop: run ./scripts/setup-mcp.sh
 
   Requirements:
     - macOS 14+
@@ -438,13 +438,13 @@ MCP_SERVER="$REPO_DIR/mcp/server.py"
 # What the completion banner will say about MCP. Starts pessimistic and is
 # upgraded only where a config is actually written, so the summary can never
 # tell the user they are configured when they are not.
-MCP_STATUS_LINE="Not configured — run ./Scripts/setup-mcp.sh"
+MCP_STATUS_LINE="Not configured — run ./scripts/setup-mcp.sh"
 
 if [[ "${SPLICEKIT_SKIP_MCP_CONFIG:-}" == "1" ]]; then
     # `make install` runs the MCP server's full self-check and writes the configs
     # itself after this script returns. Writing .mcp.json here would point a
     # client at a server nothing has verified yet.
-    info "Left to make install (Scripts/setup-mcp.sh runs next)"
+    info "Left to make install (scripts/setup-mcp.sh runs next)"
     MCP_STATUS_LINE="Set up by the next step of make install"
 elif [[ -f "$MCP_SERVER" ]]; then
     # Prefer the dedicated virtualenv: a bare `python3` usually lacks the `mcp`
@@ -498,7 +498,7 @@ elif [[ -f "$MCP_SERVER" ]]; then
 
     # Absolute path: this must land next to the repo, not in the caller's cwd.
     MCP_CONFIG="$REPO_DIR/.mcp.json"
-    MCP_MERGE_TOOL="$REPO_DIR/Scripts/claude_config.py"
+    MCP_MERGE_TOOL="$REPO_DIR/scripts/claude_config.py"
 
     # Only claim success where something was actually written — a patch run that
     # reports "MCP config written" after deliberately skipping the write sends
@@ -507,7 +507,7 @@ elif [[ -f "$MCP_SERVER" ]]; then
         # No interpreter can actually run the server, so there is no honest
         # value to write. Leave any existing config alone and say what to run.
         warn "Not writing $MCP_CONFIG — no usable Python to run the MCP server"
-        warn "Run ./Scripts/setup-mcp.sh, which creates the venv and writes the config"
+        warn "Run ./scripts/setup-mcp.sh, which creates the venv and writes the config"
     elif [[ -f "$MCP_MERGE_TOOL" ]]; then
         # Merge rather than overwrite. This file can already hold other MCP
         # servers for the project, and clobbering it would delete them silently.
@@ -521,7 +521,7 @@ elif [[ -f "$MCP_SERVER" ]]; then
         # Nothing to merge with safely — leave the existing file alone rather
         # than destroying entries we cannot read.
         warn "Cannot find $MCP_MERGE_TOOL; leaving existing $MCP_CONFIG untouched"
-        warn "Add the splicekit entry by hand, or run ./Scripts/setup-mcp.sh"
+        warn "Add the splicekit entry by hand, or run ./scripts/setup-mcp.sh"
     else
         cat > "$MCP_CONFIG" << MCPJSON
 {
@@ -536,7 +536,7 @@ MCPJSON
         log "MCP config written to $MCP_CONFIG"
         MCP_STATUS_LINE="Configured in .mcp.json (restart Claude Code to load)"
     fi
-    info "For Claude Desktop, run: ./Scripts/setup-mcp.sh"
+    info "For Claude Desktop, run: ./scripts/setup-mcp.sh"
 else
     warn "MCP server not found at $MCP_SERVER"
 fi
@@ -562,7 +562,7 @@ ${BOLD}Check logs:${NC}
   ~/Library/Logs/SpliceKit/splicekit.log
 
 ${BOLD}Python client:${NC}
-  python3 $REPO_DIR/Scripts/splicekit_client.py
+  python3 $REPO_DIR/scripts/splicekit_client.py
 
 ${BOLD}MCP server:${NC}
   $MCP_STATUS_LINE

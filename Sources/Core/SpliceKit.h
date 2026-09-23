@@ -115,7 +115,7 @@ NSDictionary *SpliceKit_getPluginMetadataSnapshot(void);
 void SpliceKit_installBridgeMetadata(void);
 NSDictionary *SpliceKit_builtinMetadataForMethod(NSString *method);
 // The parameters each built-in method reads. Generated from the handlers by
-// tools/gen_bridge_params.py into SpliceKitBridgeParams.m.
+// scripts/gen_bridge_params.py into SpliceKitBridgeParams.m.
 NSDictionary<NSString *, NSString *> *SpliceKit_bridgeParamsForMethod(NSString *method);
 
 // Mirror every haptic FCP fires onto the JSON-RPC event channel so external

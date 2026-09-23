@@ -262,7 +262,7 @@ attached audio there, which is not checked). Read-only.
 
 Not Final Cut Pro's audio meters (the mix during playback) and not its timeline waveforms (which
 follow the clip's volume and effects): the levels are those of the source media file as decoded by
-SpliceKit's `audio-levels` helper (`tools/audio-levels.swift`, built by `make install`), so FCP's
+SpliceKit's `audio-levels` helper (`helpers/audio-levels.swift`, built by `make install`), so FCP's
 volume, fades, effects, retiming and the mix of all concurrent clips are NOT applied, the same way
 `get_clip_info`'s frame is the raw footage. Channels are pooled, never mixed: a slice's peak is the
 loudest sample in any channel and its RMS is over all channels' samples (for a file with one audio

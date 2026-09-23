@@ -46,8 +46,8 @@ SpliceKitProcessOutcome SpliceKit_runProcess(NSString *path,
 // The first executable found for a SpliceKit helper tool called `name`, in this order:
 //   the environment variable `envOverride` (Final Cut Pro's environment; nil: none),
 //   the patched app's SpliceKit.framework/Versions/A/Resources/<name>,
-//   ~/Applications/SpliceKit/tools/<name>,
-//   ~/Library/Application Support/SpliceKit/tools/<name>,
+//   ~/Applications/SpliceKit/helpers/<name>,
+//   ~/Library/Application Support/SpliceKit/helpers/<name>,
 //   ~/Library/Caches/SpliceKit/build/<name>.
 // nil when none is executable.
 NSString *SpliceKit_findHelperTool(NSString *name, NSString *envOverride);

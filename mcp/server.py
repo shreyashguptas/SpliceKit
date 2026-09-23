@@ -11,7 +11,7 @@ The tools are intentionally verbose in their docstrings because that's what the
 AI model sees when deciding which tool to use and how to call it.
 
 This file is the entry point MCP clients launch by path (.mcp.json, the Claude
-Desktop config, Scripts/setup-mcp.sh). The server itself is the splicekit_mcp
+Desktop config, scripts/setup-mcp.sh). The server itself is the splicekit_mcp
 package beside it; see splicekit_mcp/__init__.py for its layout.
 """
 

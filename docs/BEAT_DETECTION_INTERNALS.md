@@ -509,7 +509,7 @@ detect_beats(file_path="/path/to/media.mp4")
 ```
 
 This path is implemented by the standalone Swift tool in
-`tools/beat-detector.swift`.
+`helpers/beat-detector.swift`.
 
 Important differences from the built-in FCP path:
 

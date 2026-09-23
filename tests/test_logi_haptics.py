@@ -11,7 +11,7 @@ class LogiHapticsIntegrationTests(unittest.TestCase):
 
     def test_plugin_targets_logi_service_runtime(self):
         project = self.read(
-            "Plugins/LogiHaptics/FCPHapticsPlugin/src/FCPHapticsPlugin.csproj"
+            "plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.csproj"
         )
         self.assertIn("<TargetFramework>net10.0</TargetFramework>", project)
 
@@ -29,13 +29,13 @@ class LogiHapticsIntegrationTests(unittest.TestCase):
 
     def test_event_contract_matches_plugin_and_mappings(self):
         plugin = self.read(
-            "Plugins/LogiHaptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs"
+            "plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs"
         )
         definitions = self.read(
-            "Plugins/LogiHaptics/FCPHapticsPlugin/src/package/events/DefaultEventSource.yaml"
+            "plugins/logi-haptics/FCPHapticsPlugin/src/package/events/DefaultEventSource.yaml"
         )
         mappings = self.read(
-            "Plugins/LogiHaptics/FCPHapticsPlugin/src/package/events/extra/eventMapping.yaml"
+            "plugins/logi-haptics/FCPHapticsPlugin/src/package/events/extra/eventMapping.yaml"
         )
         for event in (
             "viewer_snap",

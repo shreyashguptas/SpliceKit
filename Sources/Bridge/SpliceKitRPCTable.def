@@ -3,7 +3,7 @@
 // The single list of built-in RPC names. SpliceKitServer.m includes it to build the
 // dispatch table (name -> handler), SpliceKitBridgeMetadata.m to build sBuiltinMetadata
 // (what bridge.describe returns and what the busy/modal guard reads), and
-// tools/gen_bridge_params.py reads it to find each method's handler.
+// scripts/gen_bridge_params.py reads it to find each method's handler.
 //
 //   SK_RPC(name, handler, safety, summary)
 //     name     C string literal, the RPC method name
@@ -16,7 +16,7 @@
 //
 // To add an RPC: write the handler function (declare it in SpliceKitServerInternal.h,
 // or SpliceKitServerHandlers.h if other files call it too),
-// add one row here, then run `python3 tools/gen_bridge_params.py` so bridge.describe
+// add one row here, then run `python3 scripts/gen_bridge_params.py` so bridge.describe
 // lists the parameters it reads.
 //
 // Prefix routes (audioBusDiagnostics.*) and plugin methods registered with

@@ -50,7 +50,7 @@ then rebuild — Logi Options+ hot-reloads the mapping.
 ## Build
 
 ```bash
-cd Plugins/LogiHaptics/FCPHapticsPlugin
+cd plugins/logi-haptics/FCPHapticsPlugin
 dotnet build src/FCPHapticsPlugin.csproj -c Release
 ```
 
@@ -58,7 +58,7 @@ The current Logi Plugin Service 6.4 SDK targets .NET 10, so the .NET 10 SDK
 must be installed and selected by `dotnet` before building.
 
 The build target writes a `.link` file pointing at
-`bin/Release/` into `~/Library/Application Support/Logi/LogiPluginService/Plugins/`,
+`bin/Release/` into `~/Library/Application Support/Logi/LogiPluginService/plugins/`,
 then `open loupedeck:plugin/FCPHaptics/reload`s the running service so the
 plugin shows up live without restarting Logi Options+.
 

@@ -588,7 +588,7 @@ static NSString *SpliceKit_structureCaptionText(id caption) {
     return [text isKindOfClass:[NSString class]] ? text : nil;
 }
 
-// Exact uppercase labels written by structure.generateCaptions (see tools/structure-analyzer + paste).
+// Exact uppercase labels written by structure.generateCaptions (see helpers/structure-analyzer.swift + paste).
 static BOOL SpliceKit_structureCaptionTextIsToolGenerated(NSString *text) {
     if (text.length == 0) return NO;
 

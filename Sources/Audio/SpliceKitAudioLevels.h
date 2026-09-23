@@ -4,7 +4,7 @@
 //
 //  timeline.getAudioLevels: peak and RMS audio levels over time for timeline clips,
 //  mapped to timeline seconds. The decoding runs in the `audio-levels` helper CLI
-//  (tools/audio-levels.swift): AVFoundation audio decoding inside Final Cut Pro's
+//  (helpers/audio-levels.swift): AVFoundation audio decoding inside Final Cut Pro's
 //  own process deadlocks, so nothing here touches AVAssetReader.
 //
 
