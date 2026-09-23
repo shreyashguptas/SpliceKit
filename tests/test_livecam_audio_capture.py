@@ -3,13 +3,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "Sources" / "SpliceKitLiveCam.m"
+# SpliceKitLiveCam.m and the files split out of it (SpliceKitLiveCam*.m).
+SOURCES = sorted((ROOT / "Sources").glob("SpliceKitLiveCam*.m"))
+
+
+def read_livecam_source():
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 class LiveCamAudioCaptureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = SOURCE.read_text(encoding="utf-8")
+        cls.source = read_livecam_source()
 
     def test_writer_uses_session_aware_audio_settings(self):
         self.assertIn(

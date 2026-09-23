@@ -8,8 +8,8 @@
 # to be compiled and placed somewhere the injected code looks for them.
 #
 # Install locations, matching the runtime search order in
-# SpliceKitTranscriptPanel.m (parakeetTranscriberPath) and
-# SpliceKitCaptionPanel.m (transcriberBinaryPathForName:):
+# SpliceKitTranscriptPanel+Parakeet.m (parakeetTranscriberPath) and
+# SpliceKitCaptionPanel+Transcription.m (transcriberBinaryPathForName:):
 #
 #   1. <patched FCP>.app/Contents/Frameworks/SpliceKit.framework/.../Resources/
 #      Preferred: travels with the app, survives a home directory rename, and
