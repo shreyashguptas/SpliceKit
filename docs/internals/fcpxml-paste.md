@@ -1,13 +1,281 @@
-# FCP Pasteboard & Media Linking: Restoring Clips with Attributes
+# FCPXML Paste and the FCP Pasteboard
 
-> **Tested**: April 2026, FCP 11.1, macOS Sequoia 15.4. Findings from programmatic
-> testing via NSPasteboard (Swift) + AppleScript automation against a live FCP instance.
+How SpliceKit gets FCPXML onto a timeline through Final Cut Pro's paste, and what
+was learned about FCP's pasteboard along the way. Two parts:
+
+1. **FCPXML direct paste** — the `pasteAnchored:` / `paste:` swizzle that converts
+   FCPXML on the pasteboard into FCP's native clipboard format before the paste runs.
+   This is what `paste_fcpxml`, `generate_captions` and `timeline_action("paste")` rely on.
+   Added April 2026 against FCP 12.0 (screen freeze, caching, consolidated function,
+   `paste:` support and playhead restore are all implemented).
+2. **Pasteboard and media linking** — April 2026 research (FCP 11.1) into which
+   pasteboard types FCP accepts and how clip attributes survive a paste.
 
 ---
 
-## Tested Findings Summary
+## Part 1: FCPXML direct paste
 
-### What Works
+### Problem
+
+FCP's `pasteAnchored:` only handles native `proFFPasteboardUTI` clipboard data —
+a binary `NSKeyedArchiver` plist containing serialized `FFPasteboardItem` objects.
+When FCPXML is on the pasteboard (from `paste_fcpxml`, `generate_captions`, or
+external tools), `pasteAnchored:` silently ignores it.
+
+The caption system previously worked around this with a 6-step pipeline:
+1. Build FCPXML with titles
+2. Import via `FFXMLTranslationTask` → creates temp project
+3. `loadEditorForSequence:` → switch to temp project
+4. `selectAll:` + `copy:` → serialize to native clipboard
+5. `loadEditorForSequence:` → switch back to user project
+6. `pasteAnchored:` → paste native data
+
+This took ~6 seconds with visible project switching, multiple sleep/poll cycles,
+and fragile state management.
+
+### Solution: `pasteAnchored:` Swizzle
+
+SpliceKit swizzles `-[FFAnchoredTimelineModule pasteAnchored:]` to transparently
+convert FCPXML to native clipboard format before the original paste runs.
+
+#### How It Works
+
+```
+User calls paste_fcpxml() or timeline_action("pasteAsConnected") / ("paste")
+  → pasteAnchored: or paste: fires
+    → SpliceKit_handleFCPXMLPaste() checks hasEdits: on pasteboard
+      → YES: call original (normal native paste)
+      → NO: call SpliceKit_convertFCPXMLToNativeClipboard()
+        → Check containsXML? NO → return, call original
+        → Check cache (FNV-1a hash of XML + library UUID)
+          → HIT: write cached native data to pasteboard, return YES
+          → MISS: continue with import pipeline
+        → Save playhead position
+        → Freeze screen (NSDisableScreenUpdates + 8s safety timeout)
+        → Inject unique project name (_SKPaste_XXXXX)
+        → Import via FFXMLTranslationTask
+        → Poll _deepLoadedSequences for new project (by name)
+        → loadEditorForSequence: → switch to temp project
+        → selectAll: + copy: → native data on pasteboard
+        → Cache the native data for future pastes
+        → Switch back to user project, restore playhead
+        → Clean up temp project
+        → Unfreeze screen
+      → Call original paste (now finds native data)
+```
+
+#### Key Design Decisions
+
+**Shared conversion function** (`SpliceKit_convertFCPXMLToNativeClipboard`)
+
+The core conversion logic is a standalone function callable from both the
+paste swizzles and the caption system. Declared in `Sources/Core/SpliceKit.h` for use
+by the caption panel (`Sources/Panels/Captions/`). Returns YES if native data is on the pasteboard.
+
+**Both paste modes swizzled** (Improvement #8)
+
+`pasteAnchored:` (paste as connected) and `paste:` (insert paste) are both
+swizzled through a shared handler `SpliceKit_handleFCPXMLPaste()`. Both go
+through the same `_addItemsWithPasteboard:` internal path with different
+`pasteMode` values.
+
+**Screen freeze** (Improvement #3)
+
+`NSDisableScreenUpdates()` hides the brief project switch flicker. A
+`dispatch_after` safety timeout of 8 seconds ensures the screen unfreezes
+even if the pipeline hangs.
+
+**Caching** (Improvement #6)
+
+Native clipboard data is cached in an `NSCache` keyed by `libraryUUID_hash`.
+The FNV-1a hash of the FCPXML string provides fast, collision-resistant
+lookup. Cache has a 50MB cost limit (~3,000 typical clips). Repeat pastes
+of the same FCPXML skip the entire import pipeline.
+
+**Playhead restoration** (Improvement #10)
+
+The playhead position is saved before the project switch and restored after
+switching back, ensuring pastes land at the expected timeline position.
+
+**Swizzle point: `pasteAnchored:`/`paste:` not `editsFromPasteboard:`**
+
+`editsFromPasteboard:` is called while holding FFModelLock's write lock.
+Switching projects while holding that lock would deadlock. The paste methods
+are called before the lock, giving us freedom to switch projects.
+
+**Unique project name injection**
+
+The FCPXML's `<project name="...">` is replaced with `_SKPaste_XXXXX` via
+regex before import. This ensures we find our exact temp project in
+`_deepLoadedSequences`, even when the library contains dozens of old
+temp projects from previous caption runs.
+
+**Run loop pumping instead of sleep**
+
+The swizzle runs on the main thread. Using `[NSThread sleep:]` would block
+the run loop and prevent FCP from processing the import. We use
+`[[NSRunLoop currentRunLoop] runUntilDate:]` to pump events between polls.
+
+#### Consolidation with Caption System (Improvement #7)
+
+`addCaptionTitlesDirectlyToTimeline` (now in `Sources/Panels/Captions/SpliceKitCaptionPanel+Timeline.m`) has its own
+import-switch-copy-paste pipeline. It can be refactored to use the shared
+`SpliceKit_convertFCPXMLToNativeClipboard()`, keeping only the caption-specific
+post-processing (position offset, text verification). See the NOTE comment
+at the top of that method for the refactoring plan.
+
+### FCP Internal Architecture (from decompilation)
+
+#### The Paste Call Chain
+
+```
+pasteAnchored:
+  v7 = NSPasteboardNameGeneral
+  skimmingTime → atTime
+  _addItemsWithPasteboard:atTime:pasteMode:backtimed:useSelectedRange:
+    trackType:container:changesUnderActionHandler:
+      FFPasteboard.initWithName: (wraps general pasteboard)
+      FFModelLock._writeLock
+      FFAnchoredSequence.editsFromPasteboard:trackType:videoProps:
+        displayDropFrame:isLoneTransition:userInfoMap:
+          FFPasteboard.hasEdits: → checks for native data categories
+          FFPasteboard.newEditsWithProject:mediaByReferenceOnly:options:
+            → _newObjectsWithProject:assetFlags:fromURL:options:userInfoMap:
+              → _newObjectsWithProjectCore: (THE CORE)
+      FFPasteboard.newMarkersWithProject:options:
+      FFModelLock._writeUnlock
+      FFAnchoredSequence.actionAddItemsOnPasteboard:editsToAdd:videoProps:
+        displayDropFrame:atTime:pasteMode:backtimed:rangeOfMedia:rootItem:
+        needsMediaReferencesChecking:needsConsolidatedEffectsChecking:error:
+```
+
+#### FCP's Built-in FCPXML Paste Path (Blocked)
+
+`_newObjectsWithProjectCore:` at address `0x4B5640` in Flexo actually HAS
+complete FCPXML import handling:
+
+```c
+// At LABEL_59: No FFPasteboardItem found
+if ([pasteboard containsXML]) {
+    task = [FFXMLTranslationTask translationTaskForPasteboard:pb];
+    if (task && !task.error && task.contentType == 2) {
+        // Set up import options, import, get clips
+        [task importClipsWithOptions:options taskDelegate:delegate];
+        imported = [task clipsAndRangesImportedInEvent:targetEvent];
+        for (item in imported) {
+            if (!item.object.isProject) result.add(item);
+        }
+    }
+}
+```
+
+**Three gates prevent this from working:**
+
+| Gate | Where | What blocks |
+|------|-------|-------------|
+| `hasEdits:` | `editsFromPasteboard:` | Returns NO for FCPXML → `newEditsWithProject:` never called |
+| `contentType == 2` | `_newObjectsWithProjectCore:` | Only `<project>`-rooted FCPXML passes (not `<library>` wrapped) |
+| `!isProject` filter | `_newObjectsWithProjectCore:` | Imported project objects are excluded → 0 clips returned |
+
+No FCPXML structure satisfies all three simultaneously:
+- `<library>` wrapped → contentType=0 (fails gate 2)
+- `<event>` wrapped → contentType=1 (fails gate 2)
+- `<project>` only → contentType=2 (passes gate 2, but all imports are project objects → fails gate 3)
+- Spine-only → contentType varies, rejected by `importClipsWithOptions:` entirely
+
+#### Native Clipboard Format
+
+When FCP copies clips, the pasteboard contains exactly one type:
+`com.apple.flexo.proFFPasteboardUTI`
+
+The data is an `NSKeyedArchiver` binary plist (~15KB) with three top-level keys:
+
+| Key | Content |
+|-----|---------|
+| `ffpasteboardobject` | NSKeyedArchiver data (FFAnchoredMediaComponent, FFAsset, FFEffectStack, etc.) |
+| `ffpasteboardcopiedtypes` | Metadata dict (e.g. `{"pb_anchoredObject": {"count": 1}}`) |
+| `kffmodelobjectIDs` | Empty array |
+
+The library document ID is embedded inside the NSKeyedArchiver data, not at top level.
+
+#### Key Methods
+
+| Method | Class | Purpose |
+|--------|-------|---------|
+| `hasEdits:` | FFPasteboard | Checks for native edit/anchoredObject categories |
+| `newEditsWithProject:mediaByReferenceOnly:options:userInfoMap:` | FFPasteboard | Deserializes native data → clip objects |
+| `writeAnchoredObjects:options:` | FFPasteboard | Serializes clip objects → native pasteboard format |
+| `containsXML` | NSPasteboard (Interchange) | Checks for FCPXML on pasteboard |
+| `initForPasteboard:` | FFXMLTranslationTask | Parses FCPXML from pasteboard |
+| `importClipsWithOptions:` | FFXMLTranslationTask | Imports parsed FCPXML into library |
+| `importedEvents` | FFXMLTranslationTask | Returns FFMediaEventProject array of imported events |
+| `allImportedClipsAndRanges` | FFXMLTranslationTask | Returns FigTimeRangeAndObject set (often empty) |
+| `editsFromPasteboard:trackType:videoProps:displayDropFrame:isLoneTransition:userInfoMap:` | FFAnchoredSequence | Main paste pipeline entry point |
+| `loadEditorForSequence:` | PEEditorContainerModule | Switches active timeline |
+| `_deepLoadedSequences` | FFLibrary | Returns all loaded sequences in library |
+
+#### FCPXML Pasteboard Types
+
+| Type | UTI String | Required? |
+|------|-----------|-----------|
+| Generic | `com.apple.finalcutpro.xml` | YES — must be present for paste |
+| v1-12 | `com.apple.finalcutpro.xml.v1-12` | Optional |
+| v1-13 | `com.apple.finalcutpro.xml.v1-13` | Optional |
+| v1-14 | `com.apple.finalcutpro.xml.v1-14` | Optional (FCP 11.1+) |
+
+Note: v1-11 and earlier are NOT in FCP's readable types. Generic alone is sufficient.
+Version-specific UTI alone (without generic) does NOT enable paste.
+
+#### FCPXML contentType Values
+
+| Value | Root element | Result |
+|-------|-------------|--------|
+| 0 | `<library>` | Rejected by contentType check |
+| 1 | `<event>` | Rejected by contentType check |
+| 2 | `<project>` | Passes check but imports as project (filtered out) |
+
+### Files
+
+| File | What |
+|------|------|
+| `Sources/Bridge/SpliceKitServerFCPXML.m` | Swizzle implementation (`SpliceKit_swizzled_pasteAnchored`) |
+| `Sources/Core/SpliceKit.h` | Function declaration (`SpliceKit_installFCPXMLPasteSwizzle`) |
+| `Sources/Core/SpliceKit.m` | Install call in `SpliceKit_appDidLaunch()` |
+
+### Tested Approaches (What Didn't Work)
+
+| # | Approach | Result |
+|---|----------|--------|
+| 1 | Spine-only FCPXML → `importClipsWithOptions:` | Rejected — needs `<library>` wrapper |
+| 2 | FCPXML on pasteboard → `pasteAnchored:` directly | Silently ignored — needs native format |
+| 3 | Full FCPXML matching existing project name | Creates separate project, no merge |
+| 4 | FCPXML → `anchorWithPasteboard:` | No effect (expects effect IDs, not XML) or crash |
+| 5 | `FFXMLTranslationTask.exportToPasteboard:` → paste | Exports XML format, not native |
+| 6 | Direct model copy (`addAnchoredItemsObject:`) | Objects can't be moved between sequences |
+| 7 | `timelineView:addItems:toPasteboardWithName:` | Items from unloaded sequences are empty stubs |
+| 8 | `writeAnchoredObjects:options:` with spine items | Writes native data but spine gaps don't paste as connected |
+| 9 | Swizzle `hasEdits:` to unlock built-in FCPXML path | contentType + isProject gates still block |
+
+### Related Documentation
+
+- [Pasteboard and media linking](#part-2-pasteboard-and-media-linking-historical-research) (below) — pasteboard format testing results
+- [caption-system.md](caption-system.md) — Caption system architecture
+- [../reference/fcpxml-format.md](../reference/fcpxml-format.md) — FCPXML specification
+
+---
+
+## Part 2: Pasteboard and media linking (historical research)
+
+> **Historical research.** These findings come from April 2026 testing against FCP 11.1
+> on macOS Sequoia 15.4, using NSPasteboard from a Swift CLI and, at the time, AppleScript
+> to activate FCP and send Cmd+V / Cmd+Z. SpliceKit no longer allows AppleScript or
+> synthetic keystrokes (see `.claude/CLAUDE.md`); the AppleScript steps below record how
+> the experiments were run, not a method to reuse. Paste from code through the bridge
+> (`paste_fcpxml`, `timeline_action("paste")`).
+
+### Tested Findings Summary
+
+#### What Works
 
 | Approach | Result |
 |----------|--------|
@@ -23,7 +291,7 @@
 | FCPXML with `<timeMap>` (retiming/speed) | **Works** — clip imported (speed verification pending) |
 | Volume restore via `inspector.set` after import | **Works** — `inspector.set("volume", -8)` confirmed |
 
-### What Doesn't Work
+#### What Doesn't Work
 
 | Approach | Result |
 |----------|--------|
@@ -36,7 +304,7 @@
 | Multi-clip per-clip volume (different volumes each) | **Partial** — all clips imported but bridge applies last volume to all selected |
 | `adjust-volume` preserved by import itself | **No** — always defaults to 0dB, must use post-import `inspector.set` |
 
-### Crashes Found
+#### Crashes Found
 
 - **Markers + layout**: Importing FCPXML with markers can crash FCP during timeline layout.
   Crash in `TLKMarkerLayer layoutSublayers` → `CALayer setPosition:` with NaN/Inf position.
@@ -44,7 +312,7 @@
 - **`newEditsWithProject:mediaByReferenceOnly:options:`**: Calling this on FFPasteboard with FCPXML
   data crashes FCP. This method is not a viable path for timeline insertion.
 
-### Native Clipboard Format (Corrections from Testing)
+#### Native Clipboard Format (Corrections from Testing)
 
 When FCP copies a clip, the pasteboard contains **exactly one type**: `com.apple.flexo.proFFPasteboardUTI`.
 No FCPXML types are written. No promise types.
@@ -66,7 +334,7 @@ The NSKeyedArchiver data contains 265 objects including these classes:
 `FFHeColorEffect`, `FFHeConformEffect`, `FFIntrinsicColorConformEffect`, `FFMediaRep`,
 `FFMediaResource`, `FFMediaResourceMap`, `FFAudioClipComponentsLayoutMap`, `FFObjectDict`.
 
-### Behavioral Notes
+#### Behavioral Notes
 
 - **No new event created**: FCPXML paste with `<library><event name="Paste Test">` does NOT create
   a visible event in the sidebar. Clips are appended directly to the current timeline's spine.
@@ -93,7 +361,7 @@ The NSKeyedArchiver data contains 265 objects including these classes:
 
 ---
 
-## The Problem
+### The Problem
 
 When building an extension that saves SFX (or any clips) from the FCP timeline and later restores them, you hit a fundamental conflict in how Final Cut Pro handles clipboard data:
 
@@ -105,9 +373,9 @@ The root cause is that FCP's native clipboard format stores **media references**
 
 ---
 
-## How FCP's Pasteboard System Works
+### How FCP's Pasteboard System Works
 
-### Three-Layer Architecture
+#### Three-Layer Architecture
 
 1. **IXXMLPasteboardType** (Interchange framework) — Defines UTI type strings for FCPXML data on the pasteboard. Class methods like `current`, `previous`, `generic`, `string` each return a UTI string for a specific FCPXML version.
 
@@ -115,7 +383,7 @@ The root cause is that FCP's native clipboard format stores **media references**
 
 3. **FFPasteboard** (Flexo framework) — The coordinator with 76 methods. Reads/writes `FFPasteboardItem` objects to/from the underlying `NSPasteboard`.
 
-### Native Clipboard Data Format
+#### Native Clipboard Data Format
 
 When FCP writes clips to the pasteboard, `FFPasteboardItem` serializes them as an `NSPropertyList` dictionary.
 
@@ -140,7 +408,7 @@ When FCP writes clips to the pasteboard, `FFPasteboardItem` serializes them as a
 > classes like `FFAnchoredMediaComponent`, `FFAsset`, `FFEffectStack`, etc. The library document ID
 > is embedded inside this archive, not as a separate top-level key.
 
-### The UTI Types
+#### The UTI Types
 
 **Native (internal)**: `com.apple.flexo.proFFPasteboardUTI` (Pro version). A separate consumer/iMovie variant exists. A promise UTI also exists for deferred data loading.
 
@@ -154,7 +422,7 @@ When FCP writes clips to the pasteboard, `FFPasteboardItem` serializes them as a
 
 These public UTI strings are what `IXXMLPasteboardType.current`, `.generic`, etc. return internally. You can use the public strings directly without runtime discovery.
 
-### Readable Types (What FCP Accepts on Paste)
+#### Readable Types (What FCP Accepts on Paste)
 
 FCP's `+[FFPasteboard readableTypes]` registers these types in order:
 
@@ -165,11 +433,11 @@ FCP's `+[FFPasteboard readableTypes]` registers these types in order:
 
 ---
 
-## The Two Paste Paths (Critical Discovery)
+### The Two Paste Paths (Critical Discovery)
 
 FCP's core paste decoder (`_newObjectsWithProjectCore:assetFlags:fromURL:options:userInfoMap:`) has **two completely separate code paths**:
 
-### Path 1: Native FFPasteboardItem
+#### Path 1: Native FFPasteboardItem
 
 ```
 If pasteboard contains FFPasteboardUTI type:
@@ -187,7 +455,7 @@ This is why stored clipboard data fails — the `documentID` (embedded inside th
 data) and other object references target a library state that no longer matches, or the media
 asset isn't registered in the current project.
 
-### Path 2: FCPXML on Pasteboard
+#### Path 2: FCPXML on Pasteboard
 
 ```
 If pasteboard does NOT contain FFPasteboardItem
@@ -207,7 +475,7 @@ If pasteboard does NOT contain FFPasteboardItem
 
 ---
 
-## Solution 1: FCPXML Pasteboard (Recommended) ✅ TESTED
+### Solution 1: FCPXML Pasteboard (Recommended) ✅ TESTED
 
 Write FCPXML data directly to `NSPasteboard` using `IXXMLPasteboardType` UTI strings. FCP's XML paste path will import the media and preserve all attributes declared in the XML.
 
@@ -217,7 +485,7 @@ Write FCPXML data directly to `NSPasteboard` using `IXXMLPasteboardType` UTI str
 > opacity, and audioRole attributes. No new events are created in the sidebar — clips go
 > directly into the active timeline's spine.
 
-### Step 1: Use the Public FCPXML Pasteboard UTI
+#### Step 1: Use the Public FCPXML Pasteboard UTI
 
 Apple documents these pasteboard types publicly. No runtime discovery needed:
 
@@ -237,7 +505,7 @@ FCP checks for the highest version-specific type first, then falls back to gener
 > **Tested**: The generic UTI is **mandatory**. Writing only `com.apple.finalcutpro.xml.v1-11`
 > (without the generic type) leaves FCP's Paste menu item disabled. Always include the generic type.
 
-### Step 2: Build FCPXML with Asset + Attributes
+#### Step 2: Build FCPXML with Asset + Attributes
 
 ```objc
 NSString *fcpxml = [NSString stringWithFormat:
@@ -300,7 +568,7 @@ FCPXML supports a wide range of attributes:
 <adjust-blend amount="0.75" mode="14"/>
 ```
 
-### Step 3: Write to Pasteboard
+#### Step 3: Write to Pasteboard
 
 ```objc
 NSData *xmlData = [fcpxml dataUsingEncoding:NSUTF8StringEncoding];
@@ -312,7 +580,7 @@ NSPasteboard *pb = [NSPasteboard generalPasteboard];
 [pb setData:xmlData forType:@"com.apple.finalcutpro.xml.v1-11"];
 ```
 
-### Step 3 (Alternative): Use the Official Promise Pattern
+#### Step 3 (Alternative): Use the Official Promise Pattern
 
 Apple's documented approach for workflow extensions uses `NSPasteboardItemDataProvider` to lazily provide FCPXML data. This is the official way to drag clips into FCP:
 
@@ -346,7 +614,7 @@ NSPasteboard *pb = [NSPasteboard generalPasteboard];
 
 This is particularly useful for drag-and-drop: FCP requests the FCPXML only when the drop occurs, not when the drag starts.
 
-### Step 4: Trigger Paste
+#### Step 4: Trigger Paste
 
 Either let the user Cmd+V, or programmatically:
 
@@ -355,7 +623,7 @@ id timelineModule = /* get active FFAnchoredTimelineModule */;
 [timelineModule performSelector:@selector(paste:) withObject:nil];
 ```
 
-### What Happens Internally
+#### What Happens Internally
 
 1. FCP checks for `FFPasteboardItem` → not found
 2. Checks for XML types via `containsXML` → found (your FCPXML data)
@@ -371,7 +639,7 @@ id timelineModule = /* get active FFAnchoredTimelineModule */;
 > is created in the library sidebar despite the FCPXML containing `<event name="Paste Test">` —
 > the clips are merged directly into the active timeline.
 
-### FCP Drop/Paste Behavior (per Apple docs)
+#### FCP Drop/Paste Behavior (per Apple docs)
 
 How FCP handles FCPXML content depends on what the XML describes:
 
@@ -383,14 +651,14 @@ How FCP handles FCPXML content depends on what the XML describes:
 | Clips/projects to library | Creates dated event (e.g., "06-29-19"); adds items |
 | Library | Merges all content using naming conflict rules |
 
-### Advantages
+#### Advantages
 
 - **Tested**: Media import works — clips are created with correct media references
 - **Tested**: No offline clips — FCP resolves `src=` URLs and imports media automatically
 - **Tested**: No library selection dialog when `setLibrary:` is set on FFXMLImportOptions
 - **Tested**: Incremental import — merges into existing library
 
-### Limitations
+#### Limitations
 
 - **Tested**: Per-clip attributes (`adjust-volume`, `adjust-blend`, etc.) are **NOT preserved** by the import.
   Inspector shows default values (volume=1.0, opacity=1.0) after import despite FCPXML containing adjustments.
@@ -402,7 +670,7 @@ How FCP handles FCPXML content depends on what the XML describes:
 
 ---
 
-## Solution 2: Two-Step Import Then Paste (Fallback) — NOT TESTED
+### Solution 2: Two-Step Import Then Paste (Fallback) — NOT TESTED
 
 If you need to preserve the exact native clipboard data (with complex attributes that FCPXML can't express), import the media first so the native paste succeeds.
 
@@ -411,7 +679,7 @@ If you need to preserve the exact native clipboard data (with complex attributes
 > data harder to manipulate than a simple plist. The document ID patching described below may not
 > work as written because the ID is inside the NSKeyedArchiver archive, not a top-level plist key.
 
-### Step 1: Import Media to Library
+#### Step 1: Import Media to Library
 
 Import the file into the current project's library so FCP creates an `FFAsset` for it:
 
@@ -442,7 +710,7 @@ NSURL *xmlURL = /* temp FCPXML file URL */;
                     withObject:xmlURL withObject:nil withObject:@NO withObject:nil];
 ```
 
-### Step 2: Patch documentID (If Needed)
+#### Step 2: Patch documentID (If Needed)
 
 Your stored clipboard data may have a `documentID` from a different library session. Patch it:
 
@@ -471,7 +739,7 @@ NSData *updatedData = [NSPropertyListSerialization
     errorDescription:NULL];
 ```
 
-### Step 3: Write Updated Data and Paste
+#### Step 3: Write Updated Data and Paste
 
 ```objc
 NSPasteboard *pb = [NSPasteboard generalPasteboard];
@@ -484,12 +752,12 @@ NSString *pasteboardUTI = @"com.apple.flexo.proFFPasteboardUTI";
 [timelineModule performSelector:@selector(paste:) withObject:nil];
 ```
 
-### Advantages
+#### Advantages
 
 - Preserves the exact native clipboard data with all attributes
 - Works for complex effect stacks that FCPXML can't fully express
 
-### Limitations
+#### Limitations
 
 - Two-step process — import may briefly flash media in the browser
 - `documentID` patching is fragile; the internal `ffpasteboardobject` data (**NSKeyedArchiver**-encoded) contains embedded references that need the correct library context
@@ -497,14 +765,14 @@ NSString *pasteboardUTI = @"com.apple.flexo.proFFPasteboardUTI";
 
 ---
 
-## Solution 3: File URL + Programmatic Attribute Restore (Simplest Fallback) — PARTIALLY TESTED
+### Solution 3: File URL + Programmatic Attribute Restore (Simplest Fallback) — PARTIALLY TESTED
 
 The most pragmatic approach if you just need volume and a few properties.
 
 > **Tested**: File URL paste enables FCP's paste command. The clip lands on the timeline.
 > Attribute restoration via inspector was not verified (requires flexo bridge connection).
 
-### Step 1: Paste via File URL
+#### Step 1: Paste via File URL
 
 ```objc
 // Write the file URL to the pasteboard
@@ -516,7 +784,7 @@ NSPasteboard *pb = [NSPasteboard generalPasteboard];
 [timelineModule performSelector:@selector(paste:) withObject:nil];
 ```
 
-### Step 2: Select and Restore Attributes
+#### Step 2: Select and Restore Attributes
 
 After paste, the clip is on the timeline with default properties. Restore saved attributes:
 
@@ -539,13 +807,13 @@ set_inspector_property("positionY", 50.0)
 execute_menu_command(["Edit", "Paste Effects"])
 ```
 
-### Advantages
+#### Advantages
 
 - Simple, well-understood, no pasteboard hacking
 - Works reliably — URL paste always succeeds
 - Each attribute restoration is individually verifiable
 
-### Limitations
+#### Limitations
 
 - Multi-step — possible timing issues between paste and attribute application
 - Can't easily restore complex effect stacks with custom parameters
@@ -553,13 +821,13 @@ execute_menu_command(["Edit", "Paste Effects"])
 
 ---
 
-## Solution 4: Intercept with `mediaByReferenceOnly:NO` (Advanced) — NOT TESTED
+### Solution 4: Intercept with `mediaByReferenceOnly:NO` (Advanced) — NOT TESTED
 
 The `newEditsWithProject:mediaByReferenceOnly:options:` method on `FFPasteboard` has a boolean flag that controls media resolution behavior.
 
 When `mediaByReferenceOnly` is YES, it sets `assetFlags` bit 14 (0x4000), meaning "only create references, expect media already linked." When NO (assetFlags = 0), and the pasteboard contains file URLs, FCP enters a different code path that uses `FFFileImporter` to actually import the media files.
 
-### How It Works
+#### How It Works
 
 ```objc
 Class FFPasteboardClass = objc_getClass("FFPasteboard");
@@ -576,7 +844,7 @@ id edits = [ffpb performSelector:@selector(newEditsWithProject:mediaByReferenceO
                       withObject:nil];
 ```
 
-### When This Works
+#### When This Works
 
 This path activates when the pasteboard has **file URLs** alongside other data. It:
 
@@ -584,7 +852,7 @@ This path activates when the pasteboard has **file URLs** alongside other data. 
 2. Imports via `FFFileImporter.importToEvent:manageFileType:processNow:...`
 3. Returns imported clips as `FigTimeRangeAndObject` items
 
-### Limitations
+#### Limitations
 
 - Only helps when file URLs are on the pasteboard — won't rescue pure native clipboard data with missing media
 - The returned objects still need to be inserted into the timeline
@@ -592,7 +860,7 @@ This path activates when the pasteboard has **file URLs** alongside other data. 
 
 ---
 
-## Comparison Matrix
+### Comparison Matrix
 
 | Approach | Media Import | Attributes Preserved | Complexity | Reliability | Tested |
 |----------|-------------|---------------------|------------|-------------|--------|
@@ -603,11 +871,11 @@ This path activates when the pasteboard has **file URLs** alongside other data. 
 
 ---
 
-## Appendix A: Complete FCPXML Attribute Reference
+### Appendix A: Complete FCPXML Attribute Reference
 
 All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's official FCPXML DTD documentation.
 
-### Asset Definition
+#### Asset Definition
 
 ```xml
 <asset id="r1" uid="optional-unique-id"
@@ -624,7 +892,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 
 **Color space triplets** (primaries-transfer-matrix): `1-1-1` (Rec. 709), `6-1-6` (Rec. 601 NTSC), `5-1-6` (Rec. 601 PAL), `9-1-9` (Rec. 2020), `9-16-9` (Rec. 2020 PQ), `9-18-9` (Rec. 2020 HLG).
 
-### Audio Adjustments
+#### Audio Adjustments
 
 ```xml
 <!-- Volume in dB -->
@@ -665,7 +933,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 </adjust-matchEQ>
 ```
 
-### Video Adjustments
+#### Video Adjustments
 
 ```xml
 <!-- Transform (position/scale as % of frame height, rotation in degrees) -->
@@ -695,7 +963,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 <adjust-conform type="fit"/>
 ```
 
-### Blend Mode Values
+#### Blend Mode Values
 
 | Value | Mode | Value | Mode |
 |-------|------|-------|------|
@@ -714,7 +982,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 | 15 | Soft Light | 32 | Premultiplied Mix |
 | 16 | Hard Light | | |
 
-### Effects
+#### Effects
 
 ```xml
 <!-- Video filter (ref points to effect resource) -->
@@ -741,7 +1009,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 </filter-video>
 ```
 
-### Speed / Retime
+#### Speed / Retime
 
 ```xml
 <!-- timeMap: maps output time → source time -->
@@ -760,7 +1028,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 <frame-sampling value="floor"/>  <!-- or "nearest-neighbor", "frame-blending", "optical-flow" -->
 ```
 
-### Markers, Keywords, Ratings
+#### Markers, Keywords, Ratings
 
 ```xml
 <!-- Standard marker -->
@@ -785,7 +1053,7 @@ All attributes below can be embedded in FCPXML for Solution 1. Based on Apple's 
 <audio-role-source role="dialogue.dialogue-1"/>
 ```
 
-### Timing Attributes (All Story Elements)
+#### Timing Attributes (All Story Elements)
 
 Time values use rational seconds: `1001/30000s` (29.97fps), `1001/60000s` (59.94fps), or whole seconds `5s`.
 
@@ -798,7 +1066,7 @@ Time values use rational seconds: `1001/30000s` (29.97fps), `1001/60000s` (59.94
     videoRole="video.video-1">
 ```
 
-### 360 Video Adjustments
+#### 360 Video Adjustments
 
 ```xml
 <adjust-360-transform enabled="1"/>
@@ -808,9 +1076,9 @@ Time values use rational seconds: `1001/30000s` (29.97fps), `1001/60000s` (59.94
 
 ---
 
-## Appendix B: Public Pasteboard Types & Discovery
+### Appendix B: Public Pasteboard Types & Discovery
 
-### Known Public UTI Strings (Apple-Documented)
+#### Known Public UTI Strings (Apple-Documented)
 
 These are documented by Apple for workflow extensions and drag-and-drop integration:
 
@@ -827,7 +1095,7 @@ These are documented by Apple for workflow extensions and drag-and-drop integrat
 
 **Best practice** (per Apple docs): Support the generic type (current DTD at your release) and also version-specific types for current and previous DTD versions.
 
-### Runtime Discovery (Optional)
+#### Runtime Discovery (Optional)
 
 If you want to confirm what the running FCP version supports:
 
@@ -844,7 +1112,7 @@ NSLog(@"string:           %@", [IXType string]);
 NSLog(@"all:              %@", [IXType all]);
 ```
 
-### Paste Priority Order
+#### Paste Priority Order
 
 FCP's `FFXMLTranslationTask` checks pasteboard types in this order:
 1. `IXXMLPasteboardType.current` (highest version)
@@ -864,7 +1132,7 @@ When writing, use both the generic type and the version-specific type matching y
 
 ---
 
-## Appendix C: Key Internal Classes
+### Appendix C: Key Internal Classes
 
 | Class | Methods | Role |
 |-------|---------|------|
@@ -879,7 +1147,7 @@ When writing, use both the generic type and the version-specific type matching y
 
 ---
 
-## Recommended Approach: FCPXML Import ✅ TESTED
+### Recommended Approach: FCPXML Import ✅ TESTED
 
 The pasteboard import now calls `importWithOptions:` (the full-document import) first,
 and on FCP 12.3 that path applies per-clip `adjust-volume` and `adjust-blend` itself: a
@@ -892,7 +1160,7 @@ XML, ran `selectAll:` on whatever timeline was open and set the value through th
 inspector on the selection. With another project open, that selected every clip in the
 user's project and aimed the change at it, so the step was removed.
 
-### From SpliceKit — Single Call (tested, working):
+#### From SpliceKit — Single Call (tested, working):
 
 ```python
 # fcpxml.pasteImport:
@@ -928,9 +1196,9 @@ fcpxml.pasteImport(xml='''<?xml version="1.0" encoding="UTF-8"?>
 </fcpxml>''')
 ```
 
-### How the Bridge Does It (implementation detail)
+#### How the Bridge Does It (implementation detail)
 
-The `SpliceKit_handlePasteboardImportXML` function in `SpliceKitServer.m`:
+The `SpliceKit_handlePasteboardImportXML` function in `Sources/Bridge/SpliceKitServerFCPXML.m`:
 
 1. **Writes FCPXML to the system pasteboard** using `IXXMLPasteboardType.generic` and `.current` UTIs
 2. **Creates `FFXMLTranslationTask`** from the pasteboard via `initForPasteboard:`
@@ -945,12 +1213,12 @@ The `SpliceKit_handlePasteboardImportXML` function in `SpliceKitServer.m`:
    FCP applies `adjust-volume` / `adjust-blend` itself
 5. **Returns** `{"status":"ok", "importOK": true, "library": "...", "libraryChosenBy": "..."}`
 
-### Building a Workflow Extension That Uses This
+#### Building a Workflow Extension That Uses This
 
 A workflow extension (`.appex`) runs out-of-process but can communicate with SpliceKit
 over TCP. Here's a complete implementation:
 
-#### 1. Extension View Controller (SwiftUI)
+##### 1. Extension View Controller (SwiftUI)
 
 ```swift
 import SwiftUI
@@ -1018,7 +1286,7 @@ class SFXViewModel: ObservableObject {
 }
 ```
 
-#### 2. SpliceKit TCP Client (for use inside the extension)
+##### 2. SpliceKit TCP Client (for use inside the extension)
 
 ```swift
 import Foundation
@@ -1124,7 +1392,7 @@ class SpliceKitClient {
 }
 ```
 
-#### 3. Drag-and-Drop Alternative (for timeline insertion)
+##### 3. Drag-and-Drop Alternative (for timeline insertion)
 
 If you prefer drag-and-drop over the `fcpxml.pasteImport` API call, provide FCPXML
 via `NSPasteboardItemDataProvider` and restore attributes after the drop:
@@ -1168,7 +1436,7 @@ pbItem.setDataProvider(provider,
 // Call provider.restoreAttributes() when drag completes
 ```
 
-### Important Notes
+#### Important Notes
 
 - **Audio-only clips** must NOT include `<adjust-blend>` (opacity) — this causes import failure
 - **Video clips** can include both `<adjust-volume>` and `<adjust-blend>`
@@ -1180,11 +1448,11 @@ pbItem.setDataProvider(provider,
 
 ---
 
-## Appendix D: Workflow Extension Timeline API
+### Appendix D: Workflow Extension Timeline API
 
 If you're building a workflow extension (`.appex`), you have official API access to the FCP timeline. This is relevant for Solution 3 (programmatic attribute restoration) and for monitoring when clips are pasted.
 
-### Timeline Access Pattern
+#### Timeline Access Pattern
 
 ```swift
 import ProExtension
@@ -1207,7 +1475,7 @@ let range = timeline.sequenceTimeRange       // CMTimeRange
 let newPos = timeline.movePlayhead(to: targetTime)  // returns confirmed CMTime
 ```
 
-### Observer Callbacks
+#### Observer Callbacks
 
 ```swift
 extension MyViewController: FCPXTimelineObserver {
@@ -1229,7 +1497,7 @@ extension MyViewController: FCPXTimelineObserver {
 }
 ```
 
-### Navigating the Container Hierarchy
+#### Navigating the Container Hierarchy
 
 ```swift
 let sequence = timeline.activeSequence          // FCPXSequence
@@ -1238,7 +1506,7 @@ let event = project?.container as? FCPXEvent       // FCPXEvent (uid, name)
 let library = event?.container as? FCPXLibrary     // FCPXLibrary (url, name)
 ```
 
-### Security-Scoped Bookmarks
+#### Security-Scoped Bookmarks
 
 If your extension needs to access media files on disk, you need security-scoped bookmark entitlements:
 
@@ -1256,7 +1524,7 @@ When receiving bookmark data (e.g., from FCPXML drag-out from FCP):
 3. Call `startAccessingSecurityScopedResource()` before file access
 4. Call `stopAccessingSecurityScopedResource()` when done
 
-### Key Limitations
+#### Key Limitations
 
 - Workflow extensions run **out-of-process** — no direct access to FCP's internal classes
 - The `FCPXTimeline` API is read-only for sequence/playhead; you can move the playhead but can't directly modify clips
@@ -1265,7 +1533,7 @@ When receiving bookmark data (e.g., from FCPXML drag-out from FCP):
 
 ---
 
-## Appendix E: Debugging Pasteboard Contents
+### Appendix E: Debugging Pasteboard Contents
 
 To inspect what's currently on the pasteboard:
 
@@ -1300,7 +1568,7 @@ This is especially useful for capturing what FCP writes to the pasteboard when y
 > The plist has 3 keys: `ffpasteboardobject` (NSKeyedArchiver, 15,263 bytes),
 > `ffpasteboardcopiedtypes`, `kffmodelobjectIDs` (empty array).
 
-### Decoding NSKeyedArchiver Clipboard Data (Tested)
+#### Decoding NSKeyedArchiver Clipboard Data (Tested)
 
 To decode the inner `ffpasteboardobject` data, decode it as a second binary plist:
 
@@ -1327,7 +1595,10 @@ for (id obj in objects) {
 
 ---
 
-## Appendix F: Test Methodology
+### Appendix F: Test Methodology (historical)
+
+The AppleScript and Cmd+V / Cmd+Z steps below are how these 2026 experiments were run;
+the project now forbids AppleScript and synthetic keystrokes, so do not reuse them.
 
 Tests were conducted April 2026 against FCP 11.1 on macOS Sequoia 15.4 using:
 
@@ -1335,7 +1606,7 @@ Tests were conducted April 2026 against FCP 11.1 on macOS Sequoia 15.4 using:
 2. **AppleScript** (via `NSAppleScript`) for FCP interaction (activate, Cmd+V paste, Cmd+Z undo, menu inspection)
 3. **MCP bridge tools** for FCP state queries (library/event/project listing) when bridge was connected
 
-### Test procedure for each pasteboard variant:
+#### Test procedure for each pasteboard variant:
 1. Write data to `NSPasteboard.general` with specific UTI types
 2. Activate FCP via AppleScript
 3. Send Cmd+V keystroke
@@ -1343,7 +1614,7 @@ Tests were conducted April 2026 against FCP 11.1 on macOS Sequoia 15.4 using:
 5. Read Edit menu's Undo/Redo item names to confirm paste action
 6. Send Cmd+Z to undo and restore timeline state
 
-### Confirmed test environment:
+#### Confirmed test environment:
 - Library: "Untitled" with events "4-3-26", "Montage"
 - Active project: "Here We Go Montage" (29.75s, 24fps, 1920x1080)
 - Test media: `/System/Library/Sounds/Basso.aiff` (0.77s audio-only)

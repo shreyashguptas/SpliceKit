@@ -81,10 +81,18 @@ talk to.
 
 ## More
 
-The tool-by-tool guide is [.claude/CLAUDE.md](.claude/CLAUDE.md), which Claude Code
-loads on its own when you open this repository. Everything else, including the
-[changelog](docs/CHANGELOG.md), is under [docs/](docs/).
-What touches the network, and when, is listed in
-[docs/THIRD_PARTY_DEPENDENCIES.md](docs/THIRD_PARTY_DEPENDENCIES.md).
+- [.claude/CLAUDE.md](.claude/CLAUDE.md): the operating guide for driving Final Cut Pro
+  through the tools. Claude Code loads it on its own when you open this repository.
+- [docs/guides/](docs/guides/): walkthroughs (transcript editing, captions, song cut,
+  scene and beat detection, the command palette, Lua scripting, ...).
+- [docs/reference/](docs/reference/): every MCP tool
+  ([mcp-tools.md](docs/reference/mcp-tools.md)), the Lua SDK, the debug and runtime
+  introspection tools, FCP's classes and the FCPXML format.
+- [docs/CHANGELOG.md](docs/CHANGELOG.md): what changed.
+- [docs/THIRD_PARTY_DEPENDENCIES.md](docs/THIRD_PARTY_DEPENDENCIES.md): what touches the
+  network, and when.
+
+Contributing: `make test` runs every offline check (unit tests and the MCP wire check)
+without Final Cut Pro.
 
 MIT licensed; see [LICENSE](LICENSE).

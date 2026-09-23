@@ -114,7 +114,7 @@ access; no audio, transcript or project data leaves the machine.
 | --- | --- |
 | `~/Library/Application Support/FluidAudio/Models/` | Parakeet + diarization models |
 | `~/Library/Application Support/SpliceKit/tools/` | the built helper binaries |
-| `<patched FCP>.app/.../SpliceKit.framework/Versions/A/Resources/` | the same binaries, travelling with the app |
+| `<patched FCP>.app/Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/` | the same binaries, travelling with the app |
 | `build/*-transcriber` | the cached build output re-used across installs |
 | `helpers/*/.build/` | SwiftPM checkouts and artifacts |
 
@@ -154,7 +154,7 @@ is left.
 | Path | Where | Goes to |
 | --- | --- | --- |
 | JSON-RPC bridge inside Final Cut Pro | `Sources/Bridge/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only |
-| MCP server, `scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/server.py` and the named files, `plugins/logi-haptics/.../FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
+| MCP server, `scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/splicekit_mcp/config.py` and the named files, `plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
 | Command palette helper scripts | the Swift helper that the Apple Intelligence engines spawn, and the Gemma engine's port probe | 127.0.0.1:9876 and 127.0.0.1:8080 |
 | Test suites | `tests/` | a fake bridge on 127.0.0.1 |
 
@@ -179,10 +179,10 @@ missing, as part of the one-command install.
 | --- | --- | --- |
 | Homebrew, if missing (prompted) | `scripts/install.sh` | raw.githubusercontent.com (Homebrew's installer), then Homebrew's own mirrors |
 | Python 3.10+, if missing (prompted) | `brew install python@3.13` | Homebrew |
-| MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` | PyPI |
+| MCP virtualenv, on first install | `make mcp-setup`: `pip install -r mcp/requirements.txt` (`mcp`, plus `opentimelineio` and `otio-fcpx-xml-adapter` for the OTIO tools) | PyPI |
 | `insert_dylib`, if not already built | `patcher/patch_fcp.sh` (`git clone`) | github.com/tyilo/insert_dylib |
 | Transcriber helpers, if they need rebuilding | SwiftPM (tables above) | github.com (FluidAudio, WhisperKit) |
-| Optional OTIO tools | `pip install opentimelineio ...`, only if you run it | PyPI |
+| Optional EDL adapter | `pip install otio-cmx3600-adapter` into the MCP virtualenv, only if you run it (needed for `.edl` in `export_otio` / `import_otio`) | PyPI |
 
 ### Links that open your browser
 

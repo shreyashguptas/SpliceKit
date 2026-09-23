@@ -705,9 +705,13 @@ sk.timeline("deleteMarkersInSelection")
 ### Batch Add Markers at Specific Times
 
 ```lua
-sk.rpc("timeline.addMarkers", {
-    times = {1.0, 5.5, 10.0, 15.5, 20.0}
-})
+-- One call, one undo step. Each marker: time (seconds), name, kind
+-- ("standard", "todo" or "chapter").
+sk.rpc("timeline.addMarkers", {markers = {
+    {time = 1.0,  name = "",       kind = "standard"},
+    {time = 5.5,  name = "Intro",  kind = "chapter"},
+    {time = 10.0, name = "Fix VO", kind = "todo"},
+}})
 ```
 
 ### Read Markers
@@ -759,10 +763,15 @@ sk.rpc("timeline.directAction", {
 
 ### Import SRT as Markers
 
+There is no SRT RPC. The MCP tool `import_srt_as_markers` parses the SRT itself and sends
+one `timeline.addMarkers` call with a marker at each subtitle's start time. From Lua, do
+the same:
+
 ```lua
-sk.rpc("timeline.importSRT", {
-    srt_content = "1\n00:00:05,000 --> 00:00:10,000\nSubtitle text"
-})
+sk.rpc("timeline.addMarkers", {markers = {
+    {time = 5.0,  name = "Subtitle text",   kind = "standard"},
+    {time = 12.0, name = "Second subtitle", kind = "standard"},
+}})
 ```
 
 ---
@@ -951,11 +960,12 @@ sk.rpc("fcpxml.export", {path = "/tmp/my_project.fcpxml"})
 ### Generate FCPXML
 
 ```lua
-local xml = sk.rpc("fcpxml.generate", {
-    project_name = "My Project",
-    frame_rate = "24",
-    items = '[{"type":"gap","duration":10},{"type":"title","text":"Intro","duration":5}]'
-})
+-- FCPXML generation is not a bridge RPC: the MCP tool generate_fcpxml builds the
+-- XML in the MCP server. From Lua, build the XML string yourself (see
+-- docs/reference/fcpxml-format.md) and pass it to fcpxml.import below.
+local xml = [[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.11"> ... </fcpxml>]]
 ```
 
 ### Import FCPXML
@@ -1448,21 +1458,23 @@ sk.rpc("timeline.batchExport", {scope = "selected"})
 ### Music-Driven Montage
 
 ```lua
--- Detect beats in a music file
-local beats = sk.rpc("beats.detect", {
-    file_path = "/path/to/song.mp3",
-    sensitivity = 0.7
-})
+-- Beat detection cannot run inside FCP's process: beats.detect only passes
+-- through beat data that the MCP tool detect_beats computed. Run detect_beats()
+-- from the MCP client, then hand its beat times to Lua:
+local beat_times = {0.5, 1.0, 1.5, 2.0}   -- from detect_beats()
 
 -- Add markers at every beat
-if beats.beats then
-    sk.rpc("timeline.addMarkers", {times = beats.beats})
+local markers = {}
+for _, t in ipairs(beat_times) do
+    markers[#markers + 1] = {time = t, name = "", kind = "standard"}
 end
+sk.rpc("timeline.addMarkers", {markers = markers})
 
--- Or auto-assemble a montage from beats + clips
+-- Or auto-assemble a montage to a FlexMusic song (songUID from
+-- flexmusic.listSongs; omit it to pick one by clip mood)
 sk.rpc("montage.auto", {
-    music_path = "/path/to/song.mp3",
-    style = "energetic"
+    songUID = "com.apple.flexmusic.song-12345",
+    style = "bar"
 })
 ```
 
@@ -1575,79 +1587,12 @@ sk.rpc("debug.traceMethod", {action = "getLog", limit = 5})
 
 ---
 
-## Appendix: All Timeline Actions
+## Appendix: Timeline Actions
 
-Every string below can be passed to `sk.timeline(action)`:
-
-**Blade:** blade, bladeAll
-
-**Markers:** addMarker, addTodoMarker, addChapterMarker, deleteMarker, nextMarker,
-previousMarker, deleteMarkersInSelection
-
-**Transitions:** addTransition
-
-**Navigation:** nextEdit, previousEdit, selectClipAtPlayhead, selectToPlayhead
-
-**Selection:** selectAll, deselectAll
-
-**Edit:** delete, cut, copy, paste, undo, redo, pasteAsConnected, replaceWithGap,
-copyTimecode
-
-**Edit Modes:** connectToPrimaryStoryline, insertEdit, appendEdit, overwriteEdit
-
-**Effects:** pasteEffects, pasteAttributes, removeAttributes, copyAttributes,
-removeEffects
-
-**Insert:** insertGap, insertPlaceholder, addAdjustmentClip
-
-**Trim:** trimToPlayhead, extendEditToPlayhead, trimStart, trimEnd, joinClips,
-nudgeLeft, nudgeRight, nudgeUp, nudgeDown
-
-**Color:** addColorBoard, addColorWheels, addColorCurves, addColorAdjustment,
-addHueSaturation, addEnhanceLightAndColor, balanceColor, matchColor,
-addMagneticMask, smartConform
-
-**Volume:** adjustVolumeUp, adjustVolumeDown
-
-**Audio:** expandAudio, expandAudioComponents, addChannelEQ, enhanceAudio,
-matchAudio, detachAudio
-
-**Titles:** addBasicTitle, addBasicLowerThird
-
-**Speed:** retimeNormal, retimeFast2x, retimeFast4x, retimeFast8x, retimeFast20x,
-retimeSlow50, retimeSlow25, retimeSlow10, retimeReverse, retimeHold, freezeFrame,
-retimeBladeSpeed, retimeSpeedRampToZero, retimeSpeedRampFromZero
-
-**Keyframes:** addKeyframe, deleteKeyframes, nextKeyframe, previousKeyframe
-
-**Rating:** favorite, reject, unrate
-
-**Range:** setRangeStart, setRangeEnd, clearRange, setClipRange
-
-**Clip Ops:** solo, disable, createCompoundClip, autoReframe, breakApartClipItems,
-synchronizeClips, openClip, renameClip, changeDuration
-
-**Storyline:** createStoryline, liftFromPrimaryStoryline,
-overwriteToPrimaryStoryline, collapseToConnectedStoryline
-
-**Audition:** createAudition, finalizeAudition, nextAuditionPick, previousAuditionPick
-
-**Captions:** addCaption, splitCaption, resolveOverlaps
-
-**Multicam:** createMulticamClip
-
-**View:** zoomToFit, zoomIn, zoomOut, verticalZoomToFit, toggleSnapping,
-toggleSkimming, toggleInspector, toggleTimeline, toggleTimelineIndex
-
-**Project:** duplicateProject, snapshotProject, projectProperties, closeLibrary
-
-**Render:** renderSelection, renderAll
-
-**Export:** exportXML, shareSelection
-
-**Find:** find, findAndReplaceTitle
-
-**Reveal:** revealInBrowser, revealInFinder
+Every action name the `timeline_action` MCP tool accepts can be passed to
+`sk.timeline(action)`. The authoritative list is that tool's docstring
+(`mcp/splicekit_mcp/tools/timeline_actions.py`); a grouped table is in
+[mcp-tools.md](mcp-tools.md#timeline-actions).
 
 ## Appendix: All Playback Actions
 

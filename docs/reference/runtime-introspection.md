@@ -8,6 +8,7 @@ at runtime using SpliceKit's reflection tools.
 ## Table of Contents
 
 1. [Overview](#overview)
+   - [Quick Reference](#quick-reference)
 2. [Class Discovery](#class-discovery)
 3. [Method Exploration](#method-exploration)
 4. [Properties & Instance Variables](#properties--instance-variables)
@@ -36,6 +37,23 @@ This is essential for:
 - **Debugging** unexpected behavior by inspecting live object state
 - **Reverse engineering** FCP's data model and rendering pipeline
 - **Building new SpliceKit features** by finding the right internal APIs
+
+### Quick Reference
+
+```
+get_classes(filter="FFColor")                          # find classes by name
+explore_class("FFAnchoredTimelineModule")              # full overview (methods, ivars, protocols)
+search_methods("FFAnchoredTimelineModule", "blade")    # find methods by name
+get_methods("FFEffectStack")                           # all instance + class methods with type encodings
+get_ivars("FFPlayer")                                  # ivar names, types, byte offsets
+get_properties("FFAnchoredSequence")                   # properties with parsed attributes
+get_protocols("FFAnchoredMediaComponent")              # protocol conformances
+get_superchain("FFAnchoredTimelineModule")             # inheritance chain to NSObject
+```
+
+Each method entry includes: selector name, ObjC type encoding, IMP hex address, owning
+image (via dladdr), and linker symbol name. Ivar entries include byte offsets for struct
+reconstruction.
 
 ---
 
@@ -359,6 +377,9 @@ list_loaded_images(filter="Ozone")
 list_loaded_images(filter="Helium")
 ```
 
+Returns path, base address, ASLR slide, and ObjC class count per image.
+The ASLR slide is needed to map runtime IMP addresses → IDA static addresses.
+
 ### Exported Symbols
 
 Get the symbol table for any loaded binary:
@@ -374,6 +395,9 @@ get_image_symbols(binary="Flexo", filter="Timeline")
 get_image_symbols(binary="Flexo", filter="render", demangle=False)
 ```
 
+Discovers exported symbols via dladdr on all methods. Swift symbols are automatically
+demangled using `swift_demangle()` from libswiftCore.
+
 ### ObjC Section Data
 
 Inspect cross-binary dependencies:
@@ -383,6 +407,12 @@ Inspect cross-binary dependencies:
 get_image_sections(binary="Flexo")
 ```
 
+Returns:
+- **Selector references** — every ObjC selector the binary calls (44K+ for Flexo)
+- **Class references** — which classes the binary references
+- **Superclass references** — parent class dependencies
+
+For shared-cache system frameworks, uses ObjC runtime APIs instead of raw section reads.
 This reveals which selectors a binary calls and which classes it references,
 essential for understanding the dependency graph between FCP's frameworks.
 
@@ -401,8 +431,21 @@ dump_runtime_metadata(binary="Flexo")
 dump_runtime_metadata(classes_only=True)
 ```
 
-Returns loaded images with ASLR slides and complete class metadata including
-method IMP addresses (for mapping to static disassembly addresses).
+This extracts ObjC runtime metadata from the live FCP process — data that static binary
+analysis cannot provide (IMP owners, ivar offsets, protocol declarations, ASLR slides).
+It returns loaded images with ASLR slides and, per class:
+- **Instance & class methods** with selector, type encoding, IMP address, **dladdr info**
+  (which binary owns the IMP — reveals category methods from other frameworks)
+- **Ivars** with name, type encoding, and **byte offset** (for struct reconstruction)
+- **Ivar layout bitmaps** — which ivars are strong vs weak references
+- **Protocol conformances** with **full method declarations** (required/optional,
+  instance/class, type encodings) and protocol inheritance chains
+- **Parsed property attributes** — type, getter/setter selectors, backing ivar,
+  readonly/copy/strong/weak/nonatomic/dynamic (structured, not raw attribute strings)
+- **Superclass chain** and **instance size**
+
+The IMP addresses map to static disassembly addresses (see
+[Mapping Runtime to IDA Pro](#mapping-runtime-to-ida-pro)).
 
 ---
 

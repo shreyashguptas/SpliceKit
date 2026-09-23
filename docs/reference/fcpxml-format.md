@@ -14,15 +14,14 @@ and export (`export_xml`).
 2. [Document Structure](#document-structure)
 3. [Resources](#resources)
 4. [Story Elements](#story-elements)
-5. [Clips and Media References](#clips-and-media-references)
-6. [Timing Attributes](#timing-attributes)
-7. [Effects and Transitions](#effects-and-transitions)
-8. [Markers, Keywords, and Metadata](#markers-keywords-and-metadata)
-9. [Adjustment Attributes and Effect Parameters](#adjustment-attributes-and-effect-parameters)
-10. [Predefined Video Formats](#predefined-video-formats)
-11. [FCPXML Bundles](#fcpxml-bundles)
-12. [Security-Scoped Bookmarks](#security-scoped-bookmarks)
-13. [Practical Examples](#practical-examples)
+5. [Timing Attributes](#timing-attributes)
+6. [Effects and Transitions](#effects-and-transitions)
+7. [Markers, Keywords, and Metadata](#markers-keywords-and-metadata)
+8. [Adjustment Attributes and Effect Parameters](#adjustment-attributes-and-effect-parameters)
+9. [Predefined Video Formats](#predefined-video-formats)
+10. [FCPXML Bundles](#fcpxml-bundles)
+11. [Security-Scoped Bookmarks](#security-scoped-bookmarks)
+12. [Practical Examples](#practical-examples)
 
 ---
 

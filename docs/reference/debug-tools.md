@@ -9,27 +9,104 @@ All debug tools are accessed via JSON-RPC on `127.0.0.1:9876`.
 
 ## Quick Reference
 
-| Endpoint | Purpose |
-|----------|---------|
-| `debug.breakpoint` | True breakpoints: pause execution, inspect state, continue/step |
-| `debug.traceMethod` | Swizzle methods to log calls, args, and call stacks |
-| `debug.watch` | KVO-based property change observation |
-| `debug.crashHandler` | Catch uncaught exceptions and signals |
-| `debug.threads` | Inspect all threads with CPU usage and stack traces |
-| `debug.eval` | Evaluate ObjC property chains in FCP's process |
-| `debug.loadPlugin` | Hot-load dylibs/bundles into FCP without restart |
-| `debug.observeNotification` | Subscribe to NSNotificationCenter events |
-| `debug.getConfig` | Read debug flag state (TLK, CFPreferences, log) |
-| `debug.setConfig` | Set individual debug flags |
-| `debug.enablePreset` | Apply preset debug configurations |
-| `debug.resetConfig` | Reset debug flags to defaults |
-| `debug.startFramerateMonitor` | Monitor rendering FPS |
-| `debug.stopFramerateMonitor` | Stop FPS monitor |
-| `debug.dumpRuntimeMetadata` | Dump ObjC class/method/ivar data |
-| `debug.listLoadedImages` | List all loaded dylibs/frameworks |
-| `debug.getImageSections` | Read Mach-O section data |
-| `debug.getImageSymbols` | Read symbol tables |
-| `debug.getNotificationNames` | List all notification name constants |
+| Endpoint | MCP tool | Purpose |
+|----------|----------|---------|
+| `debug.breakpoint` | `debug_breakpoint` | True breakpoints: pause execution, inspect state, continue/step |
+| `debug.traceMethod` | `debug_trace_method` | Swizzle methods to log calls, args, and call stacks |
+| `debug.watch` | `debug_watch` | KVO-based property change observation |
+| `debug.crashHandler` | `debug_crash_handler` | Catch uncaught exceptions and signals |
+| `debug.threads` | `debug_threads` | Inspect all threads with CPU usage and stack traces |
+| `debug.eval` | `debug_eval` | Evaluate ObjC property chains in FCP's process |
+| `debug.loadPlugin` | `debug_load_plugin` | Hot-load dylibs/bundles into FCP without restart |
+| `debug.observeNotification` | `debug_observe_notification` | Subscribe to NSNotificationCenter events |
+| `debug.getConfig` | `debug_get_config` | Read debug flag state (TLK, CFPreferences, log) |
+| `debug.setConfig` | `debug_set_config` | Set individual debug flags |
+| `debug.enablePreset` | `debug_enable_preset` | Apply preset debug configurations |
+| `debug.resetConfig` | `debug_reset_config` | Reset debug flags to defaults |
+| `debug.startFramerateMonitor` | `debug_start_framerate_monitor` | Monitor rendering FPS |
+| `debug.stopFramerateMonitor` | `debug_stop_framerate_monitor` | Stop FPS monitor |
+| `debug.dumpRuntimeMetadata` | `dump_runtime_metadata` | Dump ObjC class/method/ivar data |
+| `debug.listLoadedImages` | `list_loaded_images` | List all loaded dylibs/frameworks |
+| `debug.getImageSections` | `get_image_sections` | Read Mach-O section data |
+| `debug.getImageSymbols` | `get_image_symbols` | Read symbol tables |
+| `debug.getNotificationNames` | `get_notification_names` | List all notification name constants |
+
+The examples below use the raw RPC names and camelCase parameters. From an MCP client
+each endpoint is the snake_case tool in the middle column, with snake_case arguments
+(`class_name`, `key_path`, `hit_count`, `one_shot`, `log_stack`).
+
+### From an MCP client
+
+SpliceKit includes a full debugging toolkit that provides Xcode/lldb-level capabilities
+from within FCP's process, accessible via MCP. No debugger attachment required.
+
+#### Breakpoints (pause + inspect + continue)
+```
+debug_breakpoint(action="add", class_name="FFAnchoredTimelineModule", selector="blade:")
+# ... press B in FCP — execution pauses, breakpoint.hit event fires ...
+debug_breakpoint(action="inspect")                                      # see paused state
+debug_breakpoint(action="inspectSelf", key_path="sequence.displayName") # inspect properties
+debug_breakpoint(action="continue")                                     # resume execution
+debug_breakpoint(action="step")                                         # resume + break on next call
+```
+Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hit_count=5`),
+and one-shot breakpoints (`one_shot=True`). FCP freezes while paused (same as Xcode).
+The JSON-RPC server stays alive on a separate thread so you can inspect state.
+
+#### Method Tracing (non-blocking alternative)
+```
+debug_trace_method(action="add", class_name="FFAnchoredTimelineModule",
+                   selector="blade:", log_stack=True)
+# ... perform action in FCP ...
+debug_trace_method(action="getLog", limit=10)  # see calls + call stacks
+debug_trace_method(action="removeAll")         # clean up
+```
+Traces are broadcast to MCP clients in real-time as JSON-RPC notifications.
+Use tracing when you want to observe without pausing, breakpoints when you need
+to inspect state at a specific moment.
+
+#### Property Watching (replaces watchpoints)
+```
+debug_watch(action="add", class_name="NSApplication", key_path="mainWindow")
+# Events broadcast when property changes with old/new values
+debug_watch(action="removeAll")
+```
+
+#### Crash Handler (replaces debugger crash catching)
+```
+debug_crash_handler(action="install")   # catch exceptions + signals
+debug_crash_handler(action="getLog")    # see crash stack traces
+```
+Catches NSExceptions and signals (SIGABRT, SIGSEGV, etc.) with full stack traces.
+
+#### Thread Inspection
+```
+debug_threads()                    # thread count, operation queues
+debug_threads(detailed=True)       # per-thread CPU usage, run state, stacks
+```
+Uses Mach kernel APIs. Shows all ~45 threads with CPU usage percentages.
+
+#### Expression Evaluation (replaces lldb `po`)
+```
+debug_eval(expression="NSApp.delegate._targetLibrary.displayName")
+debug_eval(chain='["delegate", "_targetLibrary"]', store_result=True)  # chain is a JSON string
+```
+Walks ObjC property chains. Stores results as handles for further inspection.
+
+#### Hot Plugin Loading (replaces dlopen from lldb)
+```
+debug_load_plugin(action="load", path="/tmp/patch.dylib")    # inject code
+debug_load_plugin(action="unload", path="/tmp/patch.dylib")  # remove it
+```
+Compile a `.dylib` with fixes/features, load into running FCP without restart.
+
+#### Notification Observation
+```
+debug_observe_notification(action="add", name="FFEffectsChangedNotification")
+debug_observe_notification(action="add", name="*")  # all notifications (high volume)
+debug_observe_notification(action="removeAll")
+```
+Subscribe to FCP's internal NSNotification events. Broadcast to MCP clients.
 
 ## Breakpoints (`debug.breakpoint`)
 
@@ -638,6 +715,173 @@ debug.observeNotification(action="removeAll")
 | FFQTMovieExporterFinishedNotification | Export completes |
 
 `get_notification_names(binary="Flexo")` lists the rest from the running app.
+
+## FCP's Internal Debug Flags (`debug.getConfig` and friends)
+
+SpliceKit exposes FCP's internal developer logging, debug overlays, and performance
+monitoring tools that are normally hidden. These are built into FCP's own frameworks
+(ProAppSupport, TimelineKit, Helium, ProCore) and controlled via NSUserDefaults and
+CFPreferences keys.
+
+### Quick Start
+```
+debug_get_config()                              # see all current debug settings
+debug_enable_preset("timeline_visual")          # turn on visual debug overlays
+debug_enable_preset("all_off")                  # reset everything to normal
+```
+
+### Get Current State
+```
+debug_get_config()
+```
+Returns the current value of every debug flag organized into four groups:
+- **timeline_debug**: 35 TLKUserDefaults keys (visual overlays, logging, rendering)
+- **cfpreferences_debug**: 6 CFPreferences keys (video decoder, frame drops, GPU)
+- **proapp_log**: ProAppSupport structured log system (level, categories, UI, threads)
+- **fcp_flags**: FCP behavioral overrides (gap coalescing, snapping, skimming)
+
+### Set Individual Flags
+```
+debug_set_config("TLKShowHiddenGapItems", "true")       # show hidden gaps in timeline
+debug_set_config("TLKPerformanceMonitorEnabled", "true") # enable perf monitor
+debug_set_config("LogLevel", "trace")                    # most verbose logging
+debug_set_config("VideoDecoderLogLevelInNLE", "3")       # video decoder verbosity
+debug_set_config("GPU_LOGGING", "true")                  # GPU/FxPlug logging
+debug_set_config("TLKShowHiddenGapItems", "false")       # turn it back off
+```
+
+TLK flags take effect immediately (TLKUserDefaults is reloaded live).
+CFPreferences flags may require FCP restart for some subsystems.
+
+### Presets (Enable Groups of Flags)
+```
+debug_enable_preset("timeline_visual")     # visual debug overlays
+debug_enable_preset("timeline_logging")    # timeline subsystem logging
+debug_enable_preset("performance")         # perf monitor + decoder/frame drop logging
+debug_enable_preset("render_debug")        # disable rendering layers + GPU logging
+debug_enable_preset("verbose_logging")     # trace-level logging + log UI + thread info
+debug_enable_preset("all_off")             # reset all debug flags to defaults
+```
+
+**Preset details:**
+
+| Preset | What it enables |
+|--------|----------------|
+| `timeline_visual` | Lane indices, misaligned edges, render bar, hidden gaps, invalid layouts, color-highlight changed objects |
+| `timeline_logging` | Log layer changes, parts, reload requests, recycling, visible rect changes, segmentation stats |
+| `performance` | TLK performance monitor, VideoDecoderLogLevelInNLE=2, FrameDropLogLevel=2 |
+| `render_debug` | Disable filmstrip/background/waveform rendering, enable GPU logging (isolate render issues) |
+| `verbose_logging` | LogLevel=trace, LogUI=true, LogThread=true, EnableScheduledReadAudioLogging=true |
+| `all_off` | Remove all debug flags, reset CFPreferences, clear log settings |
+
+### Framerate Monitor
+```
+debug_start_framerate_monitor(2.0)   # log fps every 2 seconds
+debug_stop_framerate_monitor()       # stop monitoring
+```
+Uses FCP's built-in HMDFramerate (ProCore). Reports to system log:
+- Overall fps
+- Average getFrame() call time in ms
+- Min/max frame times
+
+View output: `log stream --process "Final Cut Pro"` or Console.app
+
+### Reset
+```
+debug_reset_config("all")       # reset everything
+debug_reset_config("tlk")       # reset timeline flags only
+debug_reset_config("cfprefs")   # reset CFPreferences only
+debug_reset_config("log")       # reset ProAppSupport log settings only
+```
+
+### All Available Debug Keys
+
+**Timeline visual overlays** (TLK*):
+| Key | Effect |
+|-----|--------|
+| TLKShowItemLaneIndex | Show lane index number on each timeline item |
+| TLKShowMisalignedEdges | Highlight misaligned edges between items |
+| TLKShowRenderBar | Show render status bar overlay |
+| TLKShowHiddenGapItems | Reveal hidden gap items in timeline |
+| TLKShowHiddenItemHeaders | Reveal hidden item headers |
+| TLKShowInvalidLayoutRects | Highlight invalid layout rectangles |
+| TLKShowContainerBounds | Show container bounds |
+| TLKShowContentLayers | Show content layer boundaries |
+| TLKShowRulerBounds | Show ruler bounds overlay |
+| TLKShowUsedRegion | Show used region overlay |
+| TLKShowZeroHeightSpineItems | Show zero-height spine items |
+
+**Timeline logging** (TLK*):
+| Key | What it logs |
+|-----|-------------|
+| TLKLogVisibleLayerChanges | Changes to visible layers |
+| TLKLogParts | Timeline parts lifecycle |
+| TLKLogReloadRequests | Reload/refresh requests |
+| TLKLogRecyclingLayerChanges | Layer recycling events |
+| TLKLogVisibleRectChanges | Visible rect geometry changes |
+| TLKLogSegmentationStatistics | Segmentation statistics |
+
+**Timeline performance/rendering** (TLK* and Debug*):
+| Key | Effect |
+|-----|--------|
+| TLKPerformanceMonitorEnabled | Enable timeline performance monitoring |
+| TLKDebugColorChangedObjects | Color-highlight changed objects after updates |
+| TLKDebugLayoutConstraints | Debug layout constraint resolution |
+| TLKDebugErrorsAndWarnings | Show errors and warnings visually |
+| TLKDisableItemContents | Disable all item content rendering |
+| DebugKeyItemVideoFilmstripsDisabled | Disable video filmstrip thumbnails |
+| DebugKeyItemBackgroundDisabled | Disable item background rendering |
+| DebugKeyItemAudioWaveformsDisabled | Disable audio waveform rendering |
+
+**Video/audio/GPU logging** (CFPreferences):
+| Key | Type | Effect |
+|-----|------|--------|
+| VideoDecoderLogLevelInNLE | int | Video decoder verbosity (0=off, higher=more) |
+| FrameDropLogLevel | int | Frame drop reporting (0=off, higher=more) |
+| GPU_LOGGING | bool | GPU/FxPlug pipeline logging |
+| EnableScheduledReadAudioLogging | bool | Audio scheduled read logging |
+| EnableLibraryUpdateHistoryValidation | bool | Library update history validation |
+| FFVAMLSaveTranscription | bool | Save transcription data to disk |
+
+**ProAppSupport log system**:
+| Key | Values | Effect |
+|-----|--------|--------|
+| LogLevel | trace, debug, info, warning, error, failure | Set minimum log level |
+| LogUI | bool | Toggle in-app log viewer panel |
+| LogThread | bool | Include thread info in log output |
+| LogCategory | bitmask | Filter by subsystem category |
+
+Log categories: dev, player, sequenceEditor, camera, inspector, director,
+voiceover, selection, network, theme, share, analysisKit, backgroundTasks,
+angleEditor, lessons, onboarding, userNotifications, ui, all
+
+**FCP behavior overrides**:
+| Key | Effect |
+|-----|--------|
+| FFDontCoalesceGaps | Prevent automatic gap coalescing in timeline |
+| FFDisableSnapping | Disable magnetic snapping |
+| FFDisableSkimming | Disable clip skimming |
+
+### How Debug Tools Help
+
+**Diagnosing timeline layout issues**: Enable `timeline_visual` preset to see lane
+indices, hidden gaps, misaligned edges, and invalid layout rects. This reveals
+structural problems invisible in the normal UI.
+
+**Performance troubleshooting**: Enable `performance` preset + `debug_start_framerate_monitor()`
+to measure actual rendering fps and identify bottlenecks. Video decoder and frame drop
+logging pinpoint decode pipeline issues.
+
+**Render pipeline isolation**: The `render_debug` preset disables filmstrips, backgrounds,
+and waveforms independently, letting you isolate which rendering subsystem is causing
+problems. GPU logging captures the FxPlug/shader pipeline.
+
+**Verbose logging for development**: The `verbose_logging` preset sets ProAppSupport to
+trace level with the log UI enabled, giving maximum visibility into FCP's internal
+operations. Useful when developing new SpliceKit features or investigating FCP behavior.
+
+**Understanding timeline internals**: `TLKShowHiddenGapItems` and `TLKShowZeroHeightSpineItems`
+reveal items FCP hides from the user, helping understand the true timeline data model.
 
 ## Direct Timeline Actions (`timeline.directAction`)
 

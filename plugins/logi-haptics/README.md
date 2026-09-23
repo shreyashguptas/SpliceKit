@@ -3,6 +3,9 @@
 Mirrors the four built-in Final Cut Pro haptics off the Force Touch trackpad
 onto the **Logitech MX Master 4** mouse.
 
+Which FCP functions fire each haptic, and how they were found, is in
+[docs/internals/haptics.md](../../docs/internals/haptics.md).
+
 ## Architecture
 
 ```

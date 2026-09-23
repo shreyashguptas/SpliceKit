@@ -2,7 +2,7 @@
 
 A hands-on guide for writing your own Lua scripts to automate Final Cut Pro.
 Covers everything from "Hello World" to building multi-step production pipelines.
-Read this after skimming the [SDK Reference](LUA_SDK_REFERENCE.md) for the API surface.
+Read this after skimming the [SDK Reference](../reference/lua-sdk.md) for the API surface.
 
 ---
 
@@ -285,7 +285,8 @@ when working with clip timing data.**
 
 ### The Module Pattern
 
-Scripts that provide reusable functions should follow this pattern:
+Scripts that provide reusable functions should follow this pattern (`my_tool.lua` is a
+hypothetical example, not a file in `lua/examples/`):
 
 ```lua
 --[[ my_tool.lua — description ]]
@@ -316,7 +317,7 @@ return tool
 Then load it:
 
 ```lua
-> dofile("examples/my_tool.lua")
+> dofile("examples/my_tool.lua")   -- the hypothetical script above
 My Tool loaded. Commands:
   tool.do_something()
   tool.do_another_thing(x, y)
@@ -467,16 +468,12 @@ else
 end
 ```
 
-### Example: Wait for Beat Detection
+### Example: Beat Detection
 
-```lua
-local beats = sk.rpc("beats.detect", {
-    file_path = "/path/to/song.mp3",
-    sensitivity = 0.7
-})
--- beats.detect is synchronous — it blocks until done
--- No polling needed, but it can take 10-30 seconds
-```
+Beat detection cannot run inside FCP's process (the hardened runtime blocks the audio
+analysis), so there is nothing to wait for from Lua: `beats.detect` only passes through
+beat data that the MCP tool `detect_beats()` computed outside FCP. Run `detect_beats()`
+from the MCP client and hand the beat times to your script.
 
 ### Progress Logging
 
@@ -974,7 +971,7 @@ for _, clip in ipairs(items) do
 end
 
 -- FASTER: batch blading uses one call for all times
-sk.rpc("timeline.addMarkers", {times = all_times})  -- 1 RPC call
+sk.rpc("timeline.addMarkers", {markers = all_markers})  -- 1 RPC call ({time, name, kind} each)
 ```
 
 ### Use Batch Operations When Available
@@ -986,8 +983,12 @@ for _, t in ipairs(times) do
     sk.add_marker()
 end
 
--- Use the batch endpoint:
-sk.rpc("timeline.addMarkers", {times = times})
+-- Use the batch endpoint (one call, one undo step):
+local markers = {}
+for _, t in ipairs(times) do
+    markers[#markers + 1] = {time = t, name = "", kind = "standard"}
+end
+sk.rpc("timeline.addMarkers", {markers = markers})
 ```
 
 ### Cache Timeline State
@@ -1244,7 +1245,7 @@ sk.seek(saved)
 local ready = false
 for i = 1, 60 do
     sk.sleep(2)
-    local state = sk.rpc("some.method", {})
+    local state = sk.rpc("some.method", {})   -- placeholder: the status RPC you poll
     if state and state.done then ready = true; break end
 end
 ```
