@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_mcp_tool_annotations import load_server_module  # noqa: E402
+from test_mcp_tool_annotations import load_server_module, set_package_global  # noqa: E402
 
 
 INSPECTOR_SET_KEYS = (
@@ -68,7 +68,7 @@ class ReportedNitTests(unittest.TestCase):
             ],
             "duration": 4.0,
         }
-        self.module._run_structure_analyzer = lambda *args, **kwargs: analysis
+        set_package_global(self.module, "_run_structure_analyzer", lambda *args, **kwargs: analysis)
         out = self.module.beat_sync_blade("/tmp/song.wav", dry_run=True)
 
         numbered = re.findall(r"(?m)^\s+(\d+)\.", out)

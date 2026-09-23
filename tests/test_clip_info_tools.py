@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_mcp_tool_annotations import load_server_module  # noqa: E402
+from test_mcp_tool_annotations import load_server_module, set_package_global  # noqa: E402
 
 # A valid 1x1 PNG; the tools only pass the bytes through, so the pixel format is irrelevant.
 TINY_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJ"
@@ -105,10 +105,11 @@ class ClipInfoToolTests(unittest.TestCase):
 
     def setUp(self):
         # Under the fake FastMCP the real Image class is unavailable; each test picks.
-        self.module.Image = _StubImage
+        # Image is a global of the package modules that use it, so rebind it there.
+        set_package_global(self.module, "Image", _StubImage)
 
     def tearDown(self):
-        self.module.Image = None
+        set_package_global(self.module, "Image", None)
 
     def _install_bridge(self, responder):
         calls = []
@@ -177,7 +178,7 @@ class ClipInfoToolTests(unittest.TestCase):
 
     def test_get_clip_info_text_only_when_image_class_unavailable(self):
         self._install_bridge(lambda m, p: _clip_info_response(p))
-        self.module.Image = None
+        set_package_global(self.module, "Image", None)
         out = self.module.get_clip_info("obj_1")
         self.assertIsInstance(out, str)
         self.assertIn("frame: 640x360 JPEG", out)
@@ -399,7 +400,7 @@ class ClipInfoToolTests(unittest.TestCase):
             self.assertEqual([c[0] for c in calls],
                              ["viewer.capture"] * 3 + ["timeline.capture"] * 3 + ["inspector.capture"] * 3)
 
-            self.module.Image = None
+            set_package_global(self.module, "Image", None)
             out = self.module.capture_viewer(path=png_path)
             self.assertIsInstance(out, str)
             self.assertIn("Viewer captured", out)

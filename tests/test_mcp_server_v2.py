@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_mcp_tool_annotations import FakeToolError, load_server_module  # noqa: E402
+from test_mcp_tool_annotations import FakeToolError, load_server_module, set_package_global  # noqa: E402
 
 
 class FakeSocket:
@@ -177,12 +177,16 @@ class ServerV2Tests(unittest.TestCase):
         spare.bind(("127.0.0.1", 0))
         port = spare.getsockname()[1]
         spare.close()  # nothing listens here now
+        # The address is a global of the package modules (config, and bridge, which
+        # connects to it); rebind it where the connection reads it.
         old = (m.SPLICEKIT_HOST, m.SPLICEKIT_PORT)
-        m.SPLICEKIT_HOST, m.SPLICEKIT_PORT = "127.0.0.1", port
+        set_package_global(m, "SPLICEKIT_HOST", "127.0.0.1")
+        set_package_global(m, "SPLICEKIT_PORT", port)
         try:
             r = b.call("system.version")
         finally:
-            m.SPLICEKIT_HOST, m.SPLICEKIT_PORT = old
+            set_package_global(m, "SPLICEKIT_HOST", old[0])
+            set_package_global(m, "SPLICEKIT_PORT", old[1])
         self.assertIn("Cannot connect to SpliceKit", r["error"])
 
     # -- batch color / effect: one pass per spine clip -------------------------------

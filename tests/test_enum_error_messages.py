@@ -8,9 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from support.server_loader import purge_package_modules  # noqa: E402
 
 
 def _load_server_module():
+    # A fresh splicekit_mcp package, not one another test built under the fake SDK.
+    purge_package_modules()
     spec = importlib.util.spec_from_file_location(
         "splicekit_mcp_server", REPO_ROOT / "mcp" / "server.py"
     )

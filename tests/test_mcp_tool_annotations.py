@@ -1,124 +1,21 @@
 #!/usr/bin/env python3
-import importlib.util
-import json
 import sys
-import types
 import unittest
 from pathlib import Path
 
 
-# Wire spellings of the ToolAnnotations fields (what an MCP client receives).
-_ANNOTATION_ALIASES = {
-    "read_only_hint": "readOnlyHint",
-    "destructive_hint": "destructiveHint",
-    "idempotent_hint": "idempotentHint",
-    "open_world_hint": "openWorldHint",
-    "title": "title",
-}
-
-
-class FakeToolAnnotations(dict):
-    """Stands in for mcp.types.ToolAnnotations (mcp 2.x): built with snake_case keyword
-    arguments like the real model, readable by the tests under the camelCase names the
-    real model serializes to (model_dump(by_alias=True))."""
-
-    def __init__(self, **kwargs):
-        unknown = set(kwargs) - set(_ANNOTATION_ALIASES)
-        if unknown:
-            raise TypeError(f"unexpected ToolAnnotations fields: {sorted(unknown)}")
-        super().__init__({_ANNOTATION_ALIASES[k]: v for k, v in kwargs.items()})
-
-    def model_dump(self, by_alias=True, exclude_none=True):
-        return dict(self)
-
-
-class FakeToolError(Exception):
-    """Stands in for mcp.server.mcpserver.exceptions.ToolError."""
-
-
-class FakeMCPServer:
-    """Stands in for mcp.server.mcpserver.MCPServer (mcp 2.x): records every tool,
-    resource and prompt registration so the tests can inspect them without the SDK."""
-
-    def __init__(self, name=None, title=None, description=None, instructions=None,
-                 website_url=None, icons=None, version="", **kwargs):
-        self.name = name
-        self.instructions = instructions
-        self.version = version
-        self.tools = []
-        self.resources = []
-        self.prompts = []
-        self._tool_manager = types.SimpleNamespace(list_tools=lambda: [])
-
-    def tool(self, name=None, title=None, description=None, annotations=None, **kwargs):
-        def decorator(func):
-            self.tools.append(
-                {
-                    "name": name or func.__name__,
-                    "annotations": dict(annotations or {}),
-                    "func": func,
-                }
-            )
-            return func
-
-        return decorator
-
-    def resource(self, uri, **kwargs):
-        def decorator(func):
-            self.resources.append({"uri": uri, "func": func, **kwargs})
-            return func
-        return decorator
-
-    def prompt(self, **kwargs):
-        def decorator(func):
-            self.prompts.append({"func": func, **kwargs})
-            return func
-        return decorator
-
-
-# Kept under the old name for tests written against it.
-FakeFastMCP = FakeMCPServer
-
-
-def load_server_module():
-    repo_root = Path(__file__).resolve().parents[1]
-    module_path = repo_root / "mcp" / "server.py"
-
-    # The layout of the mcp 2.x package that mcp/server.py imports from. The fake
-    # mcpserver module has no Image attribute on purpose: the server treats a missing
-    # Image helper as "return text instead of inline images" and the tests rely on that.
-    fake_mcp = types.ModuleType("mcp")
-    fake_mcp_server = types.ModuleType("mcp.server")
-    fake_mcpserver = types.ModuleType("mcp.server.mcpserver")
-    fake_mcpserver.MCPServer = FakeMCPServer
-    fake_types = types.ModuleType("mcp.types")
-    fake_types.ToolAnnotations = FakeToolAnnotations
-    fake_exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
-    fake_exceptions.ToolError = FakeToolError
-
-    injected_modules = {
-        "mcp": fake_mcp,
-        "mcp.server": fake_mcp_server,
-        "mcp.server.mcpserver": fake_mcpserver,
-        "mcp.server.mcpserver.exceptions": fake_exceptions,
-        "mcp.types": fake_types,
-    }
-    previous_modules = {name: sys.modules.get(name) for name in injected_modules}
-
-    try:
-        sys.modules.update(injected_modules)
-
-        spec = importlib.util.spec_from_file_location("splicekit_mcp_server_under_test", module_path)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        for name, previous in previous_modules.items():
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
+# The fake SDK and the loader live in tests/support/server_loader.py; they are imported
+# here under their old names because the other test files import them from this module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from support.server_loader import (  # noqa: E402,F401
+    FakeFastMCP,
+    FakeMCPServer,
+    FakeToolAnnotations,
+    FakeToolError,
+    load_server_module,
+    package_module,
+    set_package_global,
+)
 
 
 class MCPToolAnnotationTests(unittest.TestCase):
