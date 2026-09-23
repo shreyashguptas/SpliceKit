@@ -334,3 +334,75 @@ void SpliceKitPlugins_loadAll(void) {
 
     SpliceKit_log(@"[Plugin] Finished loading %lu plugin(s)", (unsigned long)sorted.count);
 }
+
+// ============================================================================
+#pragma mark - Plugin Method Registry
+// ============================================================================
+//
+// Dynamic method registration for plugins. Both Lua and native plugins register
+// handler blocks into this dictionary. The dispatch fallthrough in
+// SpliceKit_handleRequest checks here before returning "method not found".
+//
+
+NSMutableDictionary<NSString *, SpliceKitMethodHandler> *sPluginHandlers = nil;
+static NSMutableDictionary<NSString *, NSDictionary *> *sPluginMethodMeta = nil;
+static NSMutableDictionary<NSString *, NSDictionary *> *sPluginManifests = nil;
+
+void SpliceKit_ensurePluginRegistryInit(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sPluginHandlers = [NSMutableDictionary dictionary];
+        sPluginMethodMeta = [NSMutableDictionary dictionary];
+        sPluginManifests = [NSMutableDictionary dictionary];
+    });
+}
+
+void SpliceKit_registerPluginMethod(NSString *fullMethod,
+                                     SpliceKitMethodHandler handler,
+                                     NSDictionary *metadata) {
+    SpliceKit_ensurePluginRegistryInit();
+    sPluginHandlers[fullMethod] = [handler copy];
+    if (metadata) sPluginMethodMeta[fullMethod] = metadata;
+    SpliceKit_log(@"[Plugin] Registered method: %@", fullMethod);
+}
+
+void SpliceKit_unregisterPluginMethod(NSString *method) {
+    [sPluginHandlers removeObjectForKey:method];
+    [sPluginMethodMeta removeObjectForKey:method];
+}
+
+void SpliceKit_registerPluginManifest(NSString *pluginId, NSDictionary *manifest) {
+    SpliceKit_ensurePluginRegistryInit();
+    sPluginManifests[pluginId] = manifest;
+}
+
+// Exposed to SpliceKitBridgeMetadata.m so bridge.describe can merge plugin
+// metadata with the built-in catalog.
+NSDictionary *SpliceKit_getPluginMetadataSnapshot(void) {
+    SpliceKit_ensurePluginRegistryInit();
+    return [sPluginMethodMeta copy] ?: @{};
+}
+
+// plugin.listMethods — returns all registered plugin methods + metadata
+NSDictionary *SpliceKit_handlePluginListMethods(NSDictionary *params) {
+    SpliceKit_ensurePluginRegistryInit();
+    NSMutableArray *methods = [NSMutableArray array];
+    for (NSString *name in sPluginMethodMeta) {
+        NSMutableDictionary *entry = [sPluginMethodMeta[name] mutableCopy] ?: [NSMutableDictionary dictionary];
+        entry[@"name"] = name;
+        [methods addObject:entry];
+    }
+    // Also include methods registered without metadata
+    for (NSString *name in sPluginHandlers) {
+        if (!sPluginMethodMeta[name]) {
+            [methods addObject:@{@"name": name}];
+        }
+    }
+    return @{@"methods": methods, @"count": @(sPluginHandlers.count)};
+}
+
+// plugin.list — returns all loaded plugin manifests
+NSDictionary *SpliceKit_handlePluginList(NSDictionary *params) {
+    SpliceKit_ensurePluginRegistryInit();
+    return @{@"plugins": sPluginManifests ?: @{}, @"count": @(sPluginManifests.count)};
+}

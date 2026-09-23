@@ -115,7 +115,7 @@ def objc_string(text: str) -> str:
 
 
 def generate() -> str:
-    sources = {p: p.read_text(encoding="utf-8") for p in sorted(SOURCES.glob("*.m"))}
+    sources = {p: p.read_text(encoding="utf-8") for p in sorted(SOURCES.rglob("*.m"))}
     server = sources[SOURCES / "SpliceKitServer.m"]
     start = server.index("NSDictionary *SpliceKit_handleRequest")
     end = server.index("#pragma mark - Client Handler", start)

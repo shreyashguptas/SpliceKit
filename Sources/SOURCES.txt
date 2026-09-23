@@ -12,6 +12,16 @@ SpliceKitMediaExtensionGuard.m
 SpliceKitVP9.mm
 SpliceKitMKV.m
 SpliceKitServer.m
+SpliceKitServerUtil.m
+SpliceKitServerRuntime.m
+SpliceKitServerRuntimeExport.m
+SpliceKitServerDebug.m
+SpliceKitFeaturePlaybackSpeed.m
+SpliceKitFeatureViewerZoom.m
+SpliceKitFeatureFreezeExtend.m
+SpliceKitFeatureEffectDrag.m
+SpliceKitFeatureEffectFavorites.m
+SpliceKitFeatureToggles.m
 SpliceKitBridgeMetadata.m
 SpliceKitBridgeParams.m
 SpliceKitAsync.m

@@ -9,7 +9,7 @@
 //
 //  Built-in method metadata is a static table seeded below. Methods registered
 //  via SpliceKit_registerPluginMethod already carry their own metadata dict
-//  (see SpliceKitServer.m — sPluginMethodMeta) and are merged into the output.
+//  (see SpliceKitPlugins.m — sPluginMethodMeta) and are merged into the output.
 //
 
 #import <Foundation/Foundation.h>

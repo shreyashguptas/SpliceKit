@@ -1,10 +1,11 @@
 //
 //  SpliceKitServerHandlers.h
-//  SpliceKit - Bridge handlers and helpers defined in SpliceKitServer.m that
-//  other files call directly (in-process, without going through the socket).
+//  SpliceKit - Bridge handlers and helpers defined in SpliceKitServer.m (and its
+//  SpliceKitServer*.m / SpliceKitFeature*.m companion files) that other files call
+//  directly (in-process, without going through the socket).
 //
-//  Every declaration here must match its definition in SpliceKitServer.m,
-//  which imports this header so the compiler checks both sides.
+//  Every declaration here must match its definition; the defining files import
+//  this header so the compiler checks both sides.
 //
 
 #ifndef SpliceKitServerHandlers_h
@@ -31,6 +32,8 @@ NSDictionary *SpliceKit_handleBatchExport(NSDictionary *params);
 NSDictionary *SpliceKit_handlePlayback(NSDictionary *params);
 NSDictionary *SpliceKit_handlePlaybackSeek(NSDictionary *params);
 NSDictionary *SpliceKit_handlePlaybackGetPosition(NSDictionary *params);
+NSDictionary *SpliceKit_handlePlaybackSetRate(NSDictionary *params);
+NSDictionary *SpliceKit_handlePlaybackShuttle(NSDictionary *params);
 
 #pragma mark - Effects, Transitions, Titles
 
@@ -40,6 +43,7 @@ NSDictionary *SpliceKit_handleTransitionsList(NSDictionary *params);
 NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params);
 NSDictionary *SpliceKit_handleTitleInsert(NSDictionary *params);
 NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params);
+void SpliceKit_installEffectDragSwizzlesNow(void);
 
 #pragma mark - Menus, FCPXML, Music
 
