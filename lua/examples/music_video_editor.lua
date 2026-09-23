@@ -22,7 +22,7 @@
   PATTERNS USED:
     - sk.rpc("beats.detect", {...}) -- external beat detection tool
       that returns {bpm, beats=[], bars=[], sections=[]}
-    - sk.rpc("timeline.addMarkers", {times=...}) -- batch marker creation
+    - sk.rpc("timeline.addMarkers", {markers={{time=...}}}) -- batch marker creation
       (much faster than seeking to each position and adding one-by-one)
     - sk.rpc("transitions.apply", {name=...}) -- apply a named transition
       at the current edit point
@@ -73,7 +73,9 @@ sk.log(string.format("[MusicVideo] Detected %d BPM, %d beats, %d bars",
 -- Step 2: Add markers at beats and bars
 -----------------------------------------------------------
 if beats.beats and #beats.beats > 0 then
-    sk.rpc("timeline.addMarkers", {times = beats.beats})
+    local markers = {}
+    for _, t in ipairs(beats.beats) do markers[#markers + 1] = {time = t} end
+    sk.rpc("timeline.addMarkers", {markers = markers})
     sk.log("[MusicVideo] Added " .. #beats.beats .. " beat markers")
 end
 

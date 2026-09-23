@@ -107,22 +107,14 @@ end
 -- Step 3: Add markers
 -----------------------------------------------------------
 if ADD_MARKERS then
-    local marker_times = {}
+    -- One batch call: every marker lands in a single undo step.
+    local kind = CHAPTER_MARKERS and "chapter" or "standard"
+    local markers = {}
     for _, scene in ipairs(scenes) do
-        table.insert(marker_times, scene.start)
+        markers[#markers + 1] = {time = scene.start, kind = kind}
     end
-
-    if CHAPTER_MARKERS then
-        -- Add chapter markers (need to go to each position)
-        for _, scene in ipairs(scenes) do
-            sk.seek(scene.start)
-            sk.timeline("addChapterMarker")
-        end
-        sk.log("[SceneDetective] Added " .. #scenes .. " chapter markers")
-    else
-        sk.rpc("timeline.addMarkers", {times = marker_times})
-        sk.log("[SceneDetective] Added " .. #scenes .. " markers")
-    end
+    sk.rpc("timeline.addMarkers", {markers = markers})
+    sk.log("[SceneDetective] Added " .. #scenes .. " " .. kind .. " markers")
 end
 
 -----------------------------------------------------------

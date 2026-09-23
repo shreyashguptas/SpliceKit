@@ -59,16 +59,14 @@ def batch_timeline_actions(actions: str, undo_name: str = "Batch Actions") -> st
 
     undo_name: Edit > Undo menu name when a group is opened (default "Batch Actions").
 
-    Example: blade at 3 positions:
+    Example: select the clip at the playhead and grade it, as one undo step:
       batch_timeline_actions('[
-        {"type":"playback","action":"goToStart"},
-        {"type":"playback","action":"nextFrame","repeat":48},
-        {"type":"timeline","action":"blade"},
-        {"type":"playback","action":"nextFrame","repeat":48},
-        {"type":"timeline","action":"blade"},
-        {"type":"playback","action":"nextFrame","repeat":48},
-        {"type":"timeline","action":"blade"}
+        {"type":"timeline","action":"selectClipAtPlayhead"},
+        {"type":"timeline","action":"addColorBoard"}
       ]')
+
+    For cuts or markers at known times use blade_at_times / add_markers_at_times: they
+    jump straight to each time instead of stepping the playhead frame by frame.
     """
     try:
         action_list = json.loads(actions)

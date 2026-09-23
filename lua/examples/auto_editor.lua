@@ -179,7 +179,9 @@ stats.scenes_detected = #scene_times
 
 if #scene_times > 0 then
     -- Add markers at scene boundaries
-    sk.rpc("timeline.addMarkers", {times = scene_times})
+    local markers = {}
+    for _, t in ipairs(scene_times) do markers[#markers + 1] = {time = t} end
+    sk.rpc("timeline.addMarkers", {markers = markers})
     sk.log(string.format("[AutoEditor] Found %d scene changes, markers added", #scene_times))
 
     -- Add transitions at scene breaks.
