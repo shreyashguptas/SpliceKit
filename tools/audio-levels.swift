@@ -4,7 +4,7 @@
 //
 //  Decodes a time range of the file's audio with AVAssetReader (out of Final
 //  Cut Pro's process: in-process AVFoundation audio decoding deadlocked, see
-//  SpliceKitServer.m's beat detector note) and prints, per slice, the peak
+//  SpliceKitServerMusic.m's beat detector note) and prints, per slice, the peak
 //  sample level and the RMS level in dBFS. SpliceKit's bridge maps the slices
 //  onto the timeline (timeline.getAudioLevels) so an MCP client can "see" the
 //  audio of every clip.

@@ -30,6 +30,9 @@ NSDictionary *SpliceKit_handleTimelineTrimClip(NSDictionary *params);
 NSDictionary *SpliceKit_handleTimelineBeginEdit(NSDictionary *params);
 NSDictionary *SpliceKit_handleTimelineEndEdit(NSDictionary *params);
 NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params);
+NSDictionary *SpliceKit_handleNativeCaptionsRemove(NSDictionary *params);
+NSDictionary *SpliceKit_serverStructureGenerateCaptions(NSDictionary *params);
+NSDictionary *SpliceKit_serverStructureRemove(NSDictionary *params);
 NSDictionary *SpliceKit_handleSpineGetItems(NSDictionary *params);
 NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params);
 NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params);
@@ -56,6 +59,7 @@ void SpliceKit_installEffectDragSwizzlesNow(void);
 #pragma mark - Menus, FCPXML, Music
 
 NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params);
+NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
 NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
 NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);

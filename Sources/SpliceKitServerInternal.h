@@ -66,25 +66,6 @@ typedef struct { SpliceKit_CMTime start; SpliceKit_CMTime duration; } SpliceKit_
 
 #pragma GCC visibility push(hidden)
 
-#pragma mark - Defined in SpliceKitServer.m
-
-NSArray *SpliceKit_browserClipsOfEvent(id event);
-id SpliceKit_getSelectedTimelineItem(id timeline);
-id SpliceKit_getSelectedClipEffectStack(id timeline, id *outClip);
-NSArray<id> *SpliceKit_keyframeTargetsForClip(id clip);
-NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName);
-void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
-NSString *SpliceKit_readClipRole(id clip);
-NSArray *SpliceKit_mixerArrayFromContainer(id value);
-BOOL SpliceKit_mixerIsCollectionLike(id item);
-BOOL SpliceKit_mixerIsSkippableItem(id item);
-NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params);
-NSDictionary *SpliceKit_describeWindow(NSWindow *window);
-double SpliceKit_quantizeSecondsToFrameGrid(double seconds, double frameSeconds);
-id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName);
-NSArray *SpliceKit_allMotionTitleCandidatesOnSequence(id sequence);
-NSArray *SpliceKit_allCaptionsOnSequence(id sequence);
-
 #pragma mark - Defined in SpliceKitServerUtil.m
 
 extern NSMutableDictionary<NSString *, id> *sHandleMap;
@@ -316,6 +297,120 @@ NSDictionary *SpliceKit_handleGetClipEffects(NSDictionary *params);
 NSDictionary *SpliceKit_resolveEffectDescriptor(NSString *effectID,
                                                 NSString *name,
                                                 NSString *requiredType);
+
+#pragma mark - Defined in SpliceKitServerRender.m
+
+NSDictionary *SpliceKit_handleBackgroundRenderStatus(__unused NSDictionary *params);
+NSDictionary *SpliceKit_handleBackgroundRenderControl(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerPalette.m
+
+NSDictionary *SpliceKit_handleCommandShow(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandHide(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandSearch(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandExecute(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineStatus(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineOpen(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineSyncRoot(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineOpenSelectedInSecondary(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineFocus(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineClose(NSDictionary *params);
+NSDictionary *SpliceKit_handleDualTimelineTogglePanel(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandAI(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandAIGemma(NSDictionary *params);
+NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerBrowser.m
+
+NSArray *SpliceKit_browserClipsOfEvent(id event);
+BOOL SpliceKit_browserItemIsProject(id item);
+NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params);
+double SpliceKit_browserEntrySeconds(NSDictionary *entry, NSString *key);
+NSDictionary *SpliceKit_handleBrowserAppendClip(NSDictionary *params);
+NSDictionary *SpliceKit_handleBrowserInsertClip(NSDictionary *params);
+NSDictionary *SpliceKit_handleMediaImportFile(NSDictionary *params);
+NSDictionary *SpliceKit_handleMediaRemoveClip(NSDictionary *params);
+NSDictionary *SpliceKit_handleBrowserConnectClip(NSDictionary *params);
+NSDictionary *SpliceKit_handleBrowserPlaceClipEdit(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerUI.m
+
+NSDictionary *SpliceKit_handleMenuList(NSDictionary *params);
+NSDictionary *SpliceKit_handleViewToggle(NSDictionary *params);
+NSDictionary *SpliceKit_handleWorkspace(NSDictionary *params);
+NSDictionary *SpliceKit_handleRolesAssign(NSDictionary *params);
+NSDictionary *SpliceKit_handleToolSelect(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerInspector.m
+
+id SpliceKit_getSelectedTimelineItem(id timeline);
+id SpliceKit_getSelectedClipEffectStack(id timeline, id *outClip);
+NSArray<id> *SpliceKit_keyframeTargetsForClip(id clip);
+NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName);
+void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
+double SpliceKit_channelValue(id channel);
+double SpliceKit_channelValueAtTime(id channel, SpliceKit_CMTime time);
+BOOL SpliceKit_setChannelValueAtTimeWithOptions(id channel, double value, SpliceKit_CMTime time, unsigned int options);
+NSDictionary *SpliceKit_handleInspectorGet(NSDictionary *params);
+NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
+NSDictionary *SpliceKit_handleInspectorGetTitle(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerMixer.m
+
+NSString *SpliceKit_readClipRole(id clip);
+NSArray *SpliceKit_mixerArrayFromContainer(id value);
+BOOL SpliceKit_mixerIsCollectionLike(id item);
+BOOL SpliceKit_mixerIsSkippableItem(id item);
+id SpliceKit_getClipEffectStack(id clip);
+NSDictionary *SpliceKit_handleMixerSetVolume(NSDictionary *params);
+NSDictionary *SpliceKit_handleMixerVolumeBegin(NSDictionary *params);
+NSDictionary *SpliceKit_handleMixerVolumeEnd(NSDictionary *params);
+NSDictionary *SpliceKit_handleMixerSetAllVolumes(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerLibrary.m
+
+NSDictionary *SpliceKit_handleShareExport(NSDictionary *params);
+NSDictionary *SpliceKit_handleProjectCreate(NSDictionary *params);
+NSDictionary *SpliceKit_handleEventCreate(NSDictionary *params);
+NSDictionary *SpliceKit_handleLibraryCreate(NSDictionary *params);
+NSDictionary *SpliceKit_handleSelectClipAtPlayheadLane(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerCapture.m
+
+NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params);
+NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params);
+NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerDialogs.m
+
+NSDictionary *SpliceKit_describeWindow(NSWindow *window);
+void SpliceKit_autoDismissBlockingDialogs(void);
+NSDictionary *SpliceKit_handleDialogDetect(NSDictionary *params);
+NSDictionary *SpliceKit_handleDialogClick(NSDictionary *params);
+NSDictionary *SpliceKit_handleDialogFill(NSDictionary *params);
+NSDictionary *SpliceKit_handleDialogCheckbox(NSDictionary *params);
+NSDictionary *SpliceKit_handleDialogPopup(NSDictionary *params);
+NSDictionary *SpliceKit_handleDialogDismiss(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerMusic.m
+
+double SpliceKit_quantizeSecondsToFrameGrid(double seconds, double frameSeconds);
+id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName);
+NSDictionary *SpliceKit_handleBeatsDetect(NSDictionary *params);
+double SpliceKit_cmtimeToSeconds(SpliceKit_CMTime t);
+NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params);
+NSDictionary *SpliceKit_handleFlexMusicGetSong(NSDictionary *params);
+NSDictionary *SpliceKit_handleFlexMusicGetTiming(NSDictionary *params);
+NSDictionary *SpliceKit_handleFlexMusicRender(NSDictionary *params);
+NSDictionary *SpliceKit_handleFlexMusicAddToTimeline(NSDictionary *params);
+NSDictionary *SpliceKit_handleMontagePlan(NSDictionary *params);
+NSDictionary *SpliceKit_handleMontageAssemble(NSDictionary *params);
+NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerStructure.m
+
+NSArray *SpliceKit_allMotionTitleCandidatesOnSequence(id sequence);
+NSArray *SpliceKit_allCaptionsOnSequence(id sequence);
 
 #pragma GCC visibility pop
 

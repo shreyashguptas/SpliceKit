@@ -16,7 +16,7 @@
 //    3. Off the main thread the `audio-levels` helper (tools/audio-levels.swift)
 //       decodes just that range of the file and returns per-slice levels.
 //       AVFoundation audio decoding inside Final Cut Pro's process deadlocks
-//       (see the beat-detector note in SpliceKitServer.m), hence the helper.
+//       (see the beat-detector note in SpliceKitServerMusic.m), hence the helper.
 //    4. The slices are placed on the timeline (clip start + offset) and summarised.
 //
 //  What the numbers are

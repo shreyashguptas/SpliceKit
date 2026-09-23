@@ -67,7 +67,7 @@ PORT = 9876
 _id = 0
 RAW: dict = {}
 
-# Selectors the bridge code probes (Sources/SpliceKitServer.m, timeline.getDetailedState).
+# Selectors the bridge code probes (Sources/SpliceKitServerTimelineRead.m, timeline.getDetailedState).
 PROBED = {
     "marker kind (chapter)": ["isChapter", "isChapterMarker"],
     "marker kind (todo)": ["isToDo", "isTodo", "isToDoMarker", "isIncomplete", "isCompleted"],

@@ -17,7 +17,7 @@ NSDictionary *SpliceKit_handleTimelineGetAudioLevels(NSDictionary *params);
 // Where the helper binary was found, or nil (SpliceKitAudioLevels.m).
 NSString *SpliceKit_findAudioLevelsHelper(void);
 
-// Defined in SpliceKitServer.m next to the getClipInfo helpers it shares. Main thread
+// Defined in SpliceKitServerClipInfo.m next to the getClipInfo helpers it shares. Main thread
 // only, and it touches no file system (the caller checks that the file exists, off the
 // main thread). Keys: class, name, kind, hasAudio, hasVideo, isCollection, path, fileName,
 // representation, sourceStart, mediaOrigin, fileStart, retimed (BOOL or "unknown"),

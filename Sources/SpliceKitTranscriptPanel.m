@@ -411,7 +411,7 @@ static NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 
 #pragma mark - SpliceKitTranscriptPanel Private
 //
-// Same CMTime struct trick as in SpliceKitServer.m — we define our own copy
+// Same CMTime struct trick as in SpliceKitServerInternal.h — we define our own copy
 // so we can read struct return values from objc_msgSend without linking CoreMedia.
 //
 
