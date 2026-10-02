@@ -143,10 +143,13 @@ def _beat_grid_tempo_line(clip: dict) -> str:
     parts = []
     if _is_num(clip.get("tempo")):
         parts.append(f"tempo {clip['tempo']:.2f} BPM")
+        if _is_num(clip.get("speed")):
+            played = f" = {clip['timelineTempo']:.2f} BPM on the timeline" if _is_num(clip.get("timelineTempo")) else ""
+            parts[-1] += f" at {clip['speed'] * 100:g}% speed{played}"
     iv = clip.get("beatIntervalSeconds") if isinstance(clip.get("beatIntervalSeconds"), dict) else {}
     med, lo, hi = iv.get("median"), iv.get("min"), iv.get("max")
     if _is_num(med) and med > 0:
-        spacing = f"a beat every {med:.3f}s"
+        spacing = f"a beat every {med:.3f}s of the song"
         if _is_num(lo) and _is_num(hi) and (hi - lo) / med > 0.05:
             spacing += f", varying {lo:.3f}-{hi:.3f}s (tempo drifts)"
         else:
@@ -282,10 +285,11 @@ def get_beat_grid(handle: str = "", start_seconds: float | None = None,
     Final Cut Pro stores no per-beat strength: the hierarchy is the strength (section start,
     then downbeat, then beat). The beat map lives on audio-only clips; a clip with video in
     it is never analysed by Final Cut Pro (use detect_beats on its source file for
-    SpliceKit's own, simpler analysis). A beat map is not redone on its own: a new or
-    replaced song is listed under "can detect beats on but has not yet", with the two calls
-    that run the detection. Times assume the song plays at normal speed (100%); a retimed
-    song is flagged.
+    SpliceKit's own, simpler analysis). Final Cut Pro keeps the beat map per media file, so
+    another copy of a song it has analysed comes with its beat map (grid hidden); a song it
+    has never analysed is listed under "can detect beats on but has not yet", with the two
+    calls that run the detection. A song at another speed is mapped through that speed (the
+    answer gives it and the tempo it plays at); in a speed ramp the times are approximate.
 
     Feed the times to blade_at_times, add_markers_at_times or trim_clip; trim_clips_to_beats
     and sync_clips_to_song_beats trim clips to this same map in one call.

@@ -35,7 +35,7 @@ class GetBeatGridTests(FakeBridgeMixin, unittest.TestCase):
         self.assertIn("get_beat_grid", self.module.mcp.instructions)
         doc = tool["func"].__doc__
         for phrase in ("downbeat", "no per-beat strength", "numbered from the start of the song",
-                       "read fresh on", "audio-only clips", "normal speed"):
+                       "read fresh on", "audio-only clips", "speed ramp"):
             self.assertIn(phrase, doc)
 
     def test_rejects_bad_arguments_without_calling_the_bridge(self):
@@ -57,7 +57,7 @@ class GetBeatGridTests(FakeBridgeMixin, unittest.TestCase):
     def test_bars_rendering(self):
         out = self._run()
         self.assertIn("Song obj_7 \"Song\"  lane -1 (connected clip)  9.750s-14.000s", out)
-        self.assertIn("tempo 120.00 BPM; a beat every 0.500s, varying 0.250-0.500s (tempo drifts)", out)
+        self.assertIn("tempo 120.00 BPM; a beat every 0.500s of the song, varying 0.250-0.500s (tempo drifts)", out)
         self.assertIn("beat grid shown", out)
         self.assertIn("16 beats, 4 bars, 2 sections", out)
         self.assertIn("this clip plays the song from 0.750s to 5.000s", out)
@@ -93,6 +93,12 @@ class GetBeatGridTests(FakeBridgeMixin, unittest.TestCase):
         out = self._run(handle="obj_2", start_seconds=3.0)
         self.assertIn("No song on this timeline has a beat map in that range.", out)
         self.assertIn('obj_2 "Interview": no beat map, and Final Cut Pro cannot detect beats on it: has video', out)
+
+    def test_speed_change_is_reported(self):
+        self.response = beat_grid_response()
+        self.response["clips"][0].update(speed=2.0, timelineTempo=240.0)
+        out = self._run()
+        self.assertIn("tempo 120.00 BPM at 200% speed = 240.00 BPM on the timeline", out)
 
     def test_bridge_error_passes_through(self):
         self.response = {"error": "No active timeline module"}

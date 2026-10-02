@@ -637,8 +637,9 @@ get_beat_grid(detail="json")                        # every beat with index, bar
 ```
 Times are timeline seconds; bars and sections are numbered from the start of the song, so the
 numbers survive a trim or a move. There is no per-beat strength in FCP's data: the hierarchy is the
-strength (section start, downbeat, beat). The map is read fresh on every call. Audio clips FCP can
-analyse but has not are listed with the calls that run its detection
+strength (section start, downbeat, beat). The map is read fresh on every call, and FCP keeps it per
+media file, so another copy of an analysed song has it too. Audio clips FCP can analyse but has not
+are listed with the calls that run its detection
 (`select_clips(handles=[...])`, then `timeline_action("enableBeatDetection")`); a clip with video
 in it is never analysed by FCP. Read-only.
 

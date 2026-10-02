@@ -815,12 +815,12 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                     }
                 }
                 if (!sourceEntry) {
-                    result = @{@"error": @"No audio clip on this timeline carries a Final Cut Pro "
-                                         @"beat map. These tools read Final Cut Pro's own timing "
-                                         @"metadata, which comes with songs from its music library; "
-                                         @"detect_beats cannot add it. Pass sourceHandle to name a "
-                                         @"clip, or use detect_beats with beat_sync_blade to cut to "
-                                         @"beats on ordinary audio."};
+                    result = @{@"error": @"No audio clip on this timeline has a Final Cut Pro "
+                                         @"beat map. Run Final Cut Pro's beat detection on the "
+                                         @"song (select it, then timeline_action(\"enableBeatDetection\"); "
+                                         @"get_beat_grid lists the clips it can analyse), pass "
+                                         @"sourceHandle to name a clip, or use detect_beats with "
+                                         @"beat_sync_blade to cut to beats inside a video clip."};
                     return;
                 }
                 sourceKey = sourceEntry[@"pointerKey"];
@@ -828,18 +828,17 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
 
             id sourceItem = sourceEntry[@"item"];
             if (!SpliceKit_boolForSelector(sourceItem, @"hasTimingMetadata")) {
-                // -hasTimingMetadata is Final Cut Pro's own flag for audio it holds a
-                // beat map for, which in practice means a song from its built-in music
-                // library. SpliceKit only ever reads it; detect_beats analyses a file
-                // with an external binary and cannot set it. The old wording here said
-                // "Run beat detection on it first", which sends the caller down a path
-                // that can never make this check pass.
-                result = @{@"error": @"This clip has no Final Cut Pro beat map. Only audio "
-                                     @"from Final Cut Pro's own music library carries one, "
-                                     @"and nothing in SpliceKit can add it — detect_beats "
-                                     @"analyses the file separately and does not set it. "
-                                     @"To cut to beats on ordinary audio, use detect_beats "
-                                     @"with beat_sync_blade or blade_at_times instead."};
+                // -hasTimingMetadata is Final Cut Pro's flag for a clip it holds a beat
+                // map for: a song from its music library, or any audio-only clip its beat
+                // detection (detectBeatsOnSelection:, timeline action enableBeatDetection)
+                // has analysed (verified on 12.3 with a plain WAV). detect_beats analyses a
+                // file with an external binary and does not set it.
+                result = @{@"error": @"This clip has no Final Cut Pro beat map yet. Run Final "
+                                     @"Cut Pro's beat detection on it: select it, then "
+                                     @"timeline_action(\"enableBeatDetection\") (audio-only "
+                                     @"clips only; get_beat_grid lists the clips it can "
+                                     @"analyse). For music inside a video clip, use "
+                                     @"detect_beats with beat_sync_blade or blade_at_times."};
                 return;
             }
 

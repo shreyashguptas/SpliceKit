@@ -105,22 +105,50 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
         clip[@"error"] = @"could not read the clip's source range (audioClippedRange / clippedRange)";
         return clip;
     }
-    double songStart = SpliceKit_secondsFromTime(localRange.start);
-    double songEnd = songStart + SpliceKit_secondsFromTime(localRange.duration);
+    // The beat map is in song (source media) seconds. The clip's own range is in its local
+    // time, which a speed change scales: at 2x, song second 4 is local second 2
+    // (verified on 12.3: a constant 2x retime halves audioClippedRange and leaves the
+    // timing metadata as it was). So song = local * speed, and a song second s plays at
+    // tlStart + (s - songStart) / speed on the timeline.
+    double speed = 1.0;
+    if (SpliceKit_boolForSelector(item, @"isRetimed")) {
+        SEL rateSel = NSSelectorFromString(@"retimeRateForObject:");
+        double rate = NAN;
+        if ([item respondsToSelector:rateSel]) {
+            @try {
+                rate = ((double (*)(id, SEL, CMTimeRange))objc_msgSend)(item, rateSel, localRange);
+            } @catch (NSException *e) {}
+        }
+        if (!isfinite(rate) || rate <= 0.0) {
+            clip[@"status"] = @"error";
+            clip[@"error"] = @"the clip is reversed, frozen or has an unreadable speed: its beats "
+                             @"cannot be placed on the timeline";
+            return clip;
+        }
+        speed = rate;
+        if (SpliceKit_boolForSelector(item, @"hasArtisticRetime")
+            && !SpliceKit_boolForSelector(item, @"isConstantArtisticRetime")) {
+            clip[@"note"] = @"the clip's speed varies (a speed ramp); times use its average speed "
+                            @"and drift inside the ramp";
+        }
+    }
+    double songStart = SpliceKit_secondsFromTime(localRange.start) * speed;
+    double songEnd = songStart + SpliceKit_secondsFromTime(localRange.duration) * speed;
     clip[@"songStartSeconds"] = @(SpliceKit_beatGridRound(songStart));
     clip[@"songEndSeconds"] = @(SpliceKit_beatGridRound(songEnd));
-    // Same mapping as trim_clips_to_beats: one source second is one timeline second.
-    double offset = tlStart - songStart;
-    if (fabs((songEnd - songStart) - (tlEnd - tlStart)) > 0.05) {
-        clip[@"note"] = @"the clip's source range and timeline range differ in length (retimed?); "
-                        @"times assume normal speed";
-    }
+    if (fabs(speed - 1.0) > 1e-6) clip[@"speed"] = @(round(speed * 10000.0) / 10000.0);
+    double (^toTimeline)(double) = ^double(double songSec) {
+        return SpliceKit_beatGridRound(tlStart + (songSec - songStart) / speed);
+    };
 
     NSArray<NSNumber *> *beats = SpliceKit_copyTimingMetadataSecondsForType(item, 1);
     NSArray<NSNumber *> *bars = SpliceKit_copyTimingMetadataSecondsForType(item, 2);
     NSArray<NSNumber *> *sections = SpliceKit_copyTimingMetadataSecondsForType(item, 4);
     double tempo = SpliceKit_copyTimingMetadataTempo(item);
-    if (tempo > 0.0 && isfinite(tempo)) clip[@"tempo"] = @(round(tempo * 1000.0) / 1000.0);
+    if (tempo > 0.0 && isfinite(tempo)) {
+        clip[@"tempo"] = @(round(tempo * 1000.0) / 1000.0);
+        if (clip[@"speed"]) clip[@"timelineTempo"] = @(round(tempo * speed * 1000.0) / 1000.0);
+    }
 
     // Beat spacing across the whole song: tells a steady tempo from a drifting one.
     NSMutableArray<NSNumber *> *intervals = [NSMutableArray array];
@@ -151,8 +179,8 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
     };
 
     // Visible part of the song on the timeline, limited to the requested window.
-    double visStart = MAX(songStart, winStart - offset);
-    double visEnd = MIN(songEnd, winEnd - offset);
+    double visStart = MAX(songStart, songStart + (winStart - tlStart) * speed);
+    double visEnd = MIN(songEnd, songStart + (winEnd - tlStart) * speed);
     BOOL (^visible)(double) = ^BOOL(double s) {
         return s + kBeatGridEpsilon >= visStart && s - kBeatGridEpsilon <= visEnd;
     };
@@ -170,7 +198,7 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
         if (SpliceKit_beatGridMatches(bars, barIdx, s, tol)) level = @"bar";
         if (SpliceKit_beatGridMatches(sections, secIdx, s, tol)) level = @"section";
         [beatRows addObject:@{
-            @"t": @(SpliceKit_beatGridRound(s + offset)),
+            @"t": @(toTimeline(s)),
             @"songSeconds": @(SpliceKit_beatGridRound(s)),
             @"index": @(i + 1),
             @"bar": @(barIdx + 1),            // 0 = a pickup before the first bar
@@ -187,14 +215,14 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
         NSInteger secIdx = SpliceKit_beatGridIndexAtOrBefore(sections, s, tol);
         double next = (i + 1 < bars.count) ? [bars[i + 1] doubleValue] : NAN;
         NSMutableDictionary *row = [@{
-            @"t": @(SpliceKit_beatGridRound(s + offset)),
+            @"t": @(toTimeline(s)),
             @"songSeconds": @(SpliceKit_beatGridRound(s)),
             @"bar": @(i + 1),
             @"section": @(secIdx + 1),
             @"sectionStart": @(SpliceKit_beatGridMatches(sections, secIdx, s, tol)),
             @"beats": beatsPerBar[@((NSInteger)i)] ?: @0,
         } mutableCopy];
-        if (isfinite(next)) row[@"durationSeconds"] = @(SpliceKit_beatGridRound(next - s));
+        if (isfinite(next)) row[@"durationSeconds"] = @(SpliceKit_beatGridRound((next - s) / speed));
         [barRows addObject:row];
     }
 
@@ -211,18 +239,18 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
         double shownStart = MAX(s, songStart), shownEnd = MIN(e, songEnd);
         NSMutableDictionary *row = [@{
             @"section": @(i + 1),
-            @"t": @(SpliceKit_beatGridRound(s + offset)),
-            @"endT": @(SpliceKit_beatGridRound(e + offset)),
+            @"t": @(toTimeline(s)),
+            @"endT": @(toTimeline(e)),
             @"songSeconds": @(SpliceKit_beatGridRound(s)),
             @"songEndSeconds": @(SpliceKit_beatGridRound(e)),
-            @"durationSeconds": @(SpliceKit_beatGridRound(e - s)),
+            @"durationSeconds": @(SpliceKit_beatGridRound((e - s) / speed)),
             @"firstBar": @(firstBar + 1),
             @"bars": @(MAX((NSInteger)0, lastBar - firstBar + 1)),
         } mutableCopy];
         // The part of the section the timeline actually plays (the song may be trimmed).
         if (shownStart > s + kBeatGridEpsilon || shownEnd < e - kBeatGridEpsilon) {
-            row[@"onTimelineT"] = @(SpliceKit_beatGridRound(shownStart + offset));
-            row[@"onTimelineEndT"] = @(SpliceKit_beatGridRound(MAX(shownStart, shownEnd) + offset));
+            row[@"onTimelineT"] = @(toTimeline(shownStart));
+            row[@"onTimelineEndT"] = @(toTimeline(MAX(shownStart, shownEnd)));
         }
         [sectionRows addObject:row];
     }
@@ -280,10 +308,10 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
                 timelineInfo[@"frameRate"] = @(round((1.0 / frameSeconds) * 1000.0) / 1000.0);
                 timelineInfo[@"frameSeconds"] = @(frameSeconds);
             }
+            double durSec = 0.0;
             if ([sequence respondsToSelector:@selector(duration)]) {
                 CMTime dur = ((CMTime (*)(id, SEL))STRET_MSG)(sequence, @selector(duration));
-                double durSec = SpliceKit_secondsFromTime(dur);
-                if (isfinite(durSec)) timelineInfo[@"durationSeconds"] = @(SpliceKit_beatGridRound(durSec));
+                durSec = SpliceKit_secondsFromTime(dur);
             }
             if (startNum) timelineInfo[@"rangeStartSeconds"] = startNum;
             if (endNum) timelineInfo[@"rangeEndSeconds"] = endNum;
@@ -291,10 +319,45 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
 
             NSArray *rootItems = SpliceKit_mixerArrayFromContainer(
                 ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)));
+            if (!(durSec > 0.0) || !isfinite(durSec)) {
+                // sequence.duration answers 0 on 12.3: the timeline ends where the last
+                // primary-storyline item does.
+                durSec = 0.0;
+                for (id item in rootItems) {
+                    CMTimeRange r;
+                    if (SpliceKit_tryReadTimelineRange(primaryObj, item, &r)) {
+                        durSec = MAX(durSec, SpliceKit_secondsFromTime(r.start) + SpliceKit_secondsFromTime(r.duration));
+                    }
+                }
+            }
+            if (durSec > 0.0 && isfinite(durSec)) timelineInfo[@"durationSeconds"] = @(SpliceKit_beatGridRound(durSec));
+
             NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
             NSMutableSet<NSString *> *visited = [NSMutableSet set];
             for (id item in rootItems) {
                 SpliceKit_collectVisibleTimelineEntries(item, primaryObj, entries, visited);
+            }
+            // An audio-only clip is a collection around its media component, and the walk
+            // reports both. Final Cut Pro writes the beat map to both, but only the clip is
+            // what the timeline shows: the component inside carries the untrimmed source
+            // range and no lane. Keep the clip. A connected storyline's children are real
+            // clips and stay.
+            NSMutableSet<NSString *> *innerKeys = [NSMutableSet set];
+            SEL containedSel = NSSelectorFromString(@"containedItems");
+            for (NSDictionary *entry in entries) {
+                id item = entry[@"item"];
+                if ([entry[@"isConnectedStoryline"] boolValue] || ![item respondsToSelector:containedSel]) continue;
+                NSArray *children = SpliceKit_mixerArrayFromContainer(
+                    ((id (*)(id, SEL))objc_msgSend)(item, containedSel));
+                for (id child in children) {
+                    NSString *key = SpliceKit_handlePointerKey(child);
+                    if (key.length) [innerKeys addObject:key];
+                }
+            }
+            if (innerKeys.count && !handle) {
+                [entries filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *entry, NSDictionary *bindings) {
+                    return ![innerKeys containsObject:entry[@"pointerKey"]];
+                }]];
             }
             [entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
                 NSComparisonResult r = [a[@"start"] compare:b[@"start"]];
