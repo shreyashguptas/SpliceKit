@@ -325,7 +325,7 @@ BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, CMTimeRange *outRang
     return NO;
 }
 
-static BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange) {
+BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange) {
     if (!item || !outRange) return NO;
 
     SEL audioSel = NSSelectorFromString(@"audioClippedRange");
@@ -372,7 +372,7 @@ NSArray<NSNumber *> *SpliceKit_sortedUniqueSeconds(NSArray<NSNumber *> *values, 
     return unique;
 }
 
-static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type) {
+NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type) {
     if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return @[];
 
     id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));
@@ -399,7 +399,7 @@ static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, 
     return SpliceKit_sortedUniqueSeconds(times, 0.0001);
 }
 
-static double SpliceKit_copyTimingMetadataTempo(id clip) {
+double SpliceKit_copyTimingMetadataTempo(id clip) {
     if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return 0.0;
 
     id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));

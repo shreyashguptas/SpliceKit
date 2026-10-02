@@ -2,8 +2,8 @@
 
 Shared by the test files (and kept here so one change to a payload shape is made once):
 CMTime dicts, timeline.getDetailedState, timeline.getMarkers, timeline.getClipInfo,
-timeline.captureClipFrame, timeline.selectClips, timeline.trimClip, browser.placeClip and
-the clip / cut entries of timeline.getAudioLevels.
+timeline.captureClipFrame, timeline.selectClips, timeline.trimClip, browser.placeClip,
+timeline.getBeatGrid and the clip / cut entries of timeline.getAudioLevels.
 """
 import base64
 
@@ -289,3 +289,51 @@ def three_clip_detailed_state(playhead_seconds, items=None):
         "itemCount": len(items),
         "items": items,
     }
+
+
+def beat_grid_response(params=None, **overrides):
+    """timeline.getBeatGrid as Sources/Bridge/SpliceKitServerBeatGrid.m answers it: one song on
+    lane -1 (120 BPM, 4/4, trimmed so the timeline plays song seconds 0.75-5.0 from 9.75s; a
+    pickup beat before bar 1, two sections), and one audio clip FCP has not analysed."""
+    params = params or {}
+    offset = 9.0  # timeline = song + 9
+    beats = []
+    for i, s in enumerate([0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0], start=1):
+        bar = 0 if s < 1.0 else int((s - 1.0) // 2.0) + 1
+        in_bar = 1 if bar == 0 else int(round((s - 1.0 - (bar - 1) * 2.0) / 0.5)) + 1
+        section = 1 if s < 3.0 else 2
+        level = "section" if s in (1.0, 3.0) else ("bar" if in_bar == 1 and bar else "beat")
+        beats.append({"t": s + offset, "songSeconds": s, "index": i, "bar": bar, "beatInBar": in_bar,
+                      "section": section if bar else 0, "level": level})
+    bars = [{"t": s + offset, "songSeconds": s, "bar": n, "section": 1 if s < 3.0 else 2,
+             "sectionStart": s in (1.0, 3.0), "beats": 4, "durationSeconds": 2.0}
+            for n, s in ((1, 1.0), (2, 3.0), (3, 5.0))]
+    sections = [
+        {"section": 1, "t": 10.0, "endT": 12.0, "songSeconds": 1.0, "songEndSeconds": 3.0,
+         "durationSeconds": 2.0, "firstBar": 1, "bars": 1},
+        {"section": 2, "t": 12.0, "endT": 18.0, "songSeconds": 3.0, "songEndSeconds": 9.0,
+         "durationSeconds": 6.0, "firstBar": 2, "bars": 3, "onTimelineT": 12.0, "onTimelineEndT": 14.0},
+    ]
+    out = {
+        "status": "ok",
+        "timeline": {"frameRate": 24.0, "frameSeconds": 1 / 24, "durationSeconds": 30.0,
+                     "supportsBeatDetection": True},
+        "clips": [{
+            "handle": "obj_7", "name": "Song", "class": "FFAnchoredMediaComponent", "lane": -1,
+            "connected": True, "startSeconds": 9.75, "endSeconds": 14.0, "durationSeconds": 4.25,
+            "status": "detected", "beatGridVisible": True, "songStartSeconds": 0.75, "songEndSeconds": 5.0,
+            "tempo": 120.0, "beatIntervalSeconds": {"median": 0.5, "min": 0.25, "max": 0.5},
+            "song": {"beatCount": 16, "barCount": 4, "sectionCount": 2,
+                     "firstBeatSeconds": 0.75, "lastBeatSeconds": 8.5},
+            "beats": beats, "bars": bars, "sections": sections,
+        }],
+        "detectable": [{"handle": "obj_9", "name": "Voiceover", "class": "FFAnchoredMediaComponent", "lane": -2,
+                        "connected": True, "startSeconds": 0.0, "endSeconds": 20.0, "durationSeconds": 20.0,
+                        "status": "not_detected"}],
+    }
+    if "startSeconds" in params:
+        out["timeline"]["rangeStartSeconds"] = params["startSeconds"]
+    if "endSeconds" in params:
+        out["timeline"]["rangeEndSeconds"] = params["endSeconds"]
+    out.update(overrides)
+    return out

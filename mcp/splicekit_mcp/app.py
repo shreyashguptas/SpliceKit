@@ -35,6 +35,11 @@ HEAR it: get_audio_levels(handle) (its primary-storyline neighbours come along, 
   silence at each clip's start and end, slices at full scale, and the level jump at each straight
   cut between two analysed primary-storyline clips. Not FCP's audio meters or waveforms: FCP's
   volume, fades, effects, retiming and the mix of all concurrent clips are not applied. Read-only.
+FIND THE BEATS of the music: get_beat_grid() (or a handle, or start_seconds/end_seconds): Final
+  Cut Pro's own beat map for each song on the timeline, every beat, bar (downbeat) and section in
+  timeline seconds plus the tempo, read fresh on every call. Cut B-roll on downbeats and change
+  pace at section starts. A song not analysed yet is listed with the two calls that run FCP's beat
+  detection. Read-only.
 SEE it: capture_timeline, capture_viewer, capture_inspector, capture_clip_frame(handle) (the clip
   as rendered in the Viewer, effects included; moves the playhead and restores it, waits until the
   Viewer shows the new frame and says stale:true when it never did). Captures are in-process from
@@ -88,7 +93,8 @@ UNDO / GROUPING: history_action("undo" | "redo"). begin_edit("Rough cut") ... en
   everything in between ONE undo step (Flexo's internal term: one undoable action) -- always
   call end_edit.
 SCENES, BEATS, WHOLE EDITS: detect_scene_changes() lists the cuts (read-only), then
-  blade_scene_changes() / mark_scene_changes(); detect_beats(file), beat_sync_blade,
+  blade_scene_changes() / mark_scene_changes(); get_beat_grid (FCP's beat map of the songs on the
+  timeline) before detect_beats(file) (SpliceKit's own analysis of a file), beat_sync_blade,
   trim_clips_to_beats; import_srt_as_markers; generate_fcpxml + import_fcpxml (xml, or path= a
   .fcpxml on this Mac; runs as a job, import_fcpxml_status(job_id) while FCP imports remote media;
   never re-import a running job); build_song_cut / assemble_random_clips_to_song_beats (beat-synced cuts).

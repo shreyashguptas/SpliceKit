@@ -549,6 +549,15 @@ If the music currently lives inside a normal A/V clip:
 2. Make sure the selected object is truly audio-only
 3. Run beat detection on that audio-only object
 
+### Reading the Beat Map
+
+`get_beat_grid()` (bridge method `timeline.getBeatGrid`) reads the stored
+timing metadata (`newTimingMetadataForType:` 1 = beats, 2 = bars, 4 = sections,
+8 = tempo) off every visible clip with `hasTimingMetadata`, maps it from source
+time onto the timeline through the clip's `audioClippedRange`, and numbers each
+beat by bar and section from the start of the song. Clips that answer
+`canDetectBeats` are listed as not analysed yet.
+
 ### If You Only Need Beat Timing Data
 
 Use the external detector:

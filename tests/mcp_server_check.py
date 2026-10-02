@@ -76,6 +76,7 @@ if not hasattr(mcp, "Client"):
 from support.payloads import (  # noqa: E402
     audio_levels_clip,
     audio_levels_cut,
+    beat_grid_response,
     capture_clip_frame_response,
     clip_info_response,
     detailed_state,
@@ -194,6 +195,8 @@ class FakeBridge(threading.Thread):
             return markers_response(p.get("kind"))
         if method == "timeline.getAudioLevels":
             return _audio_levels_response(p)
+        if method == "timeline.getBeatGrid":
+            return beat_grid_response(p)
         if method == "timeline.getClipInfo":
             r = clip_info_response({"handle": p.get("handle", "obj_1"), **p})
             if p.get("includeFrame", True) and isinstance(r, dict):

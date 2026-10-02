@@ -500,6 +500,8 @@ CASES.update({
                             needs_parakeet=True, timeout=300),
 
     # ---------------------------------------------------------------- beats / music
+    # Answers on any timeline: the songs with a beat map, or that there is none.
+    "get_beat_grid": read(expect=r"beat map"),
     "detect_beats": Case(args={"file_path": "$AUDIO_FILE", "limit": 8},
                          kind="read", timeout=180),
     "analyze_song_structure": Case(args={"file_path": "$AUDIO_FILE"},

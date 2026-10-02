@@ -625,6 +625,24 @@ blade_scene_changes(handle="obj_12", sample_interval=0.25)
 `mark_scene_changes()` or `blade_scene_changes()` instead.
 
 ### Beat Detection
+
+Final Cut Pro's own beat map of the songs on the timeline (what its beat detection stores and
+draws as the beat grid):
+```
+get_beat_grid()                                     # every song with a beat map: tempo, sections, every bar with its beats
+get_beat_grid("obj_7")                              # one clip: its beat map, or why it has none
+get_beat_grid(start_seconds=30, end_seconds=60)     # only the beats, bars and sections in that range
+get_beat_grid(detail="sections")                    # tempo and sections only
+get_beat_grid(detail="json")                        # every beat with index, bar, beat-in-bar, section, level, song time
+```
+Times are timeline seconds; bars and sections are numbered from the start of the song, so the
+numbers survive a trim or a move. There is no per-beat strength in FCP's data: the hierarchy is the
+strength (section start, downbeat, beat). The map is read fresh on every call. Audio clips FCP can
+analyse but has not are listed with the calls that run its detection
+(`select_clips(handles=[...])`, then `timeline_action("enableBeatDetection")`); a clip with video
+in it is never analysed by FCP. Read-only.
+
+SpliceKit's own analysis of any audio file (no timeline needed):
 ```
 detect_beats(file_path="/path/to/song.mp3")         # detect beats, bars, sections, BPM
 detect_beats(file_path="song.mp3", sensitivity=0.8) # more sensitive
