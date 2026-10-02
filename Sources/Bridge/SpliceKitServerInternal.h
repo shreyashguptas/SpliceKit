@@ -207,6 +207,9 @@ BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange);
 NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type);
 // The tempo (BPM) stored with that beat map (timing type 8), or 0 when there is none.
 double SpliceKit_copyTimingMetadataTempo(id clip);
+// The clip's speed (2.0 at 2x; 1.0 when not retimed), or NAN for a reversed, frozen or
+// unreadable retime. localRange is the clip's audioClippedRange / clippedRange.
+double SpliceKit_clipPlaybackSpeed(id clip, CMTimeRange localRange);
 NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                  id primaryObj,
                                                                  NSString *gridMode,

@@ -428,6 +428,17 @@ double SpliceKit_copyTimingMetadataTempo(id clip) {
     return 0.0;
 }
 
+double SpliceKit_clipPlaybackSpeed(id clip, CMTimeRange localRange) {
+    if (!SpliceKit_boolForSelector(clip, @"isRetimed")) return 1.0;
+    SEL rateSel = NSSelectorFromString(@"retimeRateForObject:");
+    if (![clip respondsToSelector:rateSel]) return NAN;
+    double rate = NAN;
+    @try {
+        rate = ((double (*)(id, SEL, CMTimeRange))objc_msgSend)(clip, rateSel, localRange);
+    } @catch (NSException *e) {}
+    return (isfinite(rate) && rate > 0.0) ? rate : NAN;
+}
+
 NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                         id primaryObj,
                                                                         NSString *gridMode,
@@ -453,9 +464,19 @@ NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
     if (outEndSec) *outEndSec = timelineEndSec;
     if (outTempo) *outTempo = SpliceKit_copyTimingMetadataTempo(clip);
 
-    NSArray<NSNumber *> *beats = SpliceKit_copyTimingMetadataSecondsForType(clip, 1);
-    NSArray<NSNumber *> *bars = SpliceKit_copyTimingMetadataSecondsForType(clip, 2);
-    NSArray<NSNumber *> *sections = SpliceKit_copyTimingMetadataSecondsForType(clip, 4);
+    // The beat map is in song (source) seconds; the clip's local range is scaled by its
+    // speed, so a song second s is local second s / speed.
+    double speed = SpliceKit_clipPlaybackSpeed(clip, localRange);
+    if (!isfinite(speed)) return @[];
+    NSArray<NSNumber *> *(^toLocal)(NSArray<NSNumber *> *) = ^NSArray<NSNumber *> *(NSArray<NSNumber *> *song) {
+        if (speed == 1.0) return song;
+        NSMutableArray<NSNumber *> *local = [NSMutableArray arrayWithCapacity:song.count];
+        for (NSNumber *n in song) [local addObject:@(n.doubleValue / speed)];
+        return local;
+    };
+    NSArray<NSNumber *> *beats = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 1));
+    NSArray<NSNumber *> *bars = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 2));
+    NSArray<NSNumber *> *sections = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 4));
 
     NSMutableArray<NSNumber *> *timelinePoints = [NSMutableArray array];
     NSString *mode = (gridMode ?: @"beat").lowercaseString;
@@ -550,6 +571,7 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
     BOOL skipSelf = SpliceKit_mixerIsSkippableItem(item);
     BOOL hasVideo = NO;
     BOOL isConnectedStoryline = NO;
+    BOOL listedSelf = NO;
 
     if (!skipSelf) {
         CMTimeRange range;
@@ -579,6 +601,7 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
                     @"hasTimingMetadata": @(hasTimingMetadata),
                     @"beatGridEnabled": @(beatGridEnabled),
                 }];
+                listedSelf = YES;
             }
         }
     }
@@ -593,7 +616,12 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
         ? SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel))
         : nil;
 
-    BOOL recurseContained = isConnectedStoryline || (!hasVideo && SpliceKit_mixerIsCollectionLike(item));
+    // A connected storyline's children are the clips. A clip that was listed itself is not
+    // opened: an audio-only clip is a collection around its media component, which has the
+    // untrimmed source range and no lane of its own (verified on 12.3), so listing it too
+    // would make the song appear twice with the wrong range.
+    BOOL recurseContained = isConnectedStoryline
+        || (!listedSelf && !hasVideo && SpliceKit_mixerIsCollectionLike(item));
     if (recurseContained) {
         for (id child in contained) {
             SpliceKit_collectVisibleTimelineEntries(child, primaryObj, out, visited);

@@ -61,6 +61,8 @@ static double SpliceKit_beatGridMedian(NSArray<NSNumber *> *values) {
 // (-[FFAnchoredObject canDetectBeats] and _supportsBeatGrid).
 static NSString *SpliceKit_beatGridUnsupportedReason(NSDictionary *entry, BOOL sequenceSupports) {
     id item = entry[@"item"];
+    if ([entry[@"isConnectedStoryline"] boolValue])
+        return @"a connected storyline: ask for the song clip inside it (get_beat_grid with no handle lists it)";
     if (!sequenceSupports) return @"this project type does not support beat detection";
     if (![entry[@"hasAudio"] boolValue]) return @"no audio";
     if (SpliceKit_boolForSelector(item, @"isFlexMusicObject"))
@@ -110,27 +112,17 @@ static NSDictionary *SpliceKit_beatGridForEntry(NSDictionary *entry, double winS
     // (verified on 12.3: a constant 2x retime halves audioClippedRange and leaves the
     // timing metadata as it was). So song = local * speed, and a song second s plays at
     // tlStart + (s - songStart) / speed on the timeline.
-    double speed = 1.0;
-    if (SpliceKit_boolForSelector(item, @"isRetimed")) {
-        SEL rateSel = NSSelectorFromString(@"retimeRateForObject:");
-        double rate = NAN;
-        if ([item respondsToSelector:rateSel]) {
-            @try {
-                rate = ((double (*)(id, SEL, CMTimeRange))objc_msgSend)(item, rateSel, localRange);
-            } @catch (NSException *e) {}
-        }
-        if (!isfinite(rate) || rate <= 0.0) {
-            clip[@"status"] = @"error";
-            clip[@"error"] = @"the clip is reversed, frozen or has an unreadable speed: its beats "
-                             @"cannot be placed on the timeline";
-            return clip;
-        }
-        speed = rate;
-        if (SpliceKit_boolForSelector(item, @"hasArtisticRetime")
-            && !SpliceKit_boolForSelector(item, @"isConstantArtisticRetime")) {
-            clip[@"note"] = @"the clip's speed varies (a speed ramp); times use its average speed "
-                            @"and drift inside the ramp";
-        }
+    double speed = SpliceKit_clipPlaybackSpeed(item, localRange);
+    if (!isfinite(speed)) {
+        clip[@"status"] = @"error";
+        clip[@"error"] = @"the clip is reversed, frozen or has an unreadable speed: its beats "
+                         @"cannot be placed on the timeline";
+        return clip;
+    }
+    if (SpliceKit_boolForSelector(item, @"hasArtisticRetime")
+        && !SpliceKit_boolForSelector(item, @"isConstantArtisticRetime")) {
+        clip[@"note"] = @"the clip's speed varies (a speed ramp); times use its average speed "
+                        @"and drift inside the ramp";
     }
     double songStart = SpliceKit_secondsFromTime(localRange.start) * speed;
     double songEnd = songStart + SpliceKit_secondsFromTime(localRange.duration) * speed;
@@ -337,27 +329,24 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
             for (id item in rootItems) {
                 SpliceKit_collectVisibleTimelineEntries(item, primaryObj, entries, visited);
             }
-            // An audio-only clip is a collection around its media component, and the walk
-            // reports both. Final Cut Pro writes the beat map to both, but only the clip is
-            // what the timeline shows: the component inside carries the untrimmed source
-            // range and no lane. Keep the clip. A connected storyline's children are real
-            // clips and stay.
-            NSMutableSet<NSString *> *innerKeys = [NSMutableSet set];
-            SEL containedSel = NSSelectorFromString(@"containedItems");
+            // A clip inside a connected storyline reports its lane inside that storyline
+            // (0); the timeline lane is the storyline's.
+            NSMutableDictionary<NSString *, NSNumber *> *storylineLaneByChild = [NSMutableDictionary dictionary];
+            SEL storylineContainedSel = NSSelectorFromString(@"containedItems");
             for (NSDictionary *entry in entries) {
                 id item = entry[@"item"];
-                if ([entry[@"isConnectedStoryline"] boolValue] || ![item respondsToSelector:containedSel]) continue;
-                NSArray *children = SpliceKit_mixerArrayFromContainer(
-                    ((id (*)(id, SEL))objc_msgSend)(item, containedSel));
-                for (id child in children) {
+                if (![entry[@"isConnectedStoryline"] boolValue] || ![item respondsToSelector:storylineContainedSel]) continue;
+                for (id child in SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, storylineContainedSel))) {
                     NSString *key = SpliceKit_handlePointerKey(child);
-                    if (key.length) [innerKeys addObject:key];
+                    if (key.length) storylineLaneByChild[key] = entry[@"lane"];
                 }
             }
-            if (innerKeys.count && !handle) {
-                [entries filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *entry, NSDictionary *bindings) {
-                    return ![innerKeys containsObject:entry[@"pointerKey"]];
-                }]];
+            for (NSUInteger i = 0; i < entries.count; i++) {
+                NSNumber *lane = storylineLaneByChild[entries[i][@"pointerKey"]];
+                if (!lane) continue;
+                NSMutableDictionary *fixed = [entries[i] mutableCopy];
+                fixed[@"lane"] = lane;
+                entries[i] = fixed;
             }
             [entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
                 NSComparisonResult r = [a[@"start"] compare:b[@"start"]];
@@ -377,6 +366,19 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
                     if ([entry[@"pointerKey"] isEqualToString:key]) { match = entry; break; }
                 }
                 if (!match) {
+                    // The media component inside an audio-only clip (get_timeline_clips lists
+                    // it as "<name> - a1"): answer for the clip around it.
+                    SEL containedSel = NSSelectorFromString(@"containedItems");
+                    for (NSDictionary *entry in entries) {
+                        id item = entry[@"item"];
+                        if ([entry[@"isConnectedStoryline"] boolValue] || ![item respondsToSelector:containedSel]) continue;
+                        for (id child in SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel))) {
+                            if ([SpliceKit_handlePointerKey(child) isEqualToString:key]) { match = entry; break; }
+                        }
+                        if (match) break;
+                    }
+                }
+                if (!match) {
                     result = @{@"error": [NSString stringWithFormat:
                         @"%@ is not a clip on the active timeline's primary storyline or its connected "
                         @"clips (a clip inside a compound clip is not reached)", handle]};
@@ -392,9 +394,11 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
                 double s = [entry[@"start"] doubleValue], e = [entry[@"end"] doubleValue];
                 if (!handle && (e < winStart - kBeatGridEpsilon || s > winEnd + kBeatGridEpsilon)) continue;
                 id item = entry[@"item"];
-                if ([entry[@"hasTimingMetadata"] boolValue]) {
+                // A connected storyline holds clips; its songs are listed on their own.
+                if ([entry[@"isConnectedStoryline"] boolValue] && !handle) continue;
+                if ([entry[@"hasTimingMetadata"] boolValue] && ![entry[@"isConnectedStoryline"] boolValue]) {
                     [clips addObject:SpliceKit_beatGridForEntry(entry, winStart, winEnd)];
-                } else if (SpliceKit_boolForSelector(item, @"canDetectBeats")) {
+                } else if (![entry[@"isConnectedStoryline"] boolValue] && SpliceKit_boolForSelector(item, @"canDetectBeats")) {
                     NSMutableDictionary *row = [SpliceKit_beatGridClipBase(entry) mutableCopy];
                     row[@"status"] = @"not_detected";
                     [detectable addObject:row];
