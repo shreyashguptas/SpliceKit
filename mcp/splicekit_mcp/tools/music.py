@@ -134,6 +134,11 @@ def _t(value) -> str:
     return f"{value:.3f}s" if _is_num(value) else "?"
 
 
+def _count(n, word: str) -> str:
+    n = n if _is_num(n) else 0
+    return f"{n:g} {word}" + ("" if n == 1 else "s")
+
+
 def _beat_grid_place(clip: dict) -> str:
     lane = clip.get("lane", 0)
     return "primary storyline" if not lane else f"lane {lane} (connected clip)"
@@ -170,8 +175,8 @@ def _render_beat_grid_clip(clip: dict, detail: str) -> list[str]:
     grid = "shown" if clip.get("beatGridVisible") else "hidden"
     lines.append(f"  {_beat_grid_tempo_line(clip)}; beat grid {grid} on the timeline")
     song = clip.get("song") if isinstance(clip.get("song"), dict) else {}
-    lines.append(f"  whole song: {song.get('beatCount', 0)} beats, {song.get('barCount', 0)} bars, "
-                 f"{song.get('sectionCount', 0)} sections, beats from {_t(song.get('firstBeatSeconds'))} to "
+    lines.append(f"  whole song: {_count(song.get('beatCount'), 'beat')}, {_count(song.get('barCount'), 'bar')}, "
+                 f"{_count(song.get('sectionCount'), 'section')}, beats from {_t(song.get('firstBeatSeconds'))} to "
                  f"{_t(song.get('lastBeatSeconds'))} of the song; this clip plays the song from "
                  f"{_t(clip.get('songStartSeconds'))} to {_t(clip.get('songEndSeconds'))}")
     if clip.get("note"):
@@ -182,8 +187,7 @@ def _render_beat_grid_clip(clip: dict, detail: str) -> list[str]:
         lines.append("  Sections (timeline start-end; the part on the timeline when the song is trimmed):")
         for s in sections:
             row = (f"    section {s.get('section')}  {_t(s.get('t'))}-{_t(s.get('endT'))}  "
-                   f"{s.get('durationSeconds', 0):.2f}s, {s.get('bars', 0)} bar{'' if s.get('bars') == 1 else 's'} "
-                   f"from bar {s.get('firstBar')}")
+                   f"{s.get('durationSeconds', 0):.2f}s, {_count(s.get('bars'), 'bar')} from bar {s.get('firstBar')}")
             if _is_num(s.get("onTimelineT")):
                 row += f"  [on the timeline {_t(s.get('onTimelineT'))}-{_t(s.get('onTimelineEndT'))}]"
             lines.append(row)
