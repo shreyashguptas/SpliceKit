@@ -216,6 +216,83 @@ class TimelineEditToolTests(FakeBridgeMixin, unittest.TestCase):
         self.assertTrue(out.startswith("Error: no-op"), out)
         self.assertIn("current: 6.000s - 12.000s", out)
 
+    # ── move_clips ────────────────────────────────────────────────────────
+
+    SPINE = {"items": [
+        {"index": 0, "class": "FFAnchoredCollection", "handle": "obj_1", "name": "A"},
+        {"index": 1, "class": "FFAnchoredTransition", "handle": "obj_9", "name": "Cross Dissolve"},
+        {"index": 2, "class": "FFAnchoredCollection", "handle": "obj_2", "name": "B"},
+        {"index": 3, "class": "FFAnchoredCollection", "handle": "obj_3", "name": "C"},
+        {"index": 4, "class": "FFAnchoredGapGeneratorComponent", "handle": "obj_4", "name": "Gap"},
+    ], "count": 5}
+
+    def _spine_bridge(self, reorder=None):
+        def responder(method, params):
+            if method == "spine.getItems":
+                return self.SPINE
+            return reorder if reorder is not None else {
+                "status": "ok", "clipsReordered": len(params["order"]), "transitionsRemoved": 1}
+        return self._install_bridge(responder)
+
+    def test_move_clips_before_builds_permutation_skipping_transitions(self):
+        calls = self._spine_bridge()
+        out = self.module.move_clips(["obj_3"], before="obj_1")
+        self.assertEqual(calls, [("spine.getItems", {}), ("spine.reorder", {"order": [2, 0, 1, 3]})])
+        self.assertIn("Moved 1 clip(s) before 'A' (obj_1)", out)
+        self.assertIn("removed 1 transition(s)", out)
+        order = out.split("New order:")[1]
+        self.assertLess(order.index("'C'"), order.index("'A'"))
+
+    def test_move_clips_after_and_to_end(self):
+        calls = self._spine_bridge()
+        self.module.move_clips("obj_1, obj_4", after="obj_2")
+        self.module.move_clips('["obj_1"]')
+        self.assertEqual([c for c in calls if c[0] == "spine.reorder"], [
+            ("spine.reorder", {"order": [1, 0, 3, 2]}),
+            ("spine.reorder", {"order": [1, 2, 3, 0]}),
+        ])
+
+    def test_move_clips_full_reorder(self):
+        calls = self._spine_bridge()
+        self.module.move_clips(["obj_4", "obj_3", "obj_2", "obj_1"])
+        self.assertEqual(calls[-1], ("spine.reorder", {"order": [3, 2, 1, 0]}))
+
+    def test_move_clips_dry_run_does_not_reorder(self):
+        calls = self._spine_bridge()
+        out = self.module.move_clips(["obj_3"], before="obj_1", dry_run=True)
+        self.assertEqual(calls, [("spine.getItems", {})])
+        self.assertIn("DRY RUN", out)
+        self.assertIn("will remove 1 transition(s)", out)
+
+    def test_move_clips_noop_does_not_reorder(self):
+        calls = self._spine_bridge()
+        out = self.module.move_clips(["obj_1"], before="obj_2")
+        self.assertIn("Nothing to move", out)
+        self.assertEqual(calls, [("spine.getItems", {})])
+
+    def test_move_clips_rejects_bad_input(self):
+        calls = self._spine_bridge()
+        for kwargs in ({"handles": []},
+                       {"handles": ["obj_1", "obj_1"]},
+                       {"handles": ["obj_1"], "before": "obj_2", "after": "obj_3"},
+                       {"handles": ["obj_1"], "before": "obj_1"}):
+            out = self.module.move_clips(**kwargs)
+            self.assertTrue(out.startswith("Error:"), (kwargs, out))
+        self.assertEqual(calls, [])
+
+        for kwargs in ({"handles": ["obj_9"]},             # a transition
+                       {"handles": ["obj_77"]},            # connected or stale
+                       {"handles": ["obj_1"], "after": "obj_77"}):
+            out = self.module.move_clips(**kwargs)
+            self.assertTrue(out.startswith("Error:"), (kwargs, out))
+        self.assertNotIn("spine.reorder", [c[0] for c in calls])
+
+    def test_move_clips_reports_bridge_errors(self):
+        self._spine_bridge(reorder={"error": "order has 3 elements but there are 4 clips"})
+        out = self.module.move_clips(["obj_3"], before="obj_1")
+        self.assertTrue(out.startswith("Error:"), out)
+        self.assertIn("4 clips", out)
+
     # ── annotations ───────────────────────────────────────────────────────
 
     def test_annotations(self):
@@ -241,6 +318,11 @@ class TimelineEditToolTests(FakeBridgeMixin, unittest.TestCase):
         self.assertEqual(trim["title"], "Trim Clip")
         self.assertIn("trim_clip", self.module.DESTRUCTIVE_TOOLS)
         self.assertIn("select_clips", self.module.IDEMPOTENT_LOCAL_WRITE_TOOLS)
+
+        move = self.tools["move_clips"]["annotations"]
+        self.assertFalse(move["readOnlyHint"])
+        self.assertTrue(move["destructiveHint"])
+        self.assertIn("move_clips", self.module.DESTRUCTIVE_TOOLS)
 
     def test_instructions_mention_handle_targeting(self):
         text = self.module.mcp.instructions

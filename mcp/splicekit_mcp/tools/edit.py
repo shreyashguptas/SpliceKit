@@ -293,3 +293,110 @@ def trim_clip(handle: str, edge: str, delta_seconds: float | None = None,
     if status == "ok":
         lines.append('  Ripple edit applied: subsequent clips moved so no gap is left. Undo with timeline_action("undo").')
     return "\n".join(lines)
+
+
+# ============================================================
+# Reorder primary-storyline clips
+# ============================================================
+# spine.reorder takes a full permutation of the spine's non-transition items.
+# move_clips builds that permutation from handles so the caller only names the
+# clips that move and where they go.
+
+def _spine_item_label(item) -> str:
+    name = item.get("name") or item.get("class", "?")
+    return f"'{name}' ({item.get('handle', '?')})"
+
+
+@splicekit_tool("move_clips", DESTRUCTIVE)
+def move_clips(handles: list[str] | str, before: str = "", after: str = "",
+               dry_run: bool = False) -> str:
+    """Move primary-storyline clips to a new position, in one call and one undo step.
+
+    The clips in `handles` are lifted out and placed together, in the order given,
+    just before the `before` clip or just after the `after` clip (neither: at the
+    end of the timeline). The magnetic timeline closes the gaps they leave.
+    Connected clips travel with the clip they are attached to.
+
+    Workflow:
+        get_timeline_clips()                               # read handles
+        move_clips(["obj_7"], before="obj_2", dry_run=True) # see the new order
+        move_clips(["obj_7"], before="obj_2")              # move clip 7 in front of clip 2
+        move_clips(["obj_4", "obj_9"])                     # send two clips to the end
+        move_clips([every clip handle in the new order])   # full reorder in one call
+
+    Args:
+        handles: primary-storyline clip handles from get_timeline_clips(), as a
+                 list, JSON array or comma-separated string. Gaps count as clips.
+        before: put the moved clips just before this clip.
+        after: or just after this clip. Give at most one of before / after.
+        dry_run: True reports the new order without changing anything.
+
+    Every transition on the primary storyline is removed by the move (re-add them
+    with apply_transition). Undo with history_action("undo").
+    """
+    try:
+        moving = _parse_handle_list(handles)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not moving:
+        return "Error: handles is required (get them from get_timeline_clips())"
+    if len(set(moving)) != len(moving):
+        return "Error: a handle appears more than once in handles"
+    before = (before or "").strip()
+    after = (after or "").strip()
+    if before and after:
+        return "Error: give at most one of before / after"
+    target = before or after
+    if target in moving:
+        return f"Error: {target} is one of the clips being moved; pick a clip that stays put"
+
+    r = bridge.call("spine.getItems")
+    if _err(r):
+        return f"Error: {r.get('error', r) if isinstance(r, dict) else r}"
+    items = r.get("items") or []
+    clips = [it for it in items if "Transition" not in str(it.get("class", ""))]
+    transitions = len(items) - len(clips)
+    by_handle = {it.get("handle"): it for it in clips}
+    current = [it.get("handle") for it in clips]
+
+    unknown = [h for h in moving if h not in by_handle]
+    if unknown:
+        return (f"Error: not a primary-storyline clip: {', '.join(unknown)}. Only clips on the "
+                "primary storyline can be moved (connected clips move with the clip they are "
+                "attached to). Re-read handles with get_timeline_clips().")
+    if target and target not in by_handle:
+        return f"Error: {target} is not a primary-storyline clip. Re-read handles with get_timeline_clips()."
+
+    staying = [h for h in current if h not in set(moving)]
+    if before:
+        at = staying.index(before)
+    elif after:
+        at = staying.index(after) + 1
+    else:
+        at = len(staying)
+    new_order = staying[:at] + moving + staying[at:]
+    if new_order == current:
+        return "Nothing to move: the clips are already in that order."
+    order = [current.index(h) for h in new_order]
+
+    where = f"before {_spine_item_label(by_handle[before])}" if before else (
+        f"after {_spine_item_label(by_handle[after])}" if after else "at the end")
+    lines = []
+    if dry_run:
+        lines.append(f"DRY RUN -- move {len(moving)} clip(s) {where}. Nothing was changed.")
+    else:
+        res = bridge.call("spine.reorder", order=order)
+        if _err(res):
+            return f"Error: {res.get('error', res) if isinstance(res, dict) else res}"
+        transitions = res.get("transitionsRemoved", transitions)
+        lines.append(f"Moved {len(moving)} clip(s) {where}.")
+    lines.append("New order:")
+    moved = set(moving)
+    for i, h in enumerate(new_order):
+        lines.append(f"  {i:>3}. {_spine_item_label(by_handle[h])}" + ("  <- moved" if h in moved else ""))
+    if transitions:
+        verb = "will remove" if dry_run else "removed"
+        lines.append(f"  Warning: this {verb} {transitions} transition(s) from the primary storyline.")
+    if not dry_run:
+        lines.append('  Undo with history_action("undo").')
+    return "\n".join(lines)

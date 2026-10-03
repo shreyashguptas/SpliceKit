@@ -9,6 +9,12 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **`move_clips`: reorder primary-storyline clips in one call.** Name the clips by
+  handle and where they go (`before=` / `after=` a clip, or the end); passing every clip
+  gives a full reorder. It builds the permutation for the existing `spine.reorder` RPC,
+  which until now only the command palette's Shuffle / Reverse and Lua scripts could reach.
+  One undo step; `dry_run` shows the new order first. The move removes the primary
+  storyline's transitions, and the answer says how many.
 - **`remove_browser_clip`: take a clip back out of a library.** SpliceKit could put clips
   into a library and never remove them, so every `import_media` and `import_url` call left
   one behind and nothing short of Final Cut Pro's own UI could clear it. The bridge RPC is
