@@ -423,6 +423,7 @@ def overrides(workdir: Path) -> dict[str, dict]:
         "toggle_dialog_checkbox": {"checkbox": "Use custom settings", "checked": True},
         "mixer_set_volume": {"handle": "obj_1", "volume_db": -6.0},
         "trim_clip": {"handle": "obj_1", "edge": "end", "to_seconds": 2.0},
+        "move_clips": {"handles": ["obj_1"], "dry_run": True},
         "import_media": {"path": str(workdir / "clip.mov")},
         "remove_browser_clip": {"name": "clip"},
         "set_caption_words": {"words": '[{"text": "Check", "start": 0.0, "end": 1.0}]'},

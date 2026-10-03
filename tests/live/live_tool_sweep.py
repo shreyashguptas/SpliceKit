@@ -334,6 +334,8 @@ CASES.update({
                             "delta_seconds": -0.5},
                       kind="write", undo=("Trim", "Trim Clip", "Trim End"),
                       require_undo=True),
+    # Dry run only: a real move removes the storyline's transitions.
+    "move_clips": read(handles="$SPINE_CLIP", dry_run=True, expect=r"DRY RUN|Nothing to move"),
     # The prelude selects the connected clip, so the effect lands on it.
     "apply_effect": write(name="Black & White", require_undo=True,
                           undo=("Add Effect", "Black & White", "Add Video Effect")),
