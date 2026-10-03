@@ -51,6 +51,7 @@ Bridge/SpliceKitServerLibrary.m
 Bridge/SpliceKitServerCapture.m
 Bridge/SpliceKitServerDialogs.m
 Bridge/SpliceKitServerMusic.m
+Bridge/SpliceKitServerBeatGrid.m
 Bridge/SpliceKitServerStructure.m
 Bridge/SpliceKitBridgeMetadata.m
 Bridge/SpliceKitBridgeParams.m

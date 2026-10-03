@@ -325,7 +325,7 @@ BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, CMTimeRange *outRang
     return NO;
 }
 
-static BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange) {
+BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange) {
     if (!item || !outRange) return NO;
 
     SEL audioSel = NSSelectorFromString(@"audioClippedRange");
@@ -372,7 +372,7 @@ NSArray<NSNumber *> *SpliceKit_sortedUniqueSeconds(NSArray<NSNumber *> *values, 
     return unique;
 }
 
-static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type) {
+NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type) {
     if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return @[];
 
     id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));
@@ -399,7 +399,7 @@ static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, 
     return SpliceKit_sortedUniqueSeconds(times, 0.0001);
 }
 
-static double SpliceKit_copyTimingMetadataTempo(id clip) {
+double SpliceKit_copyTimingMetadataTempo(id clip) {
     if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return 0.0;
 
     id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));
@@ -428,6 +428,17 @@ static double SpliceKit_copyTimingMetadataTempo(id clip) {
     return 0.0;
 }
 
+double SpliceKit_clipPlaybackSpeed(id clip, CMTimeRange localRange) {
+    if (!SpliceKit_boolForSelector(clip, @"isRetimed")) return 1.0;
+    SEL rateSel = NSSelectorFromString(@"retimeRateForObject:");
+    if (![clip respondsToSelector:rateSel]) return NAN;
+    double rate = NAN;
+    @try {
+        rate = ((double (*)(id, SEL, CMTimeRange))objc_msgSend)(clip, rateSel, localRange);
+    } @catch (NSException *e) {}
+    return (isfinite(rate) && rate > 0.0) ? rate : NAN;
+}
+
 NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                         id primaryObj,
                                                                         NSString *gridMode,
@@ -453,9 +464,19 @@ NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
     if (outEndSec) *outEndSec = timelineEndSec;
     if (outTempo) *outTempo = SpliceKit_copyTimingMetadataTempo(clip);
 
-    NSArray<NSNumber *> *beats = SpliceKit_copyTimingMetadataSecondsForType(clip, 1);
-    NSArray<NSNumber *> *bars = SpliceKit_copyTimingMetadataSecondsForType(clip, 2);
-    NSArray<NSNumber *> *sections = SpliceKit_copyTimingMetadataSecondsForType(clip, 4);
+    // The beat map is in song (source) seconds; the clip's local range is scaled by its
+    // speed, so a song second s is local second s / speed.
+    double speed = SpliceKit_clipPlaybackSpeed(clip, localRange);
+    if (!isfinite(speed)) return @[];
+    NSArray<NSNumber *> *(^toLocal)(NSArray<NSNumber *> *) = ^NSArray<NSNumber *> *(NSArray<NSNumber *> *song) {
+        if (speed == 1.0) return song;
+        NSMutableArray<NSNumber *> *local = [NSMutableArray arrayWithCapacity:song.count];
+        for (NSNumber *n in song) [local addObject:@(n.doubleValue / speed)];
+        return local;
+    };
+    NSArray<NSNumber *> *beats = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 1));
+    NSArray<NSNumber *> *bars = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 2));
+    NSArray<NSNumber *> *sections = toLocal(SpliceKit_copyTimingMetadataSecondsForType(clip, 4));
 
     NSMutableArray<NSNumber *> *timelinePoints = [NSMutableArray array];
     NSString *mode = (gridMode ?: @"beat").lowercaseString;
@@ -550,6 +571,7 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
     BOOL skipSelf = SpliceKit_mixerIsSkippableItem(item);
     BOOL hasVideo = NO;
     BOOL isConnectedStoryline = NO;
+    BOOL listedSelf = NO;
 
     if (!skipSelf) {
         CMTimeRange range;
@@ -579,6 +601,7 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
                     @"hasTimingMetadata": @(hasTimingMetadata),
                     @"beatGridEnabled": @(beatGridEnabled),
                 }];
+                listedSelf = YES;
             }
         }
     }
@@ -593,7 +616,12 @@ void SpliceKit_collectVisibleTimelineEntries(id item,
         ? SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel))
         : nil;
 
-    BOOL recurseContained = isConnectedStoryline || (!hasVideo && SpliceKit_mixerIsCollectionLike(item));
+    // A connected storyline's children are the clips. A clip that was listed itself is not
+    // opened: an audio-only clip is a collection around its media component, which has the
+    // untrimmed source range and no lane of its own (verified on 12.3), so listing it too
+    // would make the song appear twice with the wrong range.
+    BOOL recurseContained = isConnectedStoryline
+        || (!listedSelf && !hasVideo && SpliceKit_mixerIsCollectionLike(item));
     if (recurseContained) {
         for (id child in contained) {
             SpliceKit_collectVisibleTimelineEntries(child, primaryObj, out, visited);
@@ -815,12 +843,12 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
                     }
                 }
                 if (!sourceEntry) {
-                    result = @{@"error": @"No audio clip on this timeline carries a Final Cut Pro "
-                                         @"beat map. These tools read Final Cut Pro's own timing "
-                                         @"metadata, which comes with songs from its music library; "
-                                         @"detect_beats cannot add it. Pass sourceHandle to name a "
-                                         @"clip, or use detect_beats with beat_sync_blade to cut to "
-                                         @"beats on ordinary audio."};
+                    result = @{@"error": @"No audio clip on this timeline has a Final Cut Pro "
+                                         @"beat map. Run Final Cut Pro's beat detection on the "
+                                         @"song (select it, then timeline_action(\"enableBeatDetection\"); "
+                                         @"get_beat_grid lists the clips it can analyse), pass "
+                                         @"sourceHandle to name a clip, or use detect_beats with "
+                                         @"beat_sync_blade to cut to beats inside a video clip."};
                     return;
                 }
                 sourceKey = sourceEntry[@"pointerKey"];
@@ -828,18 +856,17 @@ NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
 
             id sourceItem = sourceEntry[@"item"];
             if (!SpliceKit_boolForSelector(sourceItem, @"hasTimingMetadata")) {
-                // -hasTimingMetadata is Final Cut Pro's own flag for audio it holds a
-                // beat map for, which in practice means a song from its built-in music
-                // library. SpliceKit only ever reads it; detect_beats analyses a file
-                // with an external binary and cannot set it. The old wording here said
-                // "Run beat detection on it first", which sends the caller down a path
-                // that can never make this check pass.
-                result = @{@"error": @"This clip has no Final Cut Pro beat map. Only audio "
-                                     @"from Final Cut Pro's own music library carries one, "
-                                     @"and nothing in SpliceKit can add it — detect_beats "
-                                     @"analyses the file separately and does not set it. "
-                                     @"To cut to beats on ordinary audio, use detect_beats "
-                                     @"with beat_sync_blade or blade_at_times instead."};
+                // -hasTimingMetadata is Final Cut Pro's flag for a clip it holds a beat
+                // map for: a song from its music library, or any audio-only clip its beat
+                // detection (detectBeatsOnSelection:, timeline action enableBeatDetection)
+                // has analysed (verified on 12.3 with a plain WAV). detect_beats analyses a
+                // file with an external binary and does not set it.
+                result = @{@"error": @"This clip has no Final Cut Pro beat map yet. Run Final "
+                                     @"Cut Pro's beat detection on it: select it, then "
+                                     @"timeline_action(\"enableBeatDetection\") (audio-only "
+                                     @"clips only; get_beat_grid lists the clips it can "
+                                     @"analyse). For music inside a video clip, use "
+                                     @"detect_beats with beat_sync_blade or blade_at_times."};
                 return;
             }
 

@@ -23,6 +23,7 @@ independently or together to automate editing decisions:
 | Tool | Input | Detects | Use Case |
 |------|-------|---------|----------|
 | `detect_scene_changes()` | One timeline clip (or a file) | Cuts, transitions, shot boundaries | Review cuts, then `mark_scene_changes()` / `blade_scene_changes()` |
+| `get_beat_grid()` | The songs on the timeline | Final Cut Pro's own beat map: beats, bars, sections, tempo in timeline seconds | Place and cut B-roll on the music already in the edit |
 | `detect_beats()` | Audio file | Beats, bars, sections, BPM | Cut video to music rhythm |
 
 ---
@@ -126,6 +127,26 @@ argument only accepts `"detect"` and remains for compatibility.
 ---
 
 ## Beat Detection
+
+### Final Cut Pro's beat map of the timeline's songs
+
+When the music is already on the timeline, read Final Cut Pro's own beat
+detection instead of analysing the file again:
+
+```python
+get_beat_grid()                                   # every song with a beat map
+get_beat_grid(start_seconds=30, end_seconds=60)   # just the montage section
+```
+
+Per song: the tempo, the sections as timeline ranges, and every bar with its
+beats (the first beat of a bar is its downbeat). Bars and sections are numbered
+from the start of the song, so trimming or moving the song only changes the
+times. A song FCP has not analysed yet is listed with the calls that run its
+detection (select the clip, then `timeline_action("enableBeatDetection")`).
+FCP only analyses audio-only clips; how its detection works is in
+[beat-detection.md](../internals/beat-detection.md).
+
+### SpliceKit's analysis of any audio file
 
 Analyzes any audio file to detect beats, bars, sections, and BPM using onset
 detection and tempo estimation. Runs as an external process to avoid

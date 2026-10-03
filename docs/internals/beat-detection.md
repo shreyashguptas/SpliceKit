@@ -549,6 +549,29 @@ If the music currently lives inside a normal A/V clip:
 2. Make sure the selected object is truly audio-only
 3. Run beat detection on that audio-only object
 
+### Reading the Beat Map
+
+`get_beat_grid()` (bridge method `timeline.getBeatGrid`) reads the stored
+timing metadata (`newTimingMetadataForType:` 1 = beats, 2 = bars, 4 = sections,
+8 = tempo) off every visible clip with `hasTimingMetadata`, maps it from source
+time onto the timeline through the clip's `audioClippedRange`, and numbers each
+beat by bar and section from the start of the song. Clips that answer
+`canDetectBeats` are listed as not analysed yet.
+
+Verified live on 12.3 with a plain 120 BPM WAV in a test library:
+
+- `detectBeatsOnSelection:` on an audio-only connected clip writes the beat map
+  to any audio, not only to songs from FCP's music library.
+- An audio-only clip is an `FFAnchoredCollection` around an
+  `FFAnchoredMediaComponent`; both carry the beat map. The component has the
+  untrimmed range and no real lane, so only the collection is reported.
+- The beat map is kept per media file: a second copy of the same song placed
+  later already has it (grid hidden).
+- The metadata stays in source seconds when the clip is retimed, while
+  `audioClippedRange` is in the clip's retimed local time (halved at 2x).
+  `retimeRateForObject:` gives the speed (2.0 at 2x), so a song second `s`
+  plays at `timelineStart + (s - sourceStart) / speed`.
+
 ### If You Only Need Beat Timing Data
 
 Use the external detector:

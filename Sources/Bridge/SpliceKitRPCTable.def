@@ -54,6 +54,7 @@ SK_RPC("timeline.getMarkers", SpliceKit_handleTimelineGetMarkers, @"safe", @"Lis
 SK_RPC("timeline.setRange", SpliceKit_handleSetRange, @"state_dependent", @"Set in/out range selection.")
 SK_RPC("timeline.addMarkers", SpliceKit_handleBatchAddMarkers, @"destructive", @"Batch-add markers at times.")
 SK_RPC("timeline.bladeAtTimes", SpliceKit_handleBladeAtTimes, @"destructive", @"Batch-blade at multiple times.")
+SK_RPC("timeline.getBeatGrid", SpliceKit_handleTimelineGetBeatGrid, @"safe", @"Final Cut Pro's own beat map (Detect Beats) for the songs on the timeline: every beat, bar and section in timeline seconds, numbered by bar and section from the start of the song, plus tempo and whether the beat grid is shown; also lists the audio clips Final Cut Pro can analyse but has not.")
 SK_RPC("timeline.trimClipsToBeats", SpliceKit_handleTrimClipsToBeats, @"destructive", @"Trim clips to a beat grid.")
 SK_RPC("timeline.assembleRandomClipsToBeats", SpliceKit_handleAssembleRandomClipsToBeats, @"destructive", @"Build beat-synced cut from browser pool.")
 SK_RPC("timeline.batchActions", SpliceKit_handleBatchActions, @"destructive", @"Run a sequence of timeline+playback actions.")

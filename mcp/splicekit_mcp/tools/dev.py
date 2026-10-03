@@ -167,7 +167,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
         bridge.reset()  # reset on failure
 
     if connected:
-        results.append(f"Bridge connected ({_time.time() - start:.1f}s)")
+        results.append(f"Bridge connected ({time.time() - start:.1f}s)")
         return "\n".join(results)
     else:
         results.append(f"Bridge NOT connected after {max_wait}s — FCP may still be loading")

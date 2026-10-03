@@ -500,6 +500,8 @@ CASES.update({
                             needs_parakeet=True, timeout=300),
 
     # ---------------------------------------------------------------- beats / music
+    # Answers on any timeline: the songs with a beat map, or that there is none.
+    "get_beat_grid": read(expect=r"beat map"),
     "detect_beats": Case(args={"file_path": "$AUDIO_FILE", "limit": 8},
                          kind="read", timeout=180),
     "analyze_song_structure": Case(args={"file_path": "$AUDIO_FILE"},
@@ -516,19 +518,19 @@ CASES.update({
                                            ("remove_structure_blocks", {}),
                                            ("cleanup_temp_projects", {})]),
     "remove_structure_blocks": read(dry_run=True),
-    # The beat-driven family reads Final Cut Pro's own timing metadata, which only
-    # songs from its music library carry. That library is not installed here, so the
-    # pass condition is that each tool says so plainly rather than failing obscurely.
-    "trim_clips_to_beats": dependency("beat map", "music library", timeout=120,
+    # The beat-driven family reads Final Cut Pro's own beat map, which the sweep's
+    # timeline does not have (its connected clip is not an analysed song), so the pass
+    # condition is that each tool says so plainly and names the detection to run.
+    "trim_clips_to_beats": dependency("beat map", "enableBeatDetection", timeout=120,
                                       dry_run=True, source_handle="$CONNECTED_CLIP"),
-    "sync_clips_to_song_beats": dependency("beat map", "music library", timeout=120,
+    "sync_clips_to_song_beats": dependency("beat map", "enableBeatDetection", timeout=120,
                                            dry_run=True,
                                            source_handle="$CONNECTED_CLIP"),
     "build_song_cut": Case(args={"dry_run": True,
                                  "source_handle": "$CONNECTED_CLIP"},
                            kind="read", timeout=180),
     "assemble_random_clips_to_song_beats": dependency(
-        "beat map", "music library", timeout=180,
+        "beat map", "enableBeatDetection", timeout=180,
         dry_run=True, source_handle="$CONNECTED_CLIP"),
 
     # ---------------------------------------------------------------- montage

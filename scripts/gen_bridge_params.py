@@ -74,6 +74,11 @@ DESCRIBED: dict[str, dict[str, str]] = {
         "includeGapBuckets": "bool (default true unless wordsOnly)",
         "includeSkipped": "bool: list clips the last run left out and why (default true)",
     },
+    "timeline.getBeatGrid": {
+        "handle": "string: one clip (from timeline.getDetailedState); omit for every song on the timeline",
+        "startSeconds": "number: only beats, bars and sections at or after this timeline time",
+        "endSeconds": "number: and at or before this one",
+    },
     "timeline.captureClipFrame": {
         "handle": "string: clip handle from timeline.getDetailedState",
         "frameTime": "number: timeline seconds (default the clip's midpoint)",

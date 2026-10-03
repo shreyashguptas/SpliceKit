@@ -200,6 +200,16 @@ NSDictionary *SpliceKit_handleBatchAddMarkers(NSDictionary *params);
 NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params);
 BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, CMTimeRange *outRange);
 NSArray<NSNumber *> *SpliceKit_sortedUniqueSeconds(NSArray<NSNumber *> *values, double epsilon);
+// A clip's audio range in its own (source) time: audioClippedRange, else clippedRange.
+BOOL SpliceKit_tryReadLocalAudioRange(id item, CMTimeRange *outRange);
+// Final Cut Pro's beat map on a clip (newTimingMetadata), in source seconds, sorted and
+// de-duplicated. type: 1 = beats, 2 = bars, 4 = sections. Empty when the clip has none.
+NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type);
+// The tempo (BPM) stored with that beat map (timing type 8), or 0 when there is none.
+double SpliceKit_copyTimingMetadataTempo(id clip);
+// The clip's speed (2.0 at 2x; 1.0 when not retimed), or NAN for a reversed, frozen or
+// unreadable retime. localRange is the clip's audioClippedRange / clippedRange.
+double SpliceKit_clipPlaybackSpeed(id clip, CMTimeRange localRange);
 NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
                                                                  id primaryObj,
                                                                  NSString *gridMode,
@@ -384,6 +394,10 @@ NSDictionary *SpliceKit_handleFlexMusicAddToTimeline(NSDictionary *params);
 NSDictionary *SpliceKit_handleMontagePlan(NSDictionary *params);
 NSDictionary *SpliceKit_handleMontageAssemble(NSDictionary *params);
 NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params);
+
+#pragma mark - Defined in SpliceKitServerBeatGrid.m
+
+NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params);
 
 #pragma mark - Defined in SpliceKitServerStructure.m
 

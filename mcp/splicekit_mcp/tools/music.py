@@ -1,4 +1,4 @@
-"""Tools: beat detection, song structure, sections bar, FlexMusic."""
+"""Tools: beat detection, Final Cut Pro's beat map, song structure, sections bar, FlexMusic."""
 
 import json
 import subprocess
@@ -114,6 +114,222 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
         return "Error: beat-detector timed out"
     except Exception as e:
         return f"Error: {e}"
+
+
+# ============================================================
+# Final Cut Pro's Beat Map (timeline.getBeatGrid)
+# ============================================================
+# Reads the beats, bars, sections and tempo Final Cut Pro's own beat
+# detection stored on the songs in the timeline (the data behind its
+# beat grid), mapped to timeline seconds. In-process and read-only.
+
+_BEAT_GRID_DETAILS = ("bars", "sections", "json")
+
+
+def _is_num(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+
+
+def _t(value) -> str:
+    return f"{value:.3f}s" if _is_num(value) else "?"
+
+
+def _count(n, word: str) -> str:
+    n = n if _is_num(n) else 0
+    return f"{n:g} {word}" + ("" if n == 1 else "s")
+
+
+def _beat_grid_place(clip: dict) -> str:
+    lane = clip.get("lane", 0)
+    return "primary storyline" if not lane else f"lane {lane} (connected clip)"
+
+
+def _beat_grid_tempo_line(clip: dict) -> str:
+    parts = []
+    if _is_num(clip.get("tempo")):
+        parts.append(f"tempo {clip['tempo']:.2f} BPM")
+        if _is_num(clip.get("speed")):
+            played = f" = {clip['timelineTempo']:.2f} BPM on the timeline" if _is_num(clip.get("timelineTempo")) else ""
+            parts[-1] += f" at {clip['speed'] * 100:g}% speed{played}"
+    iv = clip.get("beatIntervalSeconds") if isinstance(clip.get("beatIntervalSeconds"), dict) else {}
+    med, lo, hi = iv.get("median"), iv.get("min"), iv.get("max")
+    if _is_num(med) and med > 0:
+        spacing = f"a beat every {med:.3f}s of the song"
+        if _is_num(lo) and _is_num(hi) and (hi - lo) / med > 0.05:
+            spacing += f", varying {lo:.3f}-{hi:.3f}s (tempo drifts)"
+        else:
+            spacing += ", steady"
+        parts.append(spacing)
+    return "; ".join(parts) if parts else "no tempo stored"
+
+
+def _render_beat_grid_clip(clip: dict, detail: str) -> list[str]:
+    head = (f"\nSong {clip.get('handle')} \"{clip.get('name')}\"  {_beat_grid_place(clip)}  "
+            f"{_t(clip.get('startSeconds'))}-{_t(clip.get('endSeconds'))}")
+    if clip.get("flexMusic"):
+        head += "  [FlexMusic]"
+    lines = [head]
+    if clip.get("error"):
+        lines.append(f"  error: {clip['error']}")
+        return lines
+    grid = "shown" if clip.get("beatGridVisible") else "hidden"
+    lines.append(f"  {_beat_grid_tempo_line(clip)}; beat grid {grid} on the timeline")
+    song = clip.get("song") if isinstance(clip.get("song"), dict) else {}
+    lines.append(f"  whole song: {_count(song.get('beatCount'), 'beat')}, {_count(song.get('barCount'), 'bar')}, "
+                 f"{_count(song.get('sectionCount'), 'section')}, beats from {_t(song.get('firstBeatSeconds'))} to "
+                 f"{_t(song.get('lastBeatSeconds'))} of the song; this clip plays the song from "
+                 f"{_t(clip.get('songStartSeconds'))} to {_t(clip.get('songEndSeconds'))}")
+    if clip.get("note"):
+        lines.append(f"  note: {clip['note']}")
+
+    sections = [s for s in (clip.get("sections") or []) if isinstance(s, dict)]
+    if sections:
+        lines.append("  Sections (timeline start-end; the part on the timeline when the song is trimmed):")
+        for s in sections:
+            row = (f"    section {s.get('section')}  {_t(s.get('t'))}-{_t(s.get('endT'))}  "
+                   f"{s.get('durationSeconds', 0):.2f}s, {_count(s.get('bars'), 'bar')} from bar {s.get('firstBar')}")
+            if _is_num(s.get("onTimelineT")):
+                row += f"  [on the timeline {_t(s.get('onTimelineT'))}-{_t(s.get('onTimelineEndT'))}]"
+            lines.append(row)
+    elif clip.get("status") != "empty":
+        lines.append("  Sections: none in range")
+
+    if detail != "bars":
+        return lines
+
+    beats = [b for b in (clip.get("beats") or []) if isinstance(b, dict)]
+    bars = {b.get("bar"): b for b in (clip.get("bars") or []) if isinstance(b, dict)}
+    by_bar: dict = {}
+    for b in beats:
+        by_bar.setdefault(b.get("bar", 0), []).append(b)
+    if not beats and not bars:
+        lines.append("  Beats: none in range")
+        return lines
+    lines.append("  Bars, each with its beats in timeline seconds (the first beat of a bar is its downbeat; "
+                 "S<n> marks the bar that starts section n):")
+    for n in sorted(set(by_bar) | set(bars), key=lambda v: v if _is_num(v) else -1):
+        bar = bars.get(n, {})
+        times = " ".join(f"{b['t']:.3f}" for b in by_bar.get(n, []) if _is_num(b.get("t")))
+        if n == 0:
+            lines.append(f"    pickup (before bar 1): {times}")
+            continue
+        tag = f"S{bar.get('section')}" if bar.get("sectionStart") else ""
+        lines.append(f"    bar {n:<4} {tag:<4} {times}")
+    return lines
+
+
+def _render_beat_grid(r: dict, detail: str) -> str:
+    tl = r.get("timeline") if isinstance(r.get("timeline"), dict) else {}
+    clips = [c for c in (r.get("clips") or []) if isinstance(c, dict)]
+    detectable = [c for c in (r.get("detectable") or []) if isinstance(c, dict)]
+    unsupported = [c for c in (r.get("unsupported") or []) if isinstance(c, dict)]
+
+    head = ("Final Cut Pro's beat map (its own beat detection, the data behind the beat grid). "
+            "Times are timeline seconds; bars and sections are numbered from the start of the song, "
+            "so the numbers stay the same when the song is trimmed or moved. The hierarchy is the "
+            "strength: a section start is also a downbeat, a downbeat is also a beat.")
+    lines = [head]
+    meta = []
+    ranged = _is_num(tl.get("rangeStartSeconds")) or _is_num(tl.get("rangeEndSeconds"))
+    if _is_num(tl.get("frameRate")):
+        meta.append(f"timeline {tl['frameRate']:g} fps")
+    if _is_num(tl.get("durationSeconds")):
+        meta.append(f"{tl['durationSeconds']:.3f}s long")
+    if ranged:
+        meta.append(f"range {_t(tl.get('rangeStartSeconds')) if _is_num(tl.get('rangeStartSeconds')) else 'start'}"
+                    f" to {_t(tl.get('rangeEndSeconds')) if _is_num(tl.get('rangeEndSeconds')) else 'end'}")
+    if tl.get("supportsBeatDetection") is False:
+        meta.append("this project type does not support beat detection")
+    if meta:
+        lines.append("; ".join(meta) + ".")
+
+    if not clips:
+        lines.append("\nNo song on this timeline has a beat map" + (" in that range." if ranged else "."))
+    for clip in clips:
+        lines.extend(_render_beat_grid_clip(clip, detail))
+
+    if detectable:
+        lines.append("\nAudio clips Final Cut Pro can detect beats on but has not yet:")
+        for c in detectable:
+            lines.append(f"  {c.get('handle')} \"{c.get('name')}\"  {_beat_grid_place(c)}  "
+                         f"{_t(c.get('startSeconds'))}-{_t(c.get('endSeconds'))}")
+        first = detectable[0].get("handle")
+        lines.append(f"  To detect: select_clips(handles=[\"{first}\"]), then "
+                     f"timeline_action(\"enableBeatDetection\"); the analysis runs in the background, "
+                     f"then call get_beat_grid again.")
+    for c in unsupported:
+        lines.append(f"\n{c.get('handle')} \"{c.get('name')}\": no beat map, and Final Cut Pro cannot detect "
+                     f"beats on it: {c.get('reason')}.")
+    return "\n".join(lines)
+
+
+@splicekit_tool("get_beat_grid", READ)
+def get_beat_grid(handle: str = "", start_seconds: float | None = None,
+                  end_seconds: float | None = None, detail: str = "bars") -> str:
+    """Final Cut Pro's own beat map for the songs on the timeline: every beat, bar and
+    section, and the tempo, in timeline seconds. This is what Final Cut Pro's beat
+    detection (timeline_action("enableBeatDetection")) stores on an audio clip and draws as
+    its beat grid. Use it to place and cut B-roll on the music: a cut on a downbeat (the
+    first beat of a bar) or a section start lands harder than one on an off-beat, and a
+    section change is where a montage should change pace. Read-only: never moves the
+    playhead or the selection.
+
+    What it reports, per song with a beat map:
+      - tempo (BPM) and the beat spacing, flagged when the tempo drifts;
+      - sections as timeline ranges with their length in bars;
+      - every bar with its beats (detail="bars"): the first time on a line is the bar's
+        downbeat; S<n> marks the bar that starts section n; beats before the first bar are
+        a pickup;
+      - whether the beat grid is shown on the timeline.
+    Bars and sections are numbered from the start of the song, so the numbers stay the same
+    when the song is trimmed or moved; only the times change. The times are read fresh on
+    every call: after trimming, moving or replacing the music, call this again. Only the
+    part of the song the timeline plays is listed (and only the window, when given).
+
+    Final Cut Pro stores no per-beat strength: the hierarchy is the strength (section start,
+    then downbeat, then beat). The beat map lives on audio-only clips; a clip with video in
+    it is never analysed by Final Cut Pro (use detect_beats on its source file for
+    SpliceKit's own, simpler analysis). Final Cut Pro keeps the beat map per media file, so
+    another copy of a song it has analysed comes with its beat map (grid hidden); a song it
+    has never analysed is listed under "can detect beats on but has not yet", with the two
+    calls that run the detection. A song at another speed is mapped through that speed (the
+    answer gives it and the tempo it plays at); in a speed ramp the times are approximate.
+
+    Feed the times to blade_at_times, add_markers_at_times or trim_clip; trim_clips_to_beats
+    and sync_clips_to_song_beats trim clips to this same map in one call.
+
+    Args:
+        handle: one clip (get_timeline_clips()); its beat map, or why it has none. Omit for
+            every song on the timeline.
+        start_seconds: only beats, bars and sections at or after this timeline time.
+        end_seconds: only those at or before this time.
+        detail: "bars" (default: sections plus every bar with its beats), "sections"
+            (tempo and sections only), or "json" (the raw answer, every beat with its
+            index, bar, beat-in-bar, section, level and the time in the song).
+    """
+    if not isinstance(handle, str):
+        return "Error: handle must be a string"
+    if detail not in _BEAT_GRID_DETAILS:
+        return f"Error: detail must be one of {', '.join(_BEAT_GRID_DETAILS)}"
+    params = {}
+    for name, key, value in (("start_seconds", "startSeconds", start_seconds),
+                             ("end_seconds", "endSeconds", end_seconds)):
+        if value is None:
+            continue
+        if not _is_num(value) or value in (float("inf"), float("-inf")):
+            return f"Error: {name} must be a finite number of seconds"
+        params[key] = float(value)
+    if "startSeconds" in params and "endSeconds" in params and params["endSeconds"] <= params["startSeconds"]:
+        return "Error: end_seconds must be after start_seconds"
+    if handle.strip():
+        params["handle"] = handle.strip()
+
+    r = bridge.call("timeline.getBeatGrid", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    if detail == "json":
+        return _fmt(r)
+    return _render_beat_grid(r, detail)
 
 
 # ============================================================
