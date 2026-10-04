@@ -187,6 +187,9 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 
 @implementation SpliceKitTranscriptPanel
 
+NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
+    @"SpliceKitTranscriptVisibilityDidChangeNotification";
+
 #pragma mark - Singleton
 
 + (instancetype)sharedPanel {
@@ -220,6 +223,20 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
                 [self stopPlayheadTimer];
                 [self.panel orderOut:nil];
             }];
+
+        // Float above FCP only while FCP is the active app. WillResignActive
+        // runs while FCP is still frontmost, so the window drops to the normal
+        // level just above FCP's own windows and the next app covers it.
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSApplicationWillResignActiveNotification
+            object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                [self applyWindowLevelForAppActive:NO];
+            }];
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSApplicationDidBecomeActiveNotification
+            object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                [self applyWindowLevelForAppActive:YES];
+            }];
     }
     return self;
 }
@@ -240,6 +257,7 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
     if (self.status == SpliceKitTranscriptStatusReady && self.mutableWords.count > 0) {
         [self startPlayheadTimer];
     }
+    [self postVisibilityChange:YES];
 }
 
 - (void)hidePanel {
@@ -251,14 +269,32 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
     }
 
     [self.panel orderOut:nil];
+    [self postVisibilityChange:NO];
 }
 
 - (BOOL)isVisible {
     return self.panel.isVisible;
 }
 
+// The toolbar button's lit state follows this, so it also goes dark when the
+// window is closed with its close button or minimized, not only via the toggle.
+- (void)postVisibilityChange:(BOOL)visible {
+    [[NSNotificationCenter defaultCenter] postNotificationName:SpliceKitTranscriptVisibilityDidChangeNotification
+                                                        object:self
+                                                      userInfo:@{@"visible": @(visible)}];
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     // Don't stop timer — user may reopen and expect sync
+    [self postVisibilityChange:NO];
+}
+
+- (void)windowDidMiniaturize:(NSNotification *)notification {
+    [self postVisibilityChange:NO];
+}
+
+- (void)windowDidDeminiaturize:(NSNotification *)notification {
+    [self postVisibilityChange:YES];
 }
 
 - (void)focusSearchField {

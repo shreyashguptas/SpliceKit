@@ -96,6 +96,14 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **The Transcript Editor window behaves like a normal window.** It floated at
+  `NSFloatingWindowLevel` all the time with `hidesOnDeactivate` off, so it sat on top of
+  every other app. It now floats above Final Cut Pro's own windows only while Final Cut Pro
+  is the active app, and drops to the normal level (behind the app you switch to) when it
+  is not. It has a standard title bar with minimize, stays on the Space it was opened on,
+  remembers its size and position, and opens on the display Final Cut Pro is on. The
+  toolbar button now goes dark when the window is closed with its close button or
+  minimized, not only when it is toggled.
 - **The OTIO round trip lost the edit.** Exporting the QA project — three items on the primary
   storyline, the first a compound clip holding two clips of its own, plus a connected clip
   anchored inside it — reported "1 track, 2 clips", and re-importing produced four gaps and

@@ -15,6 +15,7 @@
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLiveCam.h"
+#import "SpliceKitTranscriptPanel.h"
 #import "SpliceKitURLImport.h"
 #import "SpliceKitMKV.h"
 #import "SpliceKitVP9.h"
@@ -620,6 +621,13 @@ static void SpliceKit_appDidLaunch(void) {
                                                   usingBlock:^(NSNotification *note) {
         BOOL visible = [note.userInfo[@"visible"] boolValue];
         [[SpliceKitMenuController shared] updateLiveCamToolbarButtonState:visible];
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitTranscriptVisibilityDidChangeNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        BOOL visible = [note.userInfo[@"visible"] boolValue];
+        [[SpliceKitMenuController shared] updateToolbarButtonState:visible];
     }];
 
     // Install transition freeze-extend swizzle (adds "Use Freeze Frames" button

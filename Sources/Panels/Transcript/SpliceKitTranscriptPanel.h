@@ -37,6 +37,10 @@
 
 #pragma mark - Transcript Panel
 
+// Posted when the transcript window is shown, hidden, closed or minimized.
+// userInfo[@"visible"] is an NSNumber BOOL.
+FOUNDATION_EXPORT NSString * const SpliceKitTranscriptVisibilityDidChangeNotification;
+
 typedef NS_ENUM(NSInteger, SpliceKitTranscriptStatus) {
     SpliceKitTranscriptStatusIdle = 0,
     SpliceKitTranscriptStatusTranscribing,

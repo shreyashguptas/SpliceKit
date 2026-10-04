@@ -47,6 +47,7 @@
 - (void)exportOTIO:(id)sender;
 - (void)importOTIO:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
+- (void)updateToolbarButtonState:(BOOL)active;
 - (void)updateLiveCamToolbarButtonState:(BOOL)active;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, weak) NSButton *paletteToolbarButton;

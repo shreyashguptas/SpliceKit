@@ -57,9 +57,7 @@
     } else {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
-    // Update toolbar button pressed state
-    BOOL nowVisible = !visible;
-    [self updateToolbarButtonState:nowVisible];
+    // The toolbar button follows SpliceKitTranscriptVisibilityDidChangeNotification.
 }
 
 - (void)toggleCaptionPanel:(id)sender {

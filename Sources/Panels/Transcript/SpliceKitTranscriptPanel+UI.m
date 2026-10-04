@@ -6,7 +6,21 @@
 
 #import "SpliceKitTranscriptPanel+Private.h"
 
+static NSString * const kTranscriptWindowFrameName = @"SpliceKitTranscriptEditor";
+
 @implementation SpliceKitTranscriptPanel (UI)
+
+#pragma mark - Window Level
+
+// While FCP is the active app the window floats above FCP's own windows, so
+// clicking the timeline never buries it behind the full-size editing window.
+// When another app comes forward it drops to the normal level and goes behind
+// that app like any other window. Called from the app activation observers.
+- (void)applyWindowLevelForAppActive:(BOOL)active {
+    if (!self.panel) return;
+    // floatingPanel sets the level: NSFloatingWindowLevel or NSNormalWindowLevel.
+    self.panel.floatingPanel = active;
+}
 
 #pragma mark - Panel UI Setup
 
@@ -15,23 +29,43 @@
 
     SpliceKit_log(@"[Transcript] Setting up panel UI");
 
-    // Create floating panel — wider for segment layout
-    NSRect frame = NSMakeRect(100, 150, 620, 700);
+    // A standard titled window (close, minimize, resize). It stays an NSPanel so
+    // it never becomes FCP's main window: menu commands and the responder chain
+    // keep reaching the timeline while the transcript has keyboard focus.
+    NSRect frame = NSMakeRect(0, 0, 620, 700);
     NSUInteger styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                           NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
+                           NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
 
     self.panel = [[NSPanel alloc] initWithContentRect:frame
                                             styleMask:styleMask
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
     self.panel.title = @"Transcript Editor";
-    self.panel.floatingPanel = YES;
     self.panel.becomesKeyOnlyIfNeeded = NO;
+    // Stay visible when another app is in front, but behind that app's windows
+    // (see applyWindowLevelForAppActive:). It used to float at
+    // NSFloatingWindowLevel all the time, so it sat on top of every app.
     self.panel.hidesOnDeactivate = NO;
-    self.panel.level = NSFloatingWindowLevel;
+    [self applyWindowLevelForAppActive:NSApp.isActive];
+    // Lives on the Space it was opened on, like any window, and may also join
+    // FCP's own Space when FCP is full screen.
+    self.panel.collectionBehavior = NSWindowCollectionBehaviorManaged |
+                                    NSWindowCollectionBehaviorFullScreenAuxiliary;
     self.panel.minSize = NSMakeSize(420, 350);
     self.panel.delegate = self;
     self.panel.releasedWhenClosed = NO;
+
+    // Reopen where the user last left it; the first time, centre it on the
+    // display FCP's window is on rather than a fixed spot on the main display.
+    if (![self.panel setFrameUsingName:kTranscriptWindowFrameName]) {
+        NSScreen *screen = NSApp.mainWindow.screen ?: NSScreen.mainScreen;
+        NSRect visible = screen.visibleFrame;
+        NSRect placed = self.panel.frame;
+        placed.origin.x = NSMidX(visible) - placed.size.width / 2.0;
+        placed.origin.y = NSMidY(visible) - placed.size.height / 2.0;
+        [self.panel setFrame:placed display:NO];
+    }
+    self.panel.frameAutosaveName = kTranscriptWindowFrameName;
 
     // Dark appearance to match FCP
     self.panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
