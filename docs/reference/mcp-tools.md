@@ -863,7 +863,7 @@ The command palette opens as a floating window inside FCP:
 - Fuzzy search across all available actions (editing, playback, color, speed, markers, etc.)
 - Arrow keys to navigate, Return to execute, Escape to close
 - The microphone button dictates into the search field
-- Also accessible via toolbar button or Enhancements menu
+- Also accessible from the Enhancements menu
 
 SpliceKit runs no language model of its own: the MCP client decides which tools to call.
 Guide: [command-palette.md](../guides/command-palette.md).

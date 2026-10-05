@@ -615,13 +615,6 @@ static void SpliceKit_appDidLaunch(void) {
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
 
-    [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitLiveCamVisibilityDidChangeNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification *note) {
-        BOOL visible = [note.userInfo[@"visible"] boolValue];
-        [[SpliceKitMenuController shared] updateLiveCamToolbarButtonState:visible];
-    }];
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitTranscriptVisibilityDidChangeNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]

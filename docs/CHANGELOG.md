@@ -417,6 +417,9 @@ that this fork has removed.
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
 
 ### Removed
+- **The LiveCam and Command Palette toolbar buttons.** Only the Transcript Editor button is
+  left in Final Cut Pro's toolbar; a saved toolbar layout that still holds the old buttons is
+  cleaned up at launch. Both features are still in the Enhancements menu and over MCP.
 - **SpliceKit runs no language model of its own any more.** It only exposes tools over MCP,
   and the MCP client does the thinking. The Command Palette's natural-language engines are
   gone: Apple Intelligence and Apple Intelligence+ (the FoundationModels Swift scripts the

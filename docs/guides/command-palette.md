@@ -49,8 +49,7 @@ hide_command_palette()    # close
 
 ### Via SpliceKit Menu
 
-The palette is also accessible from SpliceKit's menu in the FCP menu bar
-and via a toolbar button.
+The palette is also accessible from SpliceKit's menu in the FCP menu bar.
 
 ---
 

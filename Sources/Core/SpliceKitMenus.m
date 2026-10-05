@@ -98,7 +98,6 @@
     } else {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
-    [self updateLiveCamToolbarButtonState:!visible];
 }
 
 - (void)toggleCommandPalette:(id)sender {
@@ -852,19 +851,6 @@ static NSArray<NSNumber *> *SpliceKit_parseLadderString(NSString *str) {
     }
 }
 
-- (void)updateLiveCamToolbarButtonState:(BOOL)active {
-    NSButton *btn = self.liveCamToolbarButton;
-    if (!btn) return;
-    btn.state = active ? NSControlStateValueOn : NSControlStateValueOff;
-    if (active) {
-        btn.contentTintColor = [NSColor controlAccentColor];
-        btn.bezelColor = [NSColor colorWithWhite:0.0 alpha:0.5];
-    } else {
-        btn.contentTintColor = nil;
-        btn.bezelColor = nil;
-    }
-}
-
 @end
 
 void SpliceKit_installMenu(void) {
@@ -1254,32 +1240,12 @@ static IMP sOriginalToolbarItemForIdentifier = NULL;
 // return our buttons. Everything else passes through to the original handler.
 static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *toolbar,
                                                    NSString *identifier, BOOL willInsert) {
-    if ([identifier isEqualToString:kSpliceKitLiveCamToolbarID]) {
-        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:kSpliceKitLiveCamToolbarID];
-        item.label = @"LiveCam";
-        item.paletteLabel = @"Open LiveCam";
-        item.toolTip = @"LiveCam";
-
-        NSImage *icon = [NSImage imageWithSystemSymbolName:@"camera.viewfinder"
-                                  accessibilityDescription:@"LiveCam"];
-        if (!icon) icon = [NSImage imageNamed:NSImageNameQuickLookTemplate];
-        NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration
-            configurationWithPointSize:13 weight:NSFontWeightMedium];
-        icon = [icon imageWithSymbolConfiguration:config];
-
-        NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 25)];
-        [button setButtonType:NSButtonTypePushOnPushOff];
-        button.bezelStyle = NSBezelStyleTexturedRounded;
-        button.bordered = YES;
-        button.image = icon;
-        button.alternateImage = icon;
-        button.imagePosition = NSImageOnly;
-        button.target = [SpliceKitMenuController shared];
-        button.action = @selector(toggleLiveCamPanel:);
-
-        [SpliceKitMenuController shared].liveCamToolbarButton = button;
-        item.view = button;
-        return item;
+    // LiveCam and Command Palette had buttons here once. A toolbar layout FCP
+    // saved back then still names them: answer nil so FCP drops them instead of
+    // asking its own delegate about an identifier it never heard of.
+    if ([identifier isEqualToString:kSpliceKitLiveCamToolbarID] ||
+        [identifier isEqualToString:kSpliceKitPaletteToolbarID]) {
+        return nil;
     }
     if ([identifier isEqualToString:kSpliceKitTranscriptToolbarID]) {
         NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:kSpliceKitTranscriptToolbarID];
@@ -1305,33 +1271,6 @@ static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *
         button.action = @selector(toggleTranscriptPanel:);
 
         [SpliceKitMenuController shared].toolbarButton = button;
-        item.view = button;
-
-        return item;
-    }
-    if ([identifier isEqualToString:kSpliceKitPaletteToolbarID]) {
-        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:kSpliceKitPaletteToolbarID];
-        item.label = @"Commands";
-        item.paletteLabel = @"Command Palette";
-        item.toolTip = @"Command Palette (Cmd+Shift+P)";
-
-        NSImage *icon = [NSImage imageWithSystemSymbolName:@"command"
-                                  accessibilityDescription:@"Command Palette"];
-        if (!icon) icon = [NSImage imageNamed:NSImageNameSmartBadgeTemplate];
-        NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration
-            configurationWithPointSize:13 weight:NSFontWeightMedium];
-        icon = [icon imageWithSymbolConfiguration:config];
-
-        NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 25)];
-        [button setButtonType:NSButtonTypeMomentaryPushIn];
-        button.bezelStyle = NSBezelStyleTexturedRounded;
-        button.bordered = YES;
-        button.image = icon;
-        button.imagePosition = NSImageOnly;
-        button.target = [SpliceKitMenuController shared];
-        button.action = @selector(toggleCommandPalette:);
-
-        [SpliceKitMenuController shared].paletteToolbarButton = button;
         item.view = button;
 
         return item;
@@ -1409,18 +1348,14 @@ static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *
         }
 
         // Guard against double-insertion — can happen if both the notification
-        // and the polling fallback fire. Also clean up stale items (no view).
-        BOOL hasLiveCam = NO, hasTranscript = NO, hasPalette = NO;
+        // and the polling fallback fire. Also clean up stale items (no view), and
+        // the retired LiveCam and Command Palette buttons a saved layout may hold.
+        BOOL hasTranscript = NO;
         for (NSInteger i = (NSInteger)toolbar.items.count - 1; i >= 0; i--) {
             NSToolbarItem *ti = toolbar.items[(NSUInteger)i];
-            if ([ti.itemIdentifier isEqualToString:kSpliceKitLiveCamToolbarID]) {
-                if (ti.view) {
-                    if ([ti.view isKindOfClass:[NSButton class]])
-                        [SpliceKitMenuController shared].liveCamToolbarButton = (NSButton *)ti.view;
-                    hasLiveCam = YES;
-                } else {
-                    [toolbar removeItemAtIndex:(NSUInteger)i];
-                }
+            if ([ti.itemIdentifier isEqualToString:kSpliceKitLiveCamToolbarID] ||
+                [ti.itemIdentifier isEqualToString:kSpliceKitPaletteToolbarID]) {
+                [toolbar removeItemAtIndex:(NSUInteger)i];
             } else if ([ti.itemIdentifier isEqualToString:kSpliceKitTranscriptToolbarID]) {
                 if (ti.view) {
                     if ([ti.view isKindOfClass:[NSButton class]])
@@ -1429,23 +1364,15 @@ static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *
                 } else {
                     [toolbar removeItemAtIndex:(NSUInteger)i];
                 }
-            } else if ([ti.itemIdentifier isEqualToString:kSpliceKitPaletteToolbarID]) {
-                if (ti.view) {
-                    if ([ti.view isKindOfClass:[NSButton class]])
-                        [SpliceKitMenuController shared].paletteToolbarButton = (NSButton *)ti.view;
-                    hasPalette = YES;
-                } else {
-                    [toolbar removeItemAtIndex:(NSUInteger)i];
-                }
             }
         }
-        if (hasLiveCam && hasTranscript && hasPalette) {
-            SpliceKit_log(@"All toolbar buttons already present — skipping");
+        if (hasTranscript) {
+            SpliceKit_log(@"Transcript toolbar button already present — skipping");
             return;
         }
 
-        // Insert our buttons just before the flexible space — that's where
-        // they look most natural, grouped with FCP's own tool buttons.
+        // Insert the button just before the flexible space — that's where
+        // it looks most natural, grouped with FCP's own tool buttons.
         NSUInteger insertIdx = toolbar.items.count;
         for (NSUInteger i = 0; i < toolbar.items.count; i++) {
             NSToolbarItem *ti = toolbar.items[i];
@@ -1454,20 +1381,8 @@ static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *
                 break;
             }
         }
-        if (!hasLiveCam) {
-            [toolbar insertItemWithItemIdentifier:kSpliceKitLiveCamToolbarID atIndex:insertIdx];
-            SpliceKit_log(@"LiveCam toolbar button inserted at index %lu", (unsigned long)insertIdx);
-            insertIdx++;
-        }
-        if (!hasPalette) {
-            [toolbar insertItemWithItemIdentifier:kSpliceKitPaletteToolbarID atIndex:insertIdx];
-            SpliceKit_log(@"Command Palette toolbar button inserted at index %lu", (unsigned long)insertIdx);
-            insertIdx++;
-        }
-        if (!hasTranscript) {
-            [toolbar insertItemWithItemIdentifier:kSpliceKitTranscriptToolbarID atIndex:insertIdx];
-            SpliceKit_log(@"Transcript toolbar button inserted at index %lu", (unsigned long)insertIdx);
-        }
+        [toolbar insertItemWithItemIdentifier:kSpliceKitTranscriptToolbarID atIndex:insertIdx];
+        SpliceKit_log(@"Transcript toolbar button inserted at index %lu", (unsigned long)insertIdx);
 
     } @catch (NSException *e) {
         SpliceKit_log(@"Failed to install toolbar button: %@", e.reason);
