@@ -284,37 +284,20 @@ NSDictionary *SpliceKit_handleSpineReorder(NSDictionary *params) {
                 [newClips addObject:clips[i]];
             }
 
-            // Register undo with the library document's undo manager
-            NSUndoManager *um = (NSUndoManager *)SpliceKit_getUndoManager();
-            if (um) {
-                [um beginUndoGrouping];
-                [um setActionName:@"Shuffle Clips"];
-
-                // Capture spine, sequence, and both orders for undo/redo
-                id capturedSpine = spine;
-                id capturedSequence = sequence;
-                NSArray *capturedOriginal = originalItems;
-                NSArray *capturedNew = [newClips copy];
-                [um registerUndoWithTarget:(id)spine handler:^(id target) {
-                    // UNDO: restore original order
-                    SpliceKit_applySpineOrder(capturedSpine, capturedOriginal);
-                    SpliceKit_refreshTimeline(capturedSequence);
-                    // Register REDO: re-apply shuffled order
-                    [um registerUndoWithTarget:(id)capturedSpine handler:^(id target2) {
-                        SpliceKit_applySpineOrder(capturedSpine, capturedNew);
-                        SpliceKit_refreshTimeline(capturedSequence);
-                    }];
-                }];
+            // Reorder inside FCP's own edit transaction (Edit > Undo Shuffle Clips), not a
+            // hand-made NSUndoManager entry: the transaction holds the model write lock, so
+            // the background render tracker never reads the spine mid-rebuild (that race
+            // aborted FCP), and FCP records the change so undo / redo / undo all work.
+            // Inside an open begin_edit group the group's step covers it.
+            id timeline = SpliceKit_getActiveTimelineModule();
+            NSString *undoName = @"Shuffle Clips";
+            BOOL openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoName);
+            @try {
+                SpliceKit_applySpineOrder(spine, newClips);
+            } @finally {
+                SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoName, openedUndoGroup);
             }
-
-            // Apply the new order
-            SpliceKit_applySpineOrder(spine, newClips);
             SpliceKit_refreshTimeline(sequence);
-
-            // Close the undo group
-            if (um) {
-                [um endUndoGrouping];
-            }
 
             result = @{
                 @"status": @"ok",

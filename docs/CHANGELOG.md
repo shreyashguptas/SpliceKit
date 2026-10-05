@@ -131,6 +131,13 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **`move_clips` (and `spine.reorder`): undo, redo, undo works, and no crash.** The move
+  kept its own undo entry, whose redo registered nothing: after undo -> redo the next undo
+  was an empty "Shuffle Clips" step and the clips stayed moved. It also rebuilt the primary
+  storyline without Final Cut Pro's model lock, so FCP's background render tracker could
+  read it mid-rebuild and FCP quit (seen on fast undo / redo). The move now runs inside
+  FCP's own edit transaction: FCP records it, any number of undo / redo steps alternate,
+  and inside `begin_edit` / `end_edit` it joins that one undo step.
 - **Transcript edits made while a transcription is running are refused, not misapplied.**
   A run clears the word list partway through and fills it again at the end, while
   `get_transcript` keeps listing the previous run's words until then. A
