@@ -36,6 +36,10 @@
 @property (nonatomic) SpliceKitCaptionStatus status;
 @property (nonatomic, copy) NSString *errorMessage;
 @property (nonatomic, strong) NSDictionary *lastGenerateResult;
+// Set when the chosen engine's transcriber is not installed and the last
+// transcription fell back to Parakeet v3; nil otherwise. Reported as
+// `engineNotice` by getState and shown in the panel's status line.
+@property (nonatomic, copy) NSString *engineNotice;
 
 // UI
 @property (nonatomic, strong) NSPopUpButton *presetPopup;

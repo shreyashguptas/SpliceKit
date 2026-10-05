@@ -143,7 +143,7 @@
     self.enginePopup.lastItem.representedObject = @"parakeetV3";
     [self.enginePopup addItemWithTitle:@"Whisper large-v3-turbo (~800 MB)"];
     self.enginePopup.lastItem.representedObject = @"whisperLargeV3Turbo";
-    [self.enginePopup addItemWithTitle:@"Whisper large-v3 (Highest quality, ~1.5 GB)"];
+    [self.enginePopup addItemWithTitle:@"Whisper large-v3 (Highest quality, ~3 GB)"];
     self.enginePopup.lastItem.representedObject = @"whisperLargeV3";
     NSString *savedEngine = [[NSUserDefaults standardUserDefaults] stringForKey:@"SpliceKitCaptionEngine"] ?: @"whisperLargeV3";
     for (NSMenuItem *item in self.enginePopup.itemArray) {

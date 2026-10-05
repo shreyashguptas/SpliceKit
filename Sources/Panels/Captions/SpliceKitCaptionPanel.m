@@ -1225,6 +1225,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
     // like the read itself had failed, with the text of an unrelated earlier paste.
     if (self.errorMessage) state[@"lastError"] = self.errorMessage;
     if (self.lastGenerateResult) state[@"lastGenerateResult"] = self.lastGenerateResult;
+    if (self.engineNotice) state[@"engineNotice"] = self.engineNotice;
 
     // Segments
     NSMutableArray *segDicts = [NSMutableArray array];

@@ -105,6 +105,20 @@ that this fork has removed.
   can no longer get lost on another desktop or display. The toolbar button brings a window
   that is open on another desktop, or minimized, to you instead of hiding it, and it goes
   dark when the window is closed with its close button or minimized.
+- **Captions failed out of the box: "Whisper large-v3 transcriber not found".** Whisper
+  large-v3 is the caption panel's default engine, but its helper (`whisper-transcriber`)
+  was only built with `scripts/build-transcribers.sh --all`, so `make install`,
+  `make deploy` and `make transcribers` never built it and every caption run failed. It is
+  now built by default next to `parakeet-transcriber` (a failed build is still not fatal),
+  and a redeploy that wipes the framework's Resources copies back the installed
+  Application Support copy when this checkout has no build of its own. WhisperKit is
+  pinned to exactly 0.18.0 with its `Package.resolved` committed, as FluidAudio is. When
+  the Whisper helper is missing anyway, the caption panel falls back to Parakeet v3 rather
+  than failing, logs it, says so in its status line, and `get_caption_state` reports it as
+  `Engine fallback`. The engine menu and the download message now give large-v3's real
+  size, ~3 GB on disk, not ~1.5 GB. Proven outside Final Cut Pro: the built helper
+  transcribes a spoken "The quick brown fox jumps over the lazy dog" with large-v3, every
+  word with its timing.
 - **The OTIO round trip lost the edit.** Exporting the QA project — three items on the primary
   storyline, the first a compound clip holding two clips of its own, plus a connected clip
   anchored inside it — reported "1 track, 2 clips", and re-importing produced four gaps and
