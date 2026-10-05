@@ -494,14 +494,16 @@ CASES.update({
                                      undo=("Paste", "Insert Captions"),
                                      extra_undo=("Import XML",),
                                      require_undo=True,
-                                     setup=["speech_fixture", "transcript"],
+                                     setup=["speech_fixture", "captions"],
                                      needs_parakeet=True,
                                      cleanup=[("cleanup_temp_projects", {})]),
     "cleanup_temp_projects": read(dry_run=True),
-    # The counterpart to generate_native_captions, on captions it has just made.
+    # The counterpart to generate_native_captions, on captions it has just made. Both
+    # read the Social Captions panel's words (not the Transcript panel's), so their setup
+    # fills that panel; it used to pass only after an earlier case had.
     "remove_captions": Case(args={"native": True}, kind="write",
                             undo="Remove Captions", require_undo=True,
-                            setup=["speech_fixture", "transcript",
+                            setup=["speech_fixture", "captions",
                                    ("generate_native_captions", {},
                                     ("Paste", "Import XML"))],
                             needs_parakeet=True, timeout=300),
@@ -1168,8 +1170,16 @@ class Sweep:
             out = await self.call("open_captions", {"force_retranscribe": True}, 120)
             if out.lower().startswith("error"):
                 raise SetupError(f"open_captions: {' '.join(out.split())[:200]}")
-            await self.wait_for("get_caption_state", {}, r"(?i)\bfox\b", 180,
+            # A forced run flips the panel to transcribing before open_captions answers,
+            # so "ready" here is this run's words. get_caption_state lists only the first
+            # 20 segments and the speech clip sits at the end of the timeline, so "fox"
+            # is looked for in the bridge's full segment list.
+            await self.wait_for("get_caption_state", {}, r"(?m)^Status: ready\b", 180,
                                 fail_pattern=r"Status: (error|failed)")
+            state = await self.call("raw_call", {"method": "captions.getState"})
+            if not re.search(r"(?i)\bfox\b", state):
+                raise SetupError("the caption panel is ready but has no segment with 'fox': "
+                                 f"{' '.join(state.split())[:200]}")
         elif step == "bus_effect":
             out = await self.call("mixer_apply_bus_effect", {"name": "Channel EQ", "index": 0})
             if not out.startswith("Applied"):
@@ -1190,11 +1200,9 @@ class Sweep:
                                 f"{name!r}, expected {expected!r}")
                     await self.call("history_action", {"action": "undo"})
             elif step == "speech_fixture":
-                name = await self.undo_name()
-                if name != "Paste":
-                    return (f"the speech clip could not be taken off: the undo stack says "
-                            f"{name!r}, expected 'Paste'")
-                await self.call("history_action", {"action": "undo"})
+                problem = await self.remove_speech_clip()
+                if problem:
+                    return problem
             elif step == "bus_effect":
                 await self.call("seek_to_time", {"seconds": self.times.get("$T_HOME", 0.0)})
                 state = await self.call("mixer_get_state", {})
@@ -1205,6 +1213,36 @@ class Sweep:
         after = await self.shape()
         if teardown and after != pre_setup:
             return f"fixture not removed: {pre_setup} -> {after}"
+        return ""
+
+    async def speech_clip_handle(self) -> str:
+        """The handle of the speech clip appended to the primary storyline, or ""."""
+        # The full state, not get_timeline_clips: that table cuts names at 20 characters.
+        state = await self.timeline_state()
+        handles = [e.get("handle", "") for e in state.get("items", [])
+                   if isinstance(e, dict) and e.get("name") == self.speech_name]
+        return handles[-1] if handles else ""
+
+    async def remove_speech_clip(self) -> str:
+        """Take the appended speech clip off the primary storyline. Returns "" when done.
+
+        Undo is the clean way when its "Paste" is on top of the stack. Anything else
+        can sit there instead (an "Import XML" a caption case left, a "Delete Marker"
+        from a previous run's last edit), and undoing a step the fixture did not make
+        would change the project, so the clip is then deleted by handle instead.
+        Leaving it on the timeline also made FCP ask "Media Moving to Trash" when the
+        sweep removed the source clip at the end of the run."""
+        if not await self.speech_clip_handle():
+            return ""
+        if await self.undo_name() == "Paste":
+            await self.call("history_action", {"action": "undo"})
+            if not await self.speech_clip_handle():
+                return ""
+        handle = await self.speech_clip_handle()
+        await self.call("select_clips", {"handles": handle})
+        out = await self.call("timeline_destructive_action", {"action": "delete"})
+        if await self.speech_clip_handle():
+            return f"the speech clip could not be taken off: {' '.join(out.split())[:200]}"
         return ""
 
     async def cleanup_only(self, case: Case) -> None:
@@ -1307,8 +1345,17 @@ class Sweep:
         def scrub(text: str) -> str:
             text = re.sub(r"obj_\d+", "obj", text)
             text = text.replace(", selected", "")      # the selection is not project content
-            lines = [line for line in text.splitlines()
-                     if not re.search(r"timings:|transcript|playhead", line, re.I)]
+            # get_clip_info's transcript section is the Transcript panel's words for the
+            # clip (its preview and speakers lines too), not project content: a run that
+            # transcribes or names a speaker changes it without touching the project.
+            lines, in_transcript = [], False
+            for line in text.splitlines():
+                if in_transcript and line.startswith("    "):
+                    continue
+                in_transcript = bool(re.search(r"transcript", line, re.I))
+                if in_transcript or re.search(r"timings:|playhead", line, re.I):
+                    continue
+                lines.append(line)
             return "\n".join(lines)
 
         snap: dict[str, Any] = {}
