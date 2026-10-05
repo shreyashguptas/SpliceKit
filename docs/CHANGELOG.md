@@ -9,6 +9,21 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **Titles and generators, fully: list, add exactly, read and change every setting.**
+  `list_titles` lists every installed title and generator (Apple's and your own Motion
+  templates) with its category, theme and full effect ID, and flags the names several templates
+  share ("Bug" alone is fifteen lower thirds). `add_title` connects one at an exact time,
+  length and lane (above or below the primary storyline; by default the lowest free lane
+  above), with its words, text style and inspector settings, as one undo step — built off the
+  timeline and connected with FCP's own anchor action, so no playhead move and no pasteboard.
+  `get_title_parameters` reads each text field (words, font, size, bold / italic, color,
+  alignment) and each published parameter the inspector shows, with its kind, value, range and
+  menu options. `set_title_parameters` changes any of them, every value checked first, as one
+  undo step that undo, redo and undo again restore. Ambiguous names, occupied lanes, times off
+  the storyline, unknown parameters or options and out-of-range values are refused with what
+  would work. Bridge: `titles.list`, `titles.add`, `titles.getParameters`,
+  `titles.setParameters` (`Sources/Bridge/SpliceKitServerTitles.m`); live check:
+  `tests/live/live_titles_check.py`.
 - **The Transcript Editor can transcribe with Whisper large-v3, and does by default.** The
   engine dropdown now offers Whisper large-v3 (most accurate) and Whisper large-v3 turbo
   (faster) next to Parakeet, FCP Native and Apple Speech, through the same

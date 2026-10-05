@@ -40,6 +40,7 @@ Bridge/SpliceKitServerTranscript.m
 Bridge/SpliceKitServerCaptions.m
 Bridge/SpliceKitServerSceneDetect.m
 Bridge/SpliceKitServerEffects.m
+Bridge/SpliceKitServerTitles.m
 Bridge/SpliceKitServerStabilize.m
 Bridge/SpliceKitServerRender.m
 Bridge/SpliceKitServerTransitions.m

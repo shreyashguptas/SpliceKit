@@ -259,7 +259,7 @@ NSDictionary *SpliceKit_handleEffectsListAvailable(NSDictionary *params) {
     return result ?: @{@"error": @"Failed to list effects"};
 }
 
-static NSString *SpliceKit_normalizedEffectName(NSString *name) {
+NSString *SpliceKit_normalizedEffectName(NSString *name) {
     if (![name isKindOfClass:[NSString class]]) return @"";
 
     NSString *lower = [[name lowercaseString] stringByReplacingOccurrencesOfString:@"&" withString:@"and"];

@@ -336,6 +336,17 @@ CASES.update({
                       require_undo=True),
     # Dry run only: a real move removes the storyline's transitions.
     "move_clips": read(handles="$SPINE_CLIP", dry_run=True, expect=r"DRY RUN|Nothing to move"),
+    # Titles and generators. add_title lands a styled title at an exact time and lane as one
+    # undo step; the read tools are pointed at the QA project's connected clip, which is
+    # not a title, so they must say so rather than read some other clip.
+    "list_titles": read(kind="generator", filter="Shapes", expect=r"Shapes"),
+    "add_title": write(name="Basic Title", at_seconds="$T_A", duration_seconds=1.0,
+                       text="Sweep", parameters={}, undo=("Add Title",), require_undo=True,
+                       expect=r"Added: handle obj_\d+"),
+    "get_title_parameters": Case(args={"handle": "$CONNECTED_CLIP"}, kind="read",
+                                 expect=r"not a title or generator"),
+    "set_title_parameters": Case(args={"handle": "$CONNECTED_CLIP", "text": "x"}, kind="read",
+                                 expect=r"not a title or generator"),
     # The prelude selects the connected clip, so the effect lands on it.
     "apply_effect": write(name="Black & White", require_undo=True,
                           undo=("Add Effect", "Black & White", "Add Video Effect")),

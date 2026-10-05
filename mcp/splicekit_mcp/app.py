@@ -67,15 +67,19 @@ SELECT: select_clips([handles]) (no playhead move), select_clip_in_lane(lane),
 PLAYHEAD: seek_to_time(seconds) (exact); playback_action for transport (goToStart, nextFrame...).
 DELETE / REPLACE: timeline_destructive_action("delete" | "cut" | "replaceWithGap" ...) on the
   selection. Spoken content: delete_transcript_words, delete_transcript_silences.
-MOVE / REORDER: no move-by-handle tool yet. Reorder spoken content with move_transcript_words;
-  otherwise select, timeline_destructive_action("cut"), seek_to_time, timeline_edit_action("paste").
+REORDER BY WORDS: move_transcript_words moves spoken content by transcript position.
 MARKERS: add_markers_at_times, list_markers, timeline_edit_action("addMarker" |
   "addChapterMarker" | "addTodoMarker"), direct_timeline_action changeMarkerName / changeMarkerType.
-EFFECTS, TRANSITIONS, COLOR, TITLES (need a selection first): apply_effect, list_effects,
+TITLES AND GENERATORS (by handle, no selection): list_titles (every installed template, with
+  theme and effect ID; many share a name), add_title (exact time, length and lane, with its text,
+  text style and inspector settings, one undo step), get_title_parameters(handle) (text fields and
+  every inspector setting with kind, value, range, menu options), set_title_parameters(handle, ...)
+  (words, font / size / color / alignment, settings; one undo step). insert_title puts one at the
+  playhead only.
+EFFECTS, TRANSITIONS, COLOR (need a selection first): apply_effect, list_effects,
   apply_transition (at the edit point), apply_transition_to_all_clips, list_transitions,
   set_inspector_property, timeline_edit_action (addColorBoard, addColorWheels, addBasicTitle,
-  addKeyframe...), batch_apply_effect, batch_color_correct, insert_title, get_title_text,
-  stabilize_subject.
+  addKeyframe...), batch_apply_effect, batch_color_correct, get_title_text, stabilize_subject.
 SPEED: timeline_destructive_action("retimeSlow50" | "retimeFast2x" | "retimeNormal" |
   "freezeFrame"...), direct_timeline_action retimeSetRate (any rate), set_playback_speed.
 AUDIO: get_audio_levels first (where is it loud, silent, at full scale; which cut jumps), then
@@ -141,6 +145,8 @@ get_timeline_clips() gives every clip a handle; browser_list_clips() does the sa
   trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   plan, then drop dry_run to apply
   add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
   move_clips(["obj_7"], before="obj_2")                      move a clip, no cut/paste
+  add_title(name="Basic Title", at_seconds=12, duration_seconds=4, lane=2, text="Hello")
+  set_title_parameters("obj_9", text="New words", parameters={"Bar Color": "#1E90FF"})
   get_clip_info("obj_12")                                    what is in the clip
   begin_edit("Rough cut") ... end_edit()                     many calls, one undo step
 Re-run get_timeline_clips() if a handle comes back unresolved.
@@ -148,8 +154,10 @@ Re-run get_timeline_clips() if a handle comes back unresolved.
 ## Rules that save round trips
 - Prefer the exact, handle-based tools (add_clip_to_timeline, trim_clip, blade_at_times,
   select_clips, seek_to_time) over stepping the playhead frame by frame.
-- Color, retime, titles and effects need a selection: select_clips([handle]) first.
-- Check what a change will do with dry_run=True (add_clip_to_timeline, trim_clip, move_clips) before doing it.
+- Color, retime and effects need a selection: select_clips([handle]) first. Titles do not:
+  add_title / set_title_parameters work by handle.
+- Check what a change will do with dry_run=True (add_clip_to_timeline, trim_clip, move_clips,
+  add_title, set_title_parameters) before doing it.
 - After an edit, read the state back (get_timeline_clips) or look (capture_timeline); after a
   mistake, history_action("undo"). add_clip_to_timeline replaces the pasteboard.
 - "No active timeline module" / "No sequence in timeline" = no project open: open_project().

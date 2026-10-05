@@ -288,6 +288,15 @@ NSDictionary *SpliceKit_handleGetClipEffects(NSDictionary *params);
 NSDictionary *SpliceKit_resolveEffectDescriptor(NSString *effectID,
                                                 NSString *name,
                                                 NSString *requiredType);
+// Lowercase letters and digits only, "&" read as "and": how effect names are compared.
+NSString *SpliceKit_normalizedEffectName(NSString *name);
+
+#pragma mark - Defined in SpliceKitServerTitles.m
+
+NSDictionary *SpliceKit_handleTitlesList(NSDictionary *params);
+NSDictionary *SpliceKit_handleTitlesAdd(NSDictionary *params);
+NSDictionary *SpliceKit_handleTitlesGetParameters(NSDictionary *params);
+NSDictionary *SpliceKit_handleTitlesSetParameters(NSDictionary *params);
 
 #pragma mark - Defined in SpliceKitServerRender.m
 

@@ -423,10 +423,50 @@ These need a selection first (`select_clips([handle])`).
 - `batch_color_correct(correction="addColorBoard", clip_count=0)` — one color correction on
   each targeted primary-storyline clip.
 - `insert_title(name="Basic Title")` or `insert_title(effect_id=...)` — insert a title or
-  generator into the timeline.
+  generator at the playhead (FCP's Connect Title). For an exact place, words and settings,
+  see [Titles and generators](#titles-and-generators).
 - `get_title_text()` — text, font and size of the selected Motion title.
 - `stabilize_subject()` — track a subject in the selected clip (Vision framework) and apply
   inverse position keyframes so it stays fixed on screen.
+
+### Titles and generators
+
+By handle, no selection needed. Each change is one undo step.
+
+```
+list_titles(kind="title", filter="lower third")       # every installed template: category, theme, effect ID
+add_title(name="Essential Lower Third", at_seconds=12, duration_seconds=4, lane=2,
+          text_fields=["Ada Lovelace", "Mathematician"],
+          parameters={"Bar Color": "#1E90FF", "Title Animation": "Slide"}, dry_run=True)
+add_title(...)                                        # same, without dry_run: the answer gives the handle
+get_title_parameters("obj_9")                         # text fields + every inspector setting
+set_title_parameters("obj_9", text="Grace Hopper", font="Futura", bold=True, size=80,
+                     color="#FFD400", parameters={"Build In": False})
+```
+
+- `list_titles(kind="title" | "generator" | "all", filter, category, theme)` — Apple's and your
+  own Motion templates. Many share a name ("Bug", "Left", "Upper" are each in a dozen themes):
+  the theme tells them apart, the effect ID names one exactly.
+- `add_title(name | effect_id, at_seconds, duration_seconds, lane, text / text_fields, font,
+  size, bold, italic, color, alignment, parameters, kind, category, theme, dry_run)` — connects
+  the title at `at_seconds` (timeline seconds as `get_timeline_clips` reports them; default the
+  playhead) for `duration_seconds` (default 10), snapped to frames, on `lane` (1, 2, ... above,
+  -1, ... below; default the lowest free lane above). It is styled before it is connected, so
+  "Add Title" / "Add Generator" in Edit > Undo removes it whole. Refused, with nothing changed:
+  a name several templates share (the answer lists them), a lane that already holds a clip in
+  that time range, lane 0, a time outside the primary storyline, and any bad value below.
+- `get_title_parameters(handle)` — each text field (words, font, size, bold / italic, color,
+  alignment) and each published parameter: its kind (menu with its options, checkbox, color,
+  number with its range, percent 0-100, angle in degrees, point), its value, and a keyframe
+  count when it is animated.
+- `set_title_parameters(handle, text / text_fields, font, size, bold, italic, color,
+  alignment, parameters, dry_run)` — `text_fields` takes strings in field order or objects
+  `{"index": 1, "text": ..., "color": ...}`; the top-level style keys apply to field 0.
+  `parameters` takes `{inspector label: value}`: a menu by option text, a checkbox true / false,
+  a color `#RRGGBB`, a number (percent 0-100, angle in degrees), a point `[x, y]`. Every value
+  is checked first (unknown labels and menu options come back with the list); a keyframed
+  parameter is left alone. One undo step, "Set Title Text" or "Edit Title" (or part of an
+  open `begin_edit` group); undo, redo and undo again restore words, style and settings.
 
 ### Inspector properties
 ```

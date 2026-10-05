@@ -195,6 +195,17 @@ get_audio_levels("obj_12")                # peak/RMS of its source audio + the j
 `get_audio_levels` measures the source media file, not FCP's meters: volume, fades and effects
 are not applied.
 
+### Add a title or generator, and change it
+```
+list_titles(kind="title", filter="lower third")        # category, theme, effect ID for each
+add_title(name="Essential Lower Third", at_seconds=12, duration_seconds=4, lane=2,
+          text_fields=["Ada Lovelace", "Mathematician"], parameters={"Bar Color": "#1E90FF"})
+get_title_parameters("obj_9")                          # text fields + every inspector setting
+set_title_parameters("obj_9", text="Grace Hopper", color="#FFD400", parameters={"Build In": False})
+```
+By handle, no selection or playhead move. A name several templates share is refused with the
+candidates (pass `theme=` or `effect_id=`); an occupied lane is refused. One undo step each.
+
 ### Add color correction
 ```
 select_clips(handles=["obj_12"])
