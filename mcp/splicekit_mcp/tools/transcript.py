@@ -132,7 +132,10 @@ def get_transcript(start_seconds: float = None, end_seconds: float = None,
             compact JSON, for parsing).
 
     Status: idle / transcribing / ready / error. While transcribing, the progress line
-    gives files done, percent, the transcriber's current step and the elapsed time.
+    gives files done, percent, the transcriber's current step and the elapsed time, and
+    any words listed are the previous run's: they are about to be replaced, so
+    delete_transcript_words / move_transcript_words / delete_transcript_silences refuse
+    until the status is ready.
     "Skipped clips" lists what the last run left out and why (no audio track, muted,
     unreadable). Raw RPC: transcript.getState with wordsOnly, fields, startSeconds,
     endSeconds, offset, limit, includeSilences, includeText, includeGapBuckets.

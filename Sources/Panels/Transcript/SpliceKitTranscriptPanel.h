@@ -91,6 +91,9 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 - (void)leaveFileMode;  // forget the file transcript so the timeline's can be restored
 
 // Editing operations - return result dictionaries
+// An error result while a transcription runs (its words are about to be replaced), else nil.
+// The edit methods below return it themselves; the RPC handlers check it before opening an undo group.
+- (NSDictionary *)refusalWhileTranscribing;
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 

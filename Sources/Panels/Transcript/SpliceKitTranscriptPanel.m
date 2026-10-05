@@ -1321,7 +1321,20 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 /// Deletes a contiguous range of words from both the timeline and our data model.
 /// After the timeline edit, we remove the words from the array, re-index, and
 /// resync timestamps from FCP's actual clip positions (since blade changes durations).
+// Edits refused while a transcription runs. A run clears the word list partway through
+// and fills it again at the end, and until then getState still lists the previous run's
+// words. A move made in that window found no words ("Index out of range"); one made just
+// before the clear cut the timeline by words that were about to be replaced.
+- (NSDictionary *)refusalWhileTranscribing {
+    if (self.status != SpliceKitTranscriptStatusTranscribing) return nil;
+    return @{@"error": @"A transcription is running, so the transcript's words are about to be replaced. "
+                       @"Wait until get_transcript shows Status: ready, then try again.",
+             @"transcribing": @YES};
+}
+
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     @synchronized (self.mutableWords) {
@@ -1381,6 +1394,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 }
 
 - (NSDictionary *)deleteSilencesLongerThan:(double)minDuration {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     // Collect silences to delete (filter by minimum duration)
@@ -1470,6 +1485,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 /// The destination time is adjusted if it's after the source (since cutting
 /// the source shifts everything after it earlier by the source duration).
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     @synchronized (self.mutableWords) {

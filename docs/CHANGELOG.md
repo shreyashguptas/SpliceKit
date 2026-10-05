@@ -109,6 +109,15 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Transcript edits made while a transcription is running are refused, not misapplied.**
+  A run clears the word list partway through and fills it again at the end, while
+  `get_transcript` keeps listing the previous run's words until then. A
+  `move_transcript_words` / `delete_transcript_words` / `delete_transcript_silences` in
+  that window either failed with "Index out of range" (after the clear; about one live
+  sweep in three) or cut the timeline by words that were about to be replaced (before
+  it). They now answer "A transcription is running … wait until get_transcript shows
+  Status: ready", before any undo group opens, so nothing lands in Edit > Undo. The live
+  sweep waits for `Status: ready` as well as the sample word before editing.
 - **The Transcript Editor window behaves like a normal window.** It floated at
   `NSFloatingWindowLevel` all the time with `hidesOnDeactivate` off, so it sat on top of
   every other app. It now floats above Final Cut Pro's own windows only while Final Cut Pro

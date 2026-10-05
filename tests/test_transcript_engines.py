@@ -56,6 +56,23 @@ class TranscriptWhisperEngineTests(unittest.TestCase):
         self.assertIn("self.cliEngineNotice = @\"Whisper is not installed", body)
         self.assertIn("return [self parakeetTranscriberPath];", body)
 
+    def test_edits_are_refused_while_a_transcription_runs(self):
+        source = (TRANSCRIPT / "SpliceKitTranscriptPanel.m").read_text(encoding="utf-8")
+        for method in ("deleteWordsFromIndex", "moveWordsFromIndex", "deleteSilencesLongerThan"):
+            body = re.search(r"- \(NSDictionary \*\)" + method + r"[^{]*\{(?P<body>.*?)\n\}\n", source, re.DOTALL)
+            self.assertIsNotNone(body, method)
+            first = body.group("body").strip().splitlines()[0]
+            self.assertIn("refusalWhileTranscribing", first, method)
+        server = SERVER.read_text(encoding="utf-8")
+        for handler in ("SpliceKit_handleTranscriptDeleteWords", "SpliceKit_handleTranscriptMoveWords",
+                        "SpliceKit_handleTranscriptDeleteSilences"):
+            body = re.search(r"NSDictionary \*" + handler + r"\(NSDictionary \*params\) \{(?P<body>.*?)\n\}\n",
+                             server, re.DOTALL)
+            self.assertIsNotNone(body, handler)
+            body = body.group("body")
+            # Checked before the undo group opens, so a refused edit adds no undo step.
+            self.assertLess(body.index("refusalWhileTranscribing"), body.index("SpliceKit_executeOnMainThread"), handler)
+
     def test_get_transcript_names_the_engine_and_the_fallback(self):
         m = load_server_module()
         notice = "Whisper is not installed, so Parakeet v3 was used."

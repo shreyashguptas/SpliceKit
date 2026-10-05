@@ -132,6 +132,8 @@ NSDictionary *SpliceKit_handleTranscriptDeleteWords(NSDictionary *params) {
     NSUInteger startIndex = [params[@"startIndex"] unsignedIntegerValue];
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -169,6 +171,8 @@ NSDictionary *SpliceKit_handleTranscriptMoveWords(NSDictionary *params) {
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     NSUInteger destIndex = [params[@"destIndex"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -210,6 +214,8 @@ NSDictionary *SpliceKit_handleTranscriptSearch(NSDictionary *params) {
 
 NSDictionary *SpliceKit_handleTranscriptDeleteSilences(NSDictionary *params) {
     double minDuration = [params[@"minDuration"] doubleValue]; // 0 = delete all
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{

@@ -1146,7 +1146,10 @@ class Sweep:
             out = await self.call("open_transcript", {"force_retranscribe": True}, 120)
             if out.lower().startswith("error"):
                 raise SetupError(f"open_transcript: {' '.join(out.split())[:200]}")
-            await self.wait_for("get_transcript", {}, r"(?i)\bfox\b", 180,
+            # Ready, not just "fox": while a forced run is still going, get_transcript
+            # lists the previous run's words (fox included), and an edit made then hit
+            # the moment the run clears them ("Index out of range").
+            await self.wait_for("get_transcript", {}, r"(?is)^Status: ready\b.*\bfox\b", 180,
                                 fail_pattern=r"Status: (error|failed)")
         elif step == "captions":
             out = await self.call("open_captions", {"force_retranscribe": True}, 120)
