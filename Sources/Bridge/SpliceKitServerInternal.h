@@ -19,7 +19,6 @@
 #import "SpliceKitLogPanel.h"
 #import "SpliceKitTranscriptPanel.h"
 #import "SpliceKitCaptionPanel.h"
-#import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitURLImport.h"

@@ -231,7 +231,6 @@ CASES: dict[str, Case] = {
     "list_effects": read(type="filter"),
     "list_transitions": read(),
     "list_menus": read(menu="Edit"),
-    "search_commands": read(query="blade", limit=5),
     "list_handles": read(),
     "inspect_handle": Case(args={"handle": "$CONNECTED_CLIP"}, kind="read"),
     "get_object_property": Case(args={"handle": "$CONNECTED_CLIP", "key": "displayName"},
@@ -388,8 +387,6 @@ CASES.update({
     "toggle_panel": write(panel="inspector",
                           cleanup=[("toggle_panel", {"panel": "inspector"})]),
     "set_workspace": write(workspace="default"),
-    "show_command_palette": write(cleanup=[("hide_command_palette", {})]),
-    "hide_command_palette": write(),
     "dual_timeline_open": write(cleanup=[("dual_timeline_close", {})]),
     "dual_timeline_close": write(),
     "dual_timeline_focus": write(pane="primary"),
@@ -411,9 +408,6 @@ CASES.update({
     "toggle_structure_blocks": Case(args={}, kind="read",
                                     expect=r"No structure blocks on the timeline to remove"),
     "sections_hide": write(),
-    "livecam_open": write(cleanup=[("livecam_close", {})]),
-    "livecam_close": write(),
-    "livecam_status": read(),
     "capture_viewer": Case(args={"path": "$TMP/viewer.png", "return_image": False},
                            kind="read"),
     "capture_timeline": Case(args={"path": "$TMP/timeline.png", "return_image": False},
@@ -581,10 +575,7 @@ CASES.update({
                                            cleanup=[("debug_stop_framerate_monitor", {})]),
     "debug_stop_framerate_monitor": write(),
 
-    # ---------------------------------------------------------------- palette commands
-    # The palette "blade" command cuts the timeline — this is a write, not a read.
-    "execute_command": write(action="blade", type="timeline",
-                             undo=("Blade", "Blade Clips", "Blade at Times")),
+    # ---------------------------------------------------------------- menu commands
     "execute_menu_command": read(menu_path=["Edit", "Undo"], dry_run=True),
 
     # ---------------------------------------------------------------- dialogs
@@ -1155,7 +1146,10 @@ class Sweep:
             out = await self.call("open_transcript", {"force_retranscribe": True}, 120)
             if out.lower().startswith("error"):
                 raise SetupError(f"open_transcript: {' '.join(out.split())[:200]}")
-            await self.wait_for("get_transcript", {}, r"(?i)\bfox\b", 180,
+            # Ready, not just "fox": while a forced run is still going, get_transcript
+            # lists the previous run's words (fox included), and an edit made then hit
+            # the moment the run clears them ("Index out of range").
+            await self.wait_for("get_transcript", {}, r"(?is)^Status: ready\b.*\bfox\b", 180,
                                 fail_pattern=r"Status: (error|failed)")
         elif step == "captions":
             out = await self.call("open_captions", {"force_retranscribe": True}, 120)

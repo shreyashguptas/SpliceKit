@@ -65,6 +65,12 @@ def _transcript_header_lines(r: dict) -> list:
         lines.append(f"Source: file {src.get('path', '?')}")
     elif src:
         lines.append("Source: timeline" + (" (primary storyline only)" if src.get("primaryStorylineOnly") else ""))
+    engine = r.get("engine")
+    if engine:
+        model = r.get("whisperModel") or r.get("parakeetModel")
+        lines.append(f"Engine: {engine}" + (f" {model}" if model else ""))
+    if r.get("engineNotice"):
+        lines.append(f"Engine fallback: {r['engineNotice']}")
     lines.append(f"Words: {r.get('wordCount', 0)}")
     lines.append(f"Silences: {r.get('silenceCount', 0)}")
     lines.append(f"Silence threshold: {r.get('silenceThreshold', 0.3):.1f}s")
@@ -126,7 +132,10 @@ def get_transcript(start_seconds: float = None, end_seconds: float = None,
             compact JSON, for parsing).
 
     Status: idle / transcribing / ready / error. While transcribing, the progress line
-    gives files done, percent, the transcriber's current step and the elapsed time.
+    gives files done, percent, the transcriber's current step and the elapsed time, and
+    any words listed are the previous run's: they are about to be replaced, so
+    delete_transcript_words / move_transcript_words / delete_transcript_silences refuse
+    until the status is ready.
     "Skipped clips" lists what the last run left out and why (no audio track, muted,
     unreadable). Raw RPC: transcript.getState with wordsOnly, fields, startSeconds,
     endSeconds, offset, limit, includeSilences, includeText, includeGapBuckets.

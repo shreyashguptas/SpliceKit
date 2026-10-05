@@ -4,6 +4,7 @@
 //
 
 #import "SpliceKitLogPanel.h"
+#import "SpliceKitWindows.h"
 #import "SpliceKit.h"
 #import <objc/runtime.h>
 
@@ -738,7 +739,9 @@ static NSString *SpliceKitLogPanel_eventDescription(NSEvent *event) {
 }
 
 - (void)togglePanel {
-    if (self.isVisible) [self hidePanel];
+    // Hide only a window the user can see here; one on another Space or minimized
+    // is brought here instead.
+    if (SpliceKit_toolWindowIsShownHere(self.panel)) [self hidePanel];
     else [self showPanel];
 }
 
@@ -754,7 +757,7 @@ static NSString *SpliceKitLogPanel_eventDescription(NSEvent *event) {
     [self rebuildDisplayedContent];
     [self startUnifiedLogStream];
     [self startInteractionTrace];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
 }
 
 - (void)hidePanel {
@@ -1465,31 +1468,21 @@ static NSString *SpliceKitLogPanel_eventDescription(NSEvent *event) {
 - (void)setupPanelIfNeeded {
     if (self.panel) return;
 
-    NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-    CGFloat width = 920.0;
-    CGFloat height = 520.0;
-    CGFloat x = NSMaxX(screenFrame) - width - 40.0;
-    CGFloat y = NSMidY(screenFrame) - height / 2.0;
-    NSRect frame = NSMakeRect(MAX(x, 60.0), MAX(y, 80.0), width, height);
-
+    // A standard tool window; SpliceKitWindows.h has how it behaves. It used to join
+    // every Space and float above every app.
+    CGFloat width = 920.0, height = 520.0;
+    NSRect frame = NSMakeRect(0, 0, width, height);
     self.panel = [[NSPanel alloc] initWithContentRect:frame
-                                            styleMask:(NSWindowStyleMaskTitled |
-                                                       NSWindowStyleMaskClosable |
-                                                       NSWindowStyleMaskResizable |
-                                                       NSWindowStyleMaskUtilityWindow)
+                                            styleMask:SpliceKitToolWindowStyleMask
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
     self.panel.title = @"SpliceKit Log";
-    self.panel.floatingPanel = YES;
     self.panel.becomesKeyOnlyIfNeeded = NO;
-    self.panel.hidesOnDeactivate = NO;
-    self.panel.level = NSFloatingWindowLevel;
+    SpliceKit_adoptToolWindow(self.panel);
     self.panel.minSize = NSMakeSize(640.0, 320.0);
     self.panel.releasedWhenClosed = NO;
     self.panel.delegate = self;
     self.panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    self.panel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
-                                    NSWindowCollectionBehaviorCanJoinAllSpaces;
 
     NSView *content = self.panel.contentView;
 

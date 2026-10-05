@@ -132,6 +132,8 @@ NSDictionary *SpliceKit_handleTranscriptDeleteWords(NSDictionary *params) {
     NSUInteger startIndex = [params[@"startIndex"] unsignedIntegerValue];
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -169,6 +171,8 @@ NSDictionary *SpliceKit_handleTranscriptMoveWords(NSDictionary *params) {
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     NSUInteger destIndex = [params[@"destIndex"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -210,6 +214,8 @@ NSDictionary *SpliceKit_handleTranscriptSearch(NSDictionary *params) {
 
 NSDictionary *SpliceKit_handleTranscriptDeleteSilences(NSDictionary *params) {
     double minDuration = [params[@"minDuration"] doubleValue]; // 0 = delete all
+    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
+    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
 
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -255,9 +261,8 @@ NSDictionary *SpliceKit_handleTranscriptSetSilenceThreshold(NSDictionary *params
 
 NSDictionary *SpliceKit_handleTranscriptSetEngine(NSDictionary *params) {
     NSString *engineName = params[@"engine"];
-    // The Whisper engines belong to the caption panel (captions.*), not this one; the
-    // old messages offered them here and then rejected them.
-    if (!engineName) return @{@"error": @"engine is required ('parakeet' = 'parakeetV3', 'parakeetV2', 'fcpNative', 'appleSpeech')"};
+    if (!engineName) return @{@"error": @"engine is required ('whisper' = 'whisperLargeV3', 'whisperLargeV3Turbo', "
+                                        "'parakeet' = 'parakeetV3', 'parakeetV2', 'fcpNative', 'appleSpeech')"};
 
     SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
     if ([engineName isEqualToString:@"fcpNative"]) {
@@ -270,11 +275,21 @@ NSDictionary *SpliceKit_handleTranscriptSetEngine(NSDictionary *params) {
     } else if ([engineName isEqualToString:@"parakeetV2"]) {
         panel.engine = SpliceKitTranscriptEngineParakeet;
         panel.parakeetModelVersion = @"v2";
+    } else if ([engineName isEqualToString:@"whisperLargeV3"] || [engineName isEqualToString:@"whisper"]) {
+        panel.engine = SpliceKitTranscriptEngineWhisper;
+        panel.whisperModel = @"large-v3";
+    } else if ([engineName isEqualToString:@"whisperLargeV3Turbo"]) {
+        panel.engine = SpliceKitTranscriptEngineWhisper;
+        panel.whisperModel = @"large-v3-turbo";
     } else {
-        return @{@"error": @"Unknown engine. Use 'parakeet' (= 'parakeetV3'), 'parakeetV2', 'fcpNative' or 'appleSpeech'"};
+        return @{@"error": @"Unknown engine. Use 'whisper' (= 'whisperLargeV3'), 'whisperLargeV3Turbo', "
+                           "'parakeet' (= 'parakeetV3'), 'parakeetV2', 'fcpNative' or 'appleSpeech'"};
     }
+    // Keep the open panel's dropdown and speaker checkbox in step with the engine.
+    [panel refreshEngineControls];
     NSMutableDictionary *answer = [@{@"status": @"ok", @"engine": engineName} mutableCopy];
     if (panel.engine == SpliceKitTranscriptEngineParakeet) answer[@"parakeetModel"] = panel.parakeetModelVersion ?: @"v3";
+    if (panel.engine == SpliceKitTranscriptEngineWhisper) answer[@"whisperModel"] = panel.whisperModel ?: @"large-v3";
     return answer;
 }
 

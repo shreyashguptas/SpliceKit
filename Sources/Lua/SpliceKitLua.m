@@ -9,6 +9,7 @@
 
 #import "SpliceKitLua.h"
 #import "SpliceKit.h"
+#import "SpliceKitWindows.h"
 #import "SpliceKitServerHandlers.h"
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
@@ -636,24 +637,17 @@ static int sk_alert(lua_State *L) {
         if (textHeight > 400) textHeight = 400;
         CGFloat panelHeight = 24 + textHeight + 16 + 36 + 20;
 
-        NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-        NSRect frame = NSMakeRect(
-            NSMidX(screenFrame) - panelWidth / 2,
-            NSMidY(screenFrame) - panelHeight / 2 + 100,
-            panelWidth, panelHeight);
-
+        // A small dialog: title bar with close, and the shared tool-window behaviour
+        // (SpliceKitWindows.h), shown centred in front of FCP's window.
+        NSRect frame = NSMakeRect(0, 0, panelWidth, panelHeight);
         NSPanel *panel = [[NSPanel alloc]
             initWithContentRect:frame
-                      styleMask:(NSWindowStyleMaskTitled |
-                                 NSWindowStyleMaskClosable |
-                                 NSWindowStyleMaskUtilityWindow)
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                         backing:NSBackingStoreBuffered
                           defer:NO];
         panel.title = nsTitle;
-        panel.floatingPanel = YES;
         panel.becomesKeyOnlyIfNeeded = NO;
-        panel.hidesOnDeactivate = NO;
-        panel.level = NSFloatingWindowLevel;
+        SpliceKit_adoptToolWindow(panel);
         panel.releasedWhenClosed = NO;
         panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
 
@@ -685,7 +679,7 @@ static int sk_alert(lua_State *L) {
             [btn.widthAnchor constraintGreaterThanOrEqualToConstant:80],
         ]];
 
-        [panel makeKeyAndOrderFront:nil];
+        SpliceKit_presentToolWindow(panel);
     });
 
     return 0;
@@ -725,9 +719,13 @@ static int sk_toast(lua_State *L) {
         if (height < 50) height = 50;
         if (height > 600) height = 600;
 
-        NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-        CGFloat x = NSMidX(screenFrame) - width / 2.0;
-        CGFloat y = NSMaxY(screenFrame) - height - 60.0;
+        // Near the top of FCP's window, on that window's display.
+        NSWindow *host = SpliceKit_fcpHostWindow(nil);
+        NSRect visible = (host.screen ?: NSScreen.mainScreen).visibleFrame;
+        NSRect target = host ? NSIntersectionRect(host.frame, visible) : NSZeroRect;
+        if (NSIsEmptyRect(target)) target = visible;
+        CGFloat x = NSMidX(target) - width / 2.0;
+        CGFloat y = NSMaxY(target) - height - 60.0;
         NSRect frame = NSMakeRect(x, y, width, height);
 
         NSPanel *panel = [[NSPanel alloc]
@@ -738,11 +736,16 @@ static int sk_toast(lua_State *L) {
         panel.backgroundColor = [NSColor clearColor];
         panel.opaque = NO;
         panel.hasShadow = YES;
-        panel.level = NSStatusWindowLevel;
-        panel.hidesOnDeactivate = NO;
+        // Above FCP's windows while FCP is active, never above other apps: it hides
+        // when FCP is in the background. Shown on the current Space only (it used to
+        // sit at status-bar level on every Space).
+        panel.level = NSApp.isActive ? NSFloatingWindowLevel : NSNormalWindowLevel;
+        panel.hidesOnDeactivate = YES;
         panel.releasedWhenClosed = NO;
-        panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                    NSWindowCollectionBehaviorStationary;
+        panel.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace |
+                                   NSWindowCollectionBehaviorTransient |
+                                   NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                   NSWindowCollectionBehaviorIgnoresCycle;
 
         // Vibrancy background
         NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:
@@ -763,7 +766,7 @@ static int sk_toast(lua_State *L) {
         label.frame = NSMakeRect(padding, padding, width - padding * 2, textHeight);
         [bg addSubview:label];
 
-        [panel orderFrontRegardless];
+        [panel orderFront:nil];
         panel.alphaValue = 0.0;
 
         // Fade in
@@ -804,24 +807,17 @@ static int sk_prompt(lua_State *L) {
         CGFloat panelWidth = 440.0;
         CGFloat panelHeight = 160.0;
 
-        NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-        NSRect frame = NSMakeRect(
-            NSMidX(screenFrame) - panelWidth / 2,
-            NSMidY(screenFrame) - panelHeight / 2 + 100,
-            panelWidth, panelHeight);
-
+        // A small dialog: title bar with close, and the shared tool-window behaviour
+        // (SpliceKitWindows.h), shown centred in front of FCP's window.
+        NSRect frame = NSMakeRect(0, 0, panelWidth, panelHeight);
         NSPanel *panel = [[NSPanel alloc]
             initWithContentRect:frame
-                      styleMask:(NSWindowStyleMaskTitled |
-                                 NSWindowStyleMaskClosable |
-                                 NSWindowStyleMaskUtilityWindow)
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                         backing:NSBackingStoreBuffered
                           defer:NO];
         panel.title = nsTitle;
-        panel.floatingPanel = YES;
         panel.becomesKeyOnlyIfNeeded = NO;
-        panel.hidesOnDeactivate = NO;
-        panel.level = NSFloatingWindowLevel;
+        SpliceKit_adoptToolWindow(panel);
         panel.releasedWhenClosed = NO;
         panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
 
@@ -875,7 +871,7 @@ static int sk_prompt(lua_State *L) {
             [cancelBtn.widthAnchor constraintGreaterThanOrEqualToConstant:80],
         ]];
 
-        [panel makeKeyAndOrderFront:nil];
+        SpliceKit_presentToolWindow(panel);
         [panel makeFirstResponder:input];
     });
 

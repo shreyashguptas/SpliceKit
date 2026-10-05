@@ -37,6 +37,10 @@
 
 #pragma mark - Transcript Panel
 
+// Posted when the transcript window is shown, hidden, closed or minimized.
+// userInfo[@"visible"] is an NSNumber BOOL.
+FOUNDATION_EXPORT NSString * const SpliceKitTranscriptVisibilityDidChangeNotification;
+
 typedef NS_ENUM(NSInteger, SpliceKitTranscriptStatus) {
     SpliceKitTranscriptStatusIdle = 0,
     SpliceKitTranscriptStatusTranscribing,
@@ -48,6 +52,7 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
     SpliceKitTranscriptEngineFCPNative = 0,   // FCP's built-in AASpeechAnalyzer (fast, on-device)
     SpliceKitTranscriptEngineAppleSpeech,     // SFSpeechRecognizer (slower, network-capable)
     SpliceKitTranscriptEngineParakeet,        // NVIDIA Parakeet TDT 0.6B via FluidAudio (on-device, auto-downloads)
+    SpliceKitTranscriptEngineWhisper,         // OpenAI Whisper via WhisperKit (on-device, auto-downloads; no speaker labels)
 };
 
 @interface SpliceKitTranscriptPanel : NSObject
@@ -86,12 +91,21 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 - (void)leaveFileMode;  // forget the file transcript so the timeline's can be restored
 
 // Editing operations - return result dictionaries
+// An error result while a transcription runs (its words are about to be replaced), else nil.
+// The edit methods below return it themselves; the RPC handlers check it before opening an undo group.
+- (NSDictionary *)refusalWhileTranscribing;
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 
 // Engine selection
-@property (nonatomic) SpliceKitTranscriptEngine engine; // default: SpliceKitTranscriptEngineFCPNative
+@property (nonatomic) SpliceKitTranscriptEngine engine; // default: SpliceKitTranscriptEngineWhisper (large-v3)
 @property (nonatomic, copy) NSString *parakeetModelVersion; // @"v3" (multilingual) or @"v2" (English)
+@property (nonatomic, copy) NSString *whisperModel; // @"large-v3" (highest quality) or @"large-v3-turbo" (faster)
+// The engine as transcript state and the RPCs name it: fcpNative, appleSpeech, parakeet, whisper.
+- (NSString *)engineIdentifier;
+// Puts the open panel's engine dropdown and speaker checkbox in step with `engine`
+// after it was changed from outside the panel (the transcript.setEngine RPC).
+- (void)refreshEngineControls;
 
 // Silence operations
 @property (nonatomic) double silenceThreshold;  // seconds, default 0.3

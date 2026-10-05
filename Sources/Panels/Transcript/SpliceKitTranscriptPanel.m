@@ -24,6 +24,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "SpliceKitTranscriptPanel+Private.h"
+#import "SpliceKitWindows.h"
 
 // FCP doesn't link against Speech.framework, so we load it at runtime.
 // This avoids a hard dependency — if the framework isn't available (unlikely
@@ -187,6 +188,9 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 
 @implementation SpliceKitTranscriptPanel
 
+NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
+    @"SpliceKitTranscriptVisibilityDidChangeNotification";
+
 #pragma mark - Singleton
 
 + (instancetype)sharedPanel {
@@ -210,8 +214,13 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
         _currentFilter = @"all";
         _silenceThreshold = 0.3; // 300ms default
         _frameRate = 24.0;
-        _engine = SpliceKitTranscriptEngineParakeet; // Default to Parakeet (fastest, most accurate)
+        // Whisper large-v3 by default: the most accurate engine. It falls back to Parakeet
+        // v3 (fast, labels speakers) when the Whisper helper is not installed. The engine
+        // picked in the dropdown is remembered across launches (see -saveEngineChoice).
+        _engine = SpliceKitTranscriptEngineWhisper;
+        _whisperModel = @"large-v3"; // large-v3 = highest quality, large-v3-turbo = faster
         _parakeetModelVersion = @"v3"; // v3 = multilingual, v2 = English-optimized
+        [self loadSavedEngineChoice];
         _lastPlayheadHighlightRange = NSMakeRange(NSNotFound, 0);
 
         [[NSNotificationCenter defaultCenter]
@@ -236,10 +245,11 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 
     [self setupPanelIfNeeded];
     [self restorePersistedStateForCurrentSequenceIfNeeded];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
     if (self.status == SpliceKitTranscriptStatusReady && self.mutableWords.count > 0) {
         [self startPlayheadTimer];
     }
+    [self postVisibilityChange:YES];
 }
 
 - (void)hidePanel {
@@ -251,14 +261,75 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
     }
 
     [self.panel orderOut:nil];
+    [self postVisibilityChange:NO];
 }
 
 - (BOOL)isVisible {
     return self.panel.isVisible;
 }
 
+- (void)refreshEngineControls {
+    SpliceKit_executeOnMainThread(^{
+        [self selectEnginePopupForCurrentEngine];
+        if (self.speakerDetectionCheckbox) [self updateSpeakerCheckboxState];
+    });
+}
+
+static NSString * const kTranscriptEngineDefaultsKey = @"SpliceKitTranscriptEngine";
+static NSString * const kTranscriptWhisperModelDefaultsKey = @"SpliceKitTranscriptWhisperModel";
+static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscriptParakeetModel";
+
+- (void)loadSavedEngineChoice {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *engine = [defaults stringForKey:kTranscriptEngineDefaultsKey];
+    if ([engine isEqualToString:@"fcpNative"]) self.engine = SpliceKitTranscriptEngineFCPNative;
+    else if ([engine isEqualToString:@"appleSpeech"]) self.engine = SpliceKitTranscriptEngineAppleSpeech;
+    else if ([engine isEqualToString:@"parakeet"]) self.engine = SpliceKitTranscriptEngineParakeet;
+    else if ([engine isEqualToString:@"whisper"]) self.engine = SpliceKitTranscriptEngineWhisper;
+    NSString *whisper = [defaults stringForKey:kTranscriptWhisperModelDefaultsKey];
+    if ([whisper isEqualToString:@"large-v3"] || [whisper isEqualToString:@"large-v3-turbo"]) self.whisperModel = whisper;
+    NSString *parakeet = [defaults stringForKey:kTranscriptParakeetModelDefaultsKey];
+    if ([parakeet isEqualToString:@"v2"] || [parakeet isEqualToString:@"v3"]) self.parakeetModelVersion = parakeet;
+}
+
+// Called when the user picks an engine in the dropdown. An engine set over MCP
+// (transcript.setEngine) is not saved, so automation never changes the user's choice.
+- (void)saveEngineChoice {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[self engineIdentifier] forKey:kTranscriptEngineDefaultsKey];
+    [defaults setObject:self.whisperModel ?: @"large-v3" forKey:kTranscriptWhisperModelDefaultsKey];
+    [defaults setObject:self.parakeetModelVersion ?: @"v3" forKey:kTranscriptParakeetModelDefaultsKey];
+}
+
+- (NSString *)engineIdentifier {
+    switch (self.engine) {
+        case SpliceKitTranscriptEngineFCPNative:   return @"fcpNative";
+        case SpliceKitTranscriptEngineAppleSpeech: return @"appleSpeech";
+        case SpliceKitTranscriptEngineParakeet:    return @"parakeet";
+        case SpliceKitTranscriptEngineWhisper:     return @"whisper";
+    }
+    return @"parakeet";
+}
+
+// The toolbar button's lit state follows this, so it also goes dark when the
+// window is closed with its close button or minimized, not only via the toggle.
+- (void)postVisibilityChange:(BOOL)visible {
+    [[NSNotificationCenter defaultCenter] postNotificationName:SpliceKitTranscriptVisibilityDidChangeNotification
+                                                        object:self
+                                                      userInfo:@{@"visible": @(visible)}];
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     // Don't stop timer — user may reopen and expect sync
+    [self postVisibilityChange:NO];
+}
+
+- (void)windowDidMiniaturize:(NSNotification *)notification {
+    [self postVisibilityChange:NO];
+}
+
+- (void)windowDidDeminiaturize:(NSNotification *)notification {
+    [self postVisibilityChange:YES];
 }
 
 - (void)focusSearchField {
@@ -377,11 +448,11 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
         @"silences": silenceDicts,
     } mutableCopy];
 
-    NSString *engineName = (self.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
-                           (self.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
-    section[@"engine"] = engineName;
+    section[@"engine"] = [self engineIdentifier];
     if (self.engine == SpliceKitTranscriptEngineParakeet) {
         section[@"parakeetModel"] = self.parakeetModelVersion ?: @"v3";
+    } else if (self.engine == SpliceKitTranscriptEngineWhisper) {
+        section[@"whisperModel"] = self.whisperModel ?: @"large-v3";
     }
     if (self.fullText.length > 0) {
         section[@"text"] = self.fullText;
@@ -507,16 +578,9 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
         [self detectSilences];
     }
 
-    if ([engineName isEqualToString:@"fcpNative"]) {
-        self.engine = SpliceKitTranscriptEngineFCPNative;
-    } else if ([engineName isEqualToString:@"appleSpeech"]) {
-        self.engine = SpliceKitTranscriptEngineAppleSpeech;
-    } else {
-        self.engine = SpliceKitTranscriptEngineParakeet;
-    }
-    if ([transcript[@"parakeetModel"] isKindOfClass:[NSString class]]) {
-        self.parakeetModelVersion = transcript[@"parakeetModel"];
-    }
+    // The saved transcript's engine is a record of what made it, not a choice: restoring
+    // it used to switch the panel to that engine, so every project transcribed before
+    // stayed on its old engine whatever the dropdown default or the user's pick was.
     if (transcript[@"frameRate"]) {
         self.frameRate = [transcript[@"frameRate"] doubleValue];
         self.frameRateKnown = YES;
@@ -530,14 +594,7 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 
     if (self.panel) {
         [self updateSpeakerCheckboxState];
-        if (self.engine == SpliceKitTranscriptEngineAppleSpeech) {
-            [self.enginePopup selectItemWithTitle:@"Apple Speech"];
-        } else if (self.engine == SpliceKitTranscriptEngineParakeet) {
-            NSString *title = [self.parakeetModelVersion isEqualToString:@"v2"] ? @"Parakeet v2" : @"Parakeet v3";
-            [self.enginePopup selectItemWithTitle:title];
-        } else {
-            [self.enginePopup selectItemWithTitle:@"FCP Native"];
-        }
+        [self selectEnginePopupForCurrentEngine];
         self.speakerDetectionCheckbox.state = self.speakerDetectionEnabled ? NSControlStateValueOn : NSControlStateValueOff;
         [self rebuildTextView];
         self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
@@ -808,8 +865,8 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
     });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (self.engine == SpliceKitTranscriptEngineFCPNative || self.engine == SpliceKitTranscriptEngineParakeet) {
-            // FCP Native and Parakeet don't need Apple speech authorization
+        if (self.engine != SpliceKitTranscriptEngineAppleSpeech) {
+            // Only Apple Speech needs the speech recognition authorization
             [self performTimelineTranscription];
         } else {
             [self requestSpeechAuthorizationWithCompletion:^(BOOL authorized) {
@@ -1127,7 +1184,7 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
     // silently ran a different engine — and failed outright on a Mac where
     // speech recognition was never authorised, which is every freshly installed
     // one. Parakeet needs no permission, so route it there when it is selected.
-    if (self.engine == SpliceKitTranscriptEngineParakeet) {
+    if (self.engine == SpliceKitTranscriptEngineParakeet || self.engine == SpliceKitTranscriptEngineWhisper) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *problem = [SpliceKitTranscriptPanel audioProblemForFileAtPath:audioURL.path];
             if (problem) {
@@ -1264,7 +1321,20 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 /// Deletes a contiguous range of words from both the timeline and our data model.
 /// After the timeline edit, we remove the words from the array, re-index, and
 /// resync timestamps from FCP's actual clip positions (since blade changes durations).
+// Edits refused while a transcription runs. A run clears the word list partway through
+// and fills it again at the end, and until then getState still lists the previous run's
+// words. A move made in that window found no words ("Index out of range"); one made just
+// before the clear cut the timeline by words that were about to be replaced.
+- (NSDictionary *)refusalWhileTranscribing {
+    if (self.status != SpliceKitTranscriptStatusTranscribing) return nil;
+    return @{@"error": @"A transcription is running, so the transcript's words are about to be replaced. "
+                       @"Wait until get_transcript shows Status: ready, then try again.",
+             @"transcribing": @YES};
+}
+
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     @synchronized (self.mutableWords) {
@@ -1324,6 +1394,8 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 }
 
 - (NSDictionary *)deleteSilencesLongerThan:(double)minDuration {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     // Collect silences to delete (filter by minimum duration)
@@ -1413,6 +1485,8 @@ NSString *const FCPAttrSegmentEndIndex = @"FCPSegmentEndIndex";
 /// The destination time is adjusted if it's after the source (since cutting
 /// the source shifts everything after it earlier by the source duration).
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
 
     @synchronized (self.mutableWords) {
@@ -1824,11 +1898,13 @@ static double SpliceKitTranscript_optDouble(NSDictionary *opts, NSString *key, d
         if (self.primaryStorylineOnly) source[@"primaryStorylineOnly"] = @YES;
         state[@"source"] = source;
     }
-    state[@"engine"] = (self.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
-                       (self.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
+    state[@"engine"] = [self engineIdentifier];
     if (self.engine == SpliceKitTranscriptEngineParakeet) {
         state[@"parakeetModel"] = self.parakeetModelVersion ?: @"v3";
+    } else if (self.engine == SpliceKitTranscriptEngineWhisper) {
+        state[@"whisperModel"] = self.whisperModel ?: @"large-v3";
     }
+    if (self.cliEngineNotice.length > 0) state[@"engineNotice"] = self.cliEngineNotice;
     state[@"speakerDetectionAvailable"] = @(SpliceKitTranscript_isSpeakerDiarizationAvailable());
     state[@"speakerDetectionEnabled"] = @(self.speakerDetectionEnabled);
 

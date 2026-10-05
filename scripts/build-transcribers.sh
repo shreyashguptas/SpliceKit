@@ -24,13 +24,16 @@
 #
 # Usage:
 #   ./scripts/build-transcribers.sh [--framework <SpliceKit.framework path>]
-#                                   [--only <name>] [--all] [--force]
+#                                   [--only <name>] [--force]
 #
-# By default only parakeet-transcriber is built — it is what the transcript
-# panel needs, and it has a single dependency with no transitive packages.
-# whisper-transcriber (the caption panel's Whisper engines) is opt-in via
-# --all, because WhisperKit pulls a much larger dependency tree and its models
-# are 800 MB-1.5 GB. Nothing downloads either of those unless you ask.
+# Both helpers are built by default: parakeet-transcriber (the transcript panel,
+# and the caption panel's Parakeet engine) and whisper-transcriber (the caption
+# panel's Whisper engines; Whisper large-v3 is the caption panel's default).
+# whisper-transcriber's first build downloads WhisperKit's dependency tree from
+# GitHub, so it takes a few minutes; later runs reuse the cached build. Neither
+# binary bundles a model: each downloads its own on first use, into
+# ~/Library/Application Support/SpliceKit/Models/ (Whisper large-v3 is ~3 GB).
+# --all is still accepted and means the same as the default.
 #
 # A build failure is reported but never fatal: transcription is one feature of
 # many, and a network outage should not block patching Final Cut Pro.
@@ -45,18 +48,17 @@ SUPPORT_TOOLS_DIR="$HOME/Library/Application Support/SpliceKit/tools"
 FRAMEWORK_DIR=""
 ONLY=""
 FORCE=false
-BUILD_ALL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --framework) FRAMEWORK_DIR="${2:-}"; shift 2 ;;
         --only)      ONLY="${2:-}"; shift 2 ;;
-        --all)       BUILD_ALL=true; shift ;;
+        --all)       shift ;;  # the default now; kept so old invocations still work
         --force)     FORCE=true; shift ;;
         -h|--help)
-            printf 'Usage: %s [--framework <path>] [--only <name>] [--all] [--force]\n' "$0"
-            printf '  default: parakeet-transcriber only (transcript panel)\n'
-            printf '  --all:   also whisper-transcriber (caption panel, much larger)\n'
+            printf 'Usage: %s [--framework <path>] [--only <name>] [--force]\n' "$0"
+            printf '  default: parakeet-transcriber and whisper-transcriber\n'
+            printf '  --only:  just the named one\n'
             exit 0 ;;
         *)
             printf 'Unknown option: %s\n' "$1" >&2
@@ -69,8 +71,9 @@ log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[X]${NC} $*"; }
 
-DEFAULT_TRANSCRIBERS=(parakeet-transcriber)
-OPTIONAL_TRANSCRIBERS=(whisper-transcriber)
+# Parakeet first: it is small and quick, so a slow or failed Whisper build never
+# holds up the transcript panel's engine.
+TRANSCRIBERS=(parakeet-transcriber whisper-transcriber)
 
 # A cached binary is stale when any input file is newer than it. Package.resolved
 # is deliberately included: a dependency bump has to produce a fresh build.
@@ -145,11 +148,20 @@ build_one() {
 install_one() {
     local name="$1"
     local cached="$BUILD_DIR/$name"
-    [[ -f "$cached" ]] || return 1
+    local installed="$SUPPORT_TOOLS_DIR/$name"
 
-    mkdir -p "$SUPPORT_TOOLS_DIR"
-    cp "$cached" "$SUPPORT_TOOLS_DIR/$name"
-    chmod +x "$SUPPORT_TOOLS_DIR/$name"
+    if [[ -f "$cached" ]]; then
+        mkdir -p "$SUPPORT_TOOLS_DIR"
+        cp "$cached" "$installed"
+        chmod +x "$installed"
+    elif [[ -f "$installed" ]]; then
+        # No build in this checkout (a fresh clone, or the build failed), but an
+        # earlier install left a working copy: put that one in the framework, so
+        # a redeploy that wiped the framework's Resources never loses the engine.
+        cached="$installed"
+    else
+        return 1
+    fi
 
     if [[ -n "$FRAMEWORK_DIR" && -d "$FRAMEWORK_DIR/Versions/A/Resources" ]]; then
         cp "$cached" "$FRAMEWORK_DIR/Versions/A/Resources/$name"
@@ -160,14 +172,6 @@ install_one() {
     fi
     return 0
 }
-
-TRANSCRIBERS=("${DEFAULT_TRANSCRIBERS[@]}")
-if $BUILD_ALL; then
-    TRANSCRIBERS+=("${OPTIONAL_TRANSCRIBERS[@]}")
-elif [[ -n "$ONLY" ]]; then
-    # --only names one explicitly, including an optional one.
-    TRANSCRIBERS=("${DEFAULT_TRANSCRIBERS[@]}" "${OPTIONAL_TRANSCRIBERS[@]}")
-fi
 
 status=0
 for name in "${TRANSCRIBERS[@]}"; do

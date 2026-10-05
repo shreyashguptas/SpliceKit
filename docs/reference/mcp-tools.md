@@ -559,8 +559,9 @@ Panel features:
 Deleting words performs: blade at start -> blade at end -> select segment -> delete
 Moving words performs: blade + cut at source -> move playhead -> paste at destination
 
-- `set_transcript_engine(engine="parakeet" | "parakeetV2" | "fcpNative" | "appleSpeech")` —
-  choose the speech recognition engine for the transcript panel.
+- `set_transcript_engine(engine="whisper" | "whisperLargeV3Turbo" | "parakeet" | "parakeetV2" | "fcpNative" | "appleSpeech")` —
+  choose the speech recognition engine for the transcript panel. The default is Whisper
+  large-v3 (most accurate, no speaker labels); Parakeet is the fastest and labels speakers.
 
 ### Captions
 
@@ -850,28 +851,6 @@ dismiss_dialog(action="cancel")      # cancel/escape
 ```
 
 Guide: [dialog-automation.md](../guides/dialog-automation.md).
-
-### Command Palette
-```
-show_command_palette()                         # open the palette (or Cmd+Shift+P)
-search_commands("blade")                       # find commands by name/keyword
-execute_command("blade", type="timeline")      # run a command directly
-hide_command_palette()                         # close it
-```
-
-The command palette opens as a floating window inside FCP:
-- Fuzzy search across all available actions (editing, playback, color, speed, markers, etc.)
-- Arrow keys to navigate, Return to execute, Escape to close
-- The microphone button dictates into the search field
-- Also accessible via toolbar button or Enhancements menu
-
-SpliceKit runs no language model of its own: the MCP client decides which tools to call.
-Guide: [command-palette.md](../guides/command-palette.md).
-
-### LiveCam
-
-- `livecam_open()`, `livecam_close()` — open or close the LiveCam panel inside FCP.
-- `livecam_status()` — the panel's state, selected devices, recording flags and destination.
 
 ---
 

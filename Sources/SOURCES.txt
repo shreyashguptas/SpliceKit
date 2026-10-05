@@ -12,6 +12,7 @@ Core/SpliceKitSwizzle.m
 Core/SpliceKitTime.m
 Core/SpliceKitProcess.m
 Core/SpliceKitStrings.m
+Core/SpliceKitWindows.m
 Audio/SpliceKitAudioBusDiagnostics.m
 Media/SpliceKitMediaExtensionGuard.m
 Media/SpliceKitVP9.mm
@@ -71,11 +72,6 @@ Panels/Captions/SpliceKitCaptionPanel+Persistence.m
 Panels/Captions/SpliceKitCaptionPanel+Transcription.m
 Panels/Captions/SpliceKitCaptionPanel+Timeline.m
 Panels/Captions/SpliceKitCaptionPanel+FCPXML.m
-Panels/CommandPalette/SpliceKitCommandPalette.m
-Panels/CommandPalette/SpliceKitCommandPaletteViews.m
-Panels/CommandPalette/SpliceKitCommandPalette+Registry.m
-Panels/CommandPalette/SpliceKitCommandPalette+Dictation.m
-Panels/CommandPalette/SpliceKitCommandPalette+Panels.m
 Panels/SpliceKitDebugUI.m
 Timeline/SpliceKitStructureBlocks.m
 Timeline/SpliceKitSectionsBar.m
@@ -95,14 +91,6 @@ Media/URLImport/SpliceKitURLImport+FinalCut.m
 Media/URLImport/SpliceKitURLImport+Normalize.m
 Media/URLImport/SpliceKitURLImportRemux.m
 Media/URLImport/SpliceKitURLImportHooks.m
-Panels/LiveCam/SpliceKitLiveCam.m
-Panels/LiveCam/SpliceKitLiveCamViews.m
-Panels/LiveCam/SpliceKitLiveCamSegmentation.m
-Panels/LiveCam/SpliceKitLiveCamEffects.m
-Panels/LiveCam/SpliceKitLiveCam+Ingest.m
-Panels/LiveCam/SpliceKitLiveCam+UI.m
-Panels/LiveCam/SpliceKitLiveCam+Capture.m
-Panels/LiveCam/SpliceKitLiveCam+Recording.m
 Haptics/SpliceKitHapticBridge.m
 Haptics/SpliceKitHapticSnapEmitters.m
 Audio/SpliceKitAudioLevels.m

@@ -64,7 +64,9 @@ def get_caption_state() -> str:
     Use after open_captions() to check transcription progress.
 
     `Last error` is the panel's own record of the last caption run that went wrong.
-    It is a state reading, not a failure of this call.
+    It is a state reading, not a failure of this call. `Engine fallback` appears when
+    the chosen Whisper engine is not installed and the last transcription used
+    Parakeet v3 instead.
     """
     r = bridge.call("captions.getState")
     if _err(r):
@@ -75,6 +77,8 @@ def get_caption_state() -> str:
     lines.append(f"Segments: {r.get('segmentCount', 0)}")
     if r.get("lastError"):
         lines.append(f"Last error (from an earlier caption run): {r['lastError']}")
+    if r.get("engineNotice"):
+        lines.append(f"Engine fallback: {r['engineNotice'].strip('()')}")
 
     if r.get('style'):
         s = r['style']

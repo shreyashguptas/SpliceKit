@@ -5,6 +5,7 @@
 //
 
 #import "SpliceKitCaptionPanel+Private.h"
+#import "SpliceKitWindows.h"
 
 // Flipped document view so NSScrollView shows content top-down. Without this, an
 // unflipped doc view's origin is at the bottom-left and the scroll view can show
@@ -22,19 +23,15 @@
 - (void)setupPanelIfNeeded {
     if (self.panel) return;
 
-    NSRect frame = NSMakeRect(100, 150, 480, 680);
-    NSUInteger mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                      NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
-
+    // A standard tool window; SpliceKitWindows.h has how it behaves.
+    NSRect frame = NSMakeRect(0, 0, 480, 680);
     self.panel = [[NSPanel alloc] initWithContentRect:frame
-                                            styleMask:mask
+                                            styleMask:SpliceKitToolWindowStyleMask
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
     self.panel.title = @"Social Captions";
-    self.panel.floatingPanel = YES;
     self.panel.becomesKeyOnlyIfNeeded = NO;
-    self.panel.hidesOnDeactivate = NO;
-    self.panel.level = NSFloatingWindowLevel;
+    SpliceKit_adoptToolWindow(self.panel);
     self.panel.minSize = NSMakeSize(400, 500);
     self.panel.delegate = self;
     self.panel.releasedWhenClosed = NO;
@@ -143,7 +140,7 @@
     self.enginePopup.lastItem.representedObject = @"parakeetV3";
     [self.enginePopup addItemWithTitle:@"Whisper large-v3-turbo (~800 MB)"];
     self.enginePopup.lastItem.representedObject = @"whisperLargeV3Turbo";
-    [self.enginePopup addItemWithTitle:@"Whisper large-v3 (Highest quality, ~1.5 GB)"];
+    [self.enginePopup addItemWithTitle:@"Whisper large-v3 (Highest quality, ~3 GB)"];
     self.enginePopup.lastItem.representedObject = @"whisperLargeV3";
     NSString *savedEngine = [[NSUserDefaults standardUserDefaults] stringForKey:@"SpliceKitCaptionEngine"] ?: @"whisperLargeV3";
     for (NSMenuItem *item in self.enginePopup.itemArray) {

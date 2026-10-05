@@ -388,12 +388,6 @@ def test_dialog():
     skip("click/fill/checkbox/popup/dismiss", "no dialog open")
 
 
-def test_command():
-    print("\n[command.*]")
-    ok("search", rpc("command.search", {"query": "blade"}))
-    skip("execute/show/hide", "would trigger command palette")
-
-
 def test_dual_timeline():
     print("\n[dualTimeline.*]")
     ok("status", rpc("dualTimeline.status"),
@@ -450,26 +444,6 @@ def test_transcript():
     expect_error("setEngine bad", rpc("transcript.setEngine", {"engine": "nonexistent"}), "Unknown")
     skip("open/close/delete/move/search/setSpeaker/setSilence/deleteSilences",
          "would modify transcript state")
-
-
-def test_livecam():
-    print("\n[liveCam.*]")
-    status = rpc("liveCam.status")
-    ok("status", status, lambda resp: isinstance(_res(resp), dict))
-
-    show = rpc("liveCam.show")
-    ok("show", show, lambda resp: isinstance(_res(resp), dict) and "visible" in _res(resp))
-
-    status_after_show = rpc("liveCam.status")
-    ok("status after show", status_after_show,
-       lambda resp: isinstance(_res(resp), dict) and _res(resp).get("visible") is True)
-
-    hide = rpc("liveCam.hide")
-    ok("hide", hide, lambda resp: isinstance(_res(resp), dict) and "visible" in _res(resp))
-
-    status_after_hide = rpc("liveCam.status")
-    ok("status after hide", status_after_hide,
-       lambda resp: isinstance(_res(resp), dict) and _res(resp).get("visible") is False)
 
 
 def test_options():
@@ -753,7 +727,6 @@ TEST_GROUPS = {
     "project": test_project,
     "object": test_object,
     "dialog": test_dialog,
-    "command": test_command,
     "dual_timeline": test_dual_timeline,
     "scene": test_scene,
     "beats": test_beats,
@@ -761,7 +734,6 @@ TEST_GROUPS = {
     "titles": test_titles,
     "stabilize": test_stabilize,
     "transcript": test_transcript,
-    "livecam": test_livecam,
     "options": test_options,
     "flexmusic": test_flexmusic,
     "montage": test_montage,

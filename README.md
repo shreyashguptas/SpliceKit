@@ -3,7 +3,6 @@
 An MCP server for Final Cut Pro, so Claude or any other MCP client can read and
 edit your timeline: open projects, list and inspect clips, blade, trim, add clips
 from the browser, apply effects and transitions, work from a transcript, export.
-It also adds a Command Palette inside Final Cut Pro (Cmd+Shift+P).
 
 This is my build of [SpliceKit](https://github.com/elliotttate/SpliceKit) by
 Elliott Tate. The only way to get it is to build it from this repository. There
@@ -54,9 +53,8 @@ what is and isn't set up without changing anything, run `make install-check`.
 
 ## Use
 
-Open "Final Cut Pro Modified". Press Cmd+Shift+P for the Command Palette. Claude
-Desktop and Claude Code are configured by the install (fully quit and reopen
-Claude Desktop once). For any other MCP client, use the virtualenv's Python as
+Open "Final Cut Pro Modified". Claude Desktop and Claude Code are configured by
+the install (fully quit and reopen Claude Desktop once). For any other MCP client, use the virtualenv's Python as
 the command and this checkout's server as the argument:
 
 ```json
@@ -84,7 +82,7 @@ talk to.
 - [.claude/CLAUDE.md](.claude/CLAUDE.md): the operating guide for driving Final Cut Pro
   through the tools. Claude Code loads it on its own when you open this repository.
 - [docs/guides/](docs/guides/): walkthroughs (transcript editing, captions, song cut,
-  scene and beat detection, the command palette, Lua scripting, ...).
+  scene and beat detection, Lua scripting, ...).
 - [docs/reference/](docs/reference/): every MCP tool
   ([mcp-tools.md](docs/reference/mcp-tools.md)), the Lua SDK, the debug and runtime
   introspection tools, FCP's classes and the FCPXML format.

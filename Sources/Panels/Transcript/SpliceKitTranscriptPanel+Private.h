@@ -81,6 +81,15 @@
 @property (nonatomic, strong) NSPopUpButton *enginePopup;
 // parakeetModelVersion is declared in the public header so the transcript.setEngine RPC can set it.
 
+// The command-line engine a Parakeet/Whisper run uses, set by -prepareCLIEngine at the start
+// of each run: its user-facing name, --model value, model download size and whether it
+// labels speakers. cliEngineNotice says when Whisper was missing and Parakeet ran instead.
+@property (atomic, copy) NSString *cliEngineName;
+@property (atomic, copy) NSString *cliModelArg;
+@property (atomic, copy) NSString *cliModelSize;
+@property (atomic) BOOL cliSpeakers;
+@property (atomic, copy) NSString *cliEngineNotice;
+
 // Speaker diarization (macOS 26+)
 @property (nonatomic, strong) NSButton *speakerDetectionCheckbox;
 @property (nonatomic) BOOL speakerDetectionEnabled;
@@ -128,6 +137,8 @@ extern NSString *const FCPAttrSegmentEndIndex;
 // Implemented in SpliceKitTranscriptPanel.m, called from another file.
 @interface SpliceKitTranscriptPanel ()
 - (void)persistTranscriptStateForCurrentSequence;
+- (void)loadSavedEngineChoice;
+- (void)saveEngineChoice;
 - (void)performSearchHighlighting;
 - (void)scrollToCurrentSearchResult;
 - (void)assignSpeakers;
@@ -140,6 +151,7 @@ extern NSString *const FCPAttrSegmentEndIndex;
 @interface SpliceKitTranscriptPanel (UI)
 - (void)setupPanelIfNeeded;
 - (void)updateSpeakerCheckboxState;
+- (void)selectEnginePopupForCurrentEngine;
 - (void)rebuildTextView;
 - (void)startPlayheadTimer;
 - (void)stopPlayheadTimer;

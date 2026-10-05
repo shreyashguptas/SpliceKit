@@ -92,9 +92,6 @@ class MCPToolAnnotationTests(FakeBridgeMixin, unittest.TestCase):
             "mixer_open_bus_effect",
             "mixer_set_bus_effect_enabled",
             "mixer_remove_bus_effect",
-            "livecam_open",
-            "livecam_close",
-            "livecam_status",
         }
         self.assertTrue(expected.issubset(self.tools.keys()))
 
@@ -114,9 +111,6 @@ class MCPToolAnnotationTests(FakeBridgeMixin, unittest.TestCase):
             "inspect_handle": {"readOnlyHint": True, "destructiveHint": False},
             "release_handle": {"readOnlyHint": False, "destructiveHint": False},
             "release_all_handles": {"readOnlyHint": False, "destructiveHint": False},
-            "livecam_open": {"readOnlyHint": False, "destructiveHint": False},
-            "livecam_close": {"readOnlyHint": False, "destructiveHint": False},
-            "livecam_status": {"readOnlyHint": True, "destructiveHint": False},
         }
         for name, expected in checks.items():
             annotations = self.tools[name]["annotations"]
@@ -621,24 +615,16 @@ class MCPToolAnnotationTests(FakeBridgeMixin, unittest.TestCase):
         result = self.module.build_song_cut(pace="slow")
         self.assertIn('pace must be one of', result)
 
-    def test_livecam_wrappers_forward_expected_bridge_calls(self):
+    def test_apply_transition_to_all_clips_calls_timeline_action(self):
+        # It went through the removed command palette (command.execute) before.
         def respond(method, params):
-            return {"method": method, "params": params}
+            return {"status": "ok"}
 
         calls = self._install_bridge(respond)
 
-        self.module.livecam_open()
-        self.module.livecam_close()
-        self.module.livecam_status()
+        self.module.apply_transition_to_all_clips()
 
-        self.assertEqual(
-            calls,
-            [
-                ("liveCam.show", {}),
-                ("liveCam.hide", {}),
-                ("liveCam.status", {}),
-            ],
-        )
+        self.assertEqual(calls, [("timeline.action", {"action": "addTransitionToAll"})])
 
     def test_set_inspector_property_docstring_lists_keys_not_labels(self):
         doc = " ".join((self.module.set_inspector_property.__doc__ or "").split())

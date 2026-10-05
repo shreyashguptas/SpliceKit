@@ -25,6 +25,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <dlfcn.h>
 #import "SpliceKitCaptionPanel+Private.h"
+#import "SpliceKitWindows.h"
 
 // ARM64 returns all structs via objc_msgSend; x86_64 needs _stret for structs >16 bytes.
 
@@ -116,7 +117,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
 
     [self setupPanelIfNeeded];
     [self restorePersistedStateForCurrentSequenceIfNeeded];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
 
     // Motion title channels are not always ready at the first open tick after
     // relaunch, so repair after the panel is visible and the project is active.
@@ -1225,6 +1226,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
     // like the read itself had failed, with the text of an unrelated earlier paste.
     if (self.errorMessage) state[@"lastError"] = self.errorMessage;
     if (self.lastGenerateResult) state[@"lastGenerateResult"] = self.lastGenerateResult;
+    if (self.engineNotice) state[@"engineNotice"] = self.engineNotice;
 
     // Segments
     NSMutableArray *segDicts = [NSMutableArray array];

@@ -9,6 +9,19 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **The Transcript Editor can transcribe with Whisper large-v3, and does by default.** The
+  engine dropdown now offers Whisper large-v3 (most accurate) and Whisper large-v3 turbo
+  (faster) next to Parakeet, FCP Native and Apple Speech, through the same
+  `whisper-transcriber` helper the caption panel uses; `set_transcript_engine` takes
+  `whisper` / `whisperLargeV3` and `whisperLargeV3Turbo`. Whisper does not label speakers,
+  so the Speakers checkbox is off for it; Parakeet still does. When Whisper is not
+  installed a run falls back to Parakeet v3, and the status line and `get_transcript`
+  (`engineNotice`) say so. The panel's status and error messages name the engine that ran,
+  the dropdown follows an engine set over MCP, and the panel now also finds a Parakeet
+  helper installed under `~/Library/Application Support/SpliceKit/tools/`. The engine
+  picked in the dropdown is remembered across launches (one set over MCP lasts the
+  session), and opening a project with a saved transcript no longer switches the engine
+  to the one that made it.
 - **`remove_browser_clip`: take a clip back out of a library.** SpliceKit could put clips
   into a library and never remove them, so every `import_media` and `import_url` call left
   one behind and nothing short of Final Cut Pro's own UI could clear it. The bridge RPC is
@@ -96,6 +109,50 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Transcript edits made while a transcription is running are refused, not misapplied.**
+  A run clears the word list partway through and fills it again at the end, while
+  `get_transcript` keeps listing the previous run's words until then. A
+  `move_transcript_words` / `delete_transcript_words` / `delete_transcript_silences` in
+  that window either failed with "Index out of range" (after the clear; about one live
+  sweep in three) or cut the timeline by words that were about to be replaced (before
+  it). They now answer "A transcription is running … wait until get_transcript shows
+  Status: ready", before any undo group opens, so nothing lands in Edit > Undo. The live
+  sweep waits for `Status: ready` as well as the sample word before editing.
+- **The Transcript Editor window behaves like a normal window.** It floated at
+  `NSFloatingWindowLevel` all the time with `hidesOnDeactivate` off, so it sat on top of
+  every other app. It now floats above Final Cut Pro's own windows only while Final Cut Pro
+  is the active app, and drops to the normal level (behind the app you switch to) when it
+  is not. It has a standard title bar with minimize. Every time it is shown it opens centred
+  in front of Final Cut Pro's window, on the display and desktop (Space) you are on, so it
+  can no longer get lost on another desktop or display. The toolbar button brings a window
+  that is open on another desktop, or minimized, to you instead of hiding it, and it goes
+  dark when the window is closed with its close button or minimized.
+- **Every SpliceKit window behaves the same way now.** Social Captions, the Audio Mixer,
+  the SpliceKit Log, the Lua REPL and the windows Lua scripts open (`sk.alert`,
+  `sk.prompt`) all floated above every app; the Log and the Lua REPL also joined every
+  desktop. They now share the Transcript Editor's behaviour (`Sources/Core/SpliceKitWindows`):
+  a standard title bar with minimize, above Final Cut Pro's windows only while it is the
+  active app, behind other apps otherwise, and opened centred in front of Final Cut Pro on
+  the desktop you are on. The Splices menu items bring a window that is open on another
+  desktop or minimized to you instead of hiding it. `sk.toast` shows over Final Cut Pro's
+  window and only while Final Cut Pro is active, not at status-bar level on every desktop.
+  The Sections bar and the timeline Overview strip, which sit on the timeline, were
+  floating panels on every desktop and so showed above other apps; they are now
+  normal-level child windows of Final Cut Pro's window, on its desktop only.
+- **Captions failed out of the box: "Whisper large-v3 transcriber not found".** Whisper
+  large-v3 is the caption panel's default engine, but its helper (`whisper-transcriber`)
+  was only built with `scripts/build-transcribers.sh --all`, so `make install`,
+  `make deploy` and `make transcribers` never built it and every caption run failed. It is
+  now built by default next to `parakeet-transcriber` (a failed build is still not fatal),
+  and a redeploy that wipes the framework's Resources copies back the installed
+  Application Support copy when this checkout has no build of its own. WhisperKit is
+  pinned to exactly 0.18.0 with its `Package.resolved` committed, as FluidAudio is. When
+  the Whisper helper is missing anyway, the caption panel falls back to Parakeet v3 rather
+  than failing, logs it, says so in its status line, and `get_caption_state` reports it as
+  `Engine fallback`. The engine menu and the download message now give large-v3's real
+  size, ~3 GB on disk, not ~1.5 GB. Proven outside Final Cut Pro: the built helper
+  transcribes a spoken "The quick brown fox jumps over the lazy dog" with large-v3, every
+  word with its timing.
 - **The OTIO round trip lost the edit.** Exporting the QA project — three items on the primary
   storyline, the first a compound clip holding two clips of its own, plus a connected clip
   anchored inside it — reported "1 track, 2 clips", and re-importing produced four gaps and
@@ -408,6 +465,18 @@ that this fork has removed.
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
 
 ### Removed
+- **LiveCam and the Command Palette.** Both features are gone: their panels, toolbar buttons,
+  Splices menu items, the Cmd+Shift+P shortcut, the palette's voice dictation, the
+  `liveCam.*` and `command.*` bridge RPCs and the MCP tools `livecam_open`, `livecam_close`,
+  `livecam_status`, `show_command_palette`, `hide_command_palette`, `search_commands` and
+  `execute_command`. Every command the palette ran has its own MCP tool (timeline_action and
+  the other action dispatchers, apply_effect, apply_transition, insert_title, the transcript,
+  beat, montage and dual-timeline tools), and `execute_menu_command` reaches any FCP menu
+  item. `apply_transition_to_all_clips` called through the palette and now calls
+  `timeline.action` directly. Only the Transcript Editor button is left in Final Cut Pro's
+  toolbar; a saved toolbar layout that still holds the old buttons is cleaned up at launch.
+  The camera and microphone permission text are Final Cut Pro's own again after the next
+  `make install`.
 - **SpliceKit runs no language model of its own any more.** It only exposes tools over MCP,
   and the MCP client does the thinking. The Command Palette's natural-language engines are
   gone: Apple Intelligence and Apple Intelligence+ (the FoundationModels Swift scripts the
