@@ -69,19 +69,22 @@ fetch proceeds anonymously (it logs a harmless
 
 | Dependency | Source | Version | Licence |
 | --- | --- | --- | --- |
-| WhisperKit | `github.com/argmaxinc/WhisperKit` | 0.9.0+ | MIT |
+| WhisperKit | `github.com/argmaxinc/WhisperKit` | exactly 0.18.0 | MIT |
 
-**Not built by default.** WhisperKit's dependency tree and model sizes are much
-larger than Parakeet's, and the caption panel is a separate feature from the
-transcript panel, so it is opt-in:
+Transitive packages, pinned by the committed `Package.resolved`: swift-transformers
+and swift-jinja (Hugging Face), swift-crypto, swift-asn1, swift-collections and
+swift-argument-parser (Apple), and yyjson. All are source packages; none ships a
+precompiled binary.
+
+**Built by default**, alongside Parakeet: Whisper large-v3 is the caption panel's
+default engine. `make install`, `make deploy` and `make transcribers` all build it
+(cached in `build/whisper-transcriber` after the first, few-minute build). A
+failed build is not fatal; the caption panel then falls back to Parakeet v3 and
+says so in its status line. To build only this helper:
 
 ```sh
-./scripts/build-transcribers.sh --all      # or --only whisper-transcriber
+./scripts/build-transcribers.sh --only whisper-transcriber
 ```
-
-Its version is still declared as `from: "0.9.0"`, which floats. If you enable
-it, pin it and commit its `Package.resolved` the way Parakeet's is, or it will
-eventually break the same way.
 
 ## Vendored, not downloaded
 
@@ -103,7 +106,8 @@ installation. All are CoreML conversions hosted on HuggingFace.
 | Parakeet TDT 0.6B v3 | `huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml` | ~475 MB | default transcript engine |
 | Parakeet TDT 0.6B v2 | `huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml` | ~475 MB | only if you select v2 |
 | Speaker diarization | `huggingface.co/FluidInference/speaker-diarization-coreml` | ~100 MB | only with speaker detection on |
-| Whisper large-v3 / turbo | HuggingFace, via WhisperKit | ~800 MB–1.5 GB | only if you use a caption engine |
+| Whisper large-v3 | `huggingface.co/argmaxinc/whisperkit-coreml` (`openai_whisper-large-v3`), via WhisperKit | ~3 GB | default caption engine, first caption run |
+| Whisper large-v3-turbo | same repo (`openai_whisper-large-v3_turbo`) | ~950 MB | only if you select it in the caption panel |
 
 Transcription itself runs entirely on-device. The download is the only network
 access; no audio, transcript or project data leaves the machine.
@@ -113,6 +117,7 @@ access; no audio, transcript or project data leaves the machine.
 | Path | Contents |
 | --- | --- |
 | `~/Library/Application Support/FluidAudio/Models/` | Parakeet + diarization models |
+| `~/Library/Application Support/SpliceKit/Models/whisper/` | Whisper models (caption panel) |
 | `~/Library/Application Support/SpliceKit/tools/` | the built helper binaries |
 | `<patched FCP>.app/Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/` | the same binaries, travelling with the app |
 | `build/*-transcriber` | the cached build output re-used across installs |
@@ -122,6 +127,7 @@ access; no audio, transcript or project data leaves the machine.
 
 ```sh
 rm -rf ~/Library/Application\ Support/FluidAudio          # downloaded models
+rm -rf ~/Library/Application\ Support/SpliceKit/Models    # downloaded Whisper models
 rm -rf ~/Library/Application\ Support/SpliceKit/tools     # helper binaries
 rm -rf helpers/*/.build build/*-transcriber                 # build state
 ```
@@ -134,7 +140,7 @@ reporting that they are unavailable. The FCP Native engine needs none of this.
 Versions are pinned. To take a newer FluidAudio or WhisperKit:
 
 ```sh
-cd helpers/parakeet-transcriber && swift package update
+cd helpers/parakeet-transcriber && swift package update   # or helpers/whisper-transcriber
 cd ../.. && make transcribers
 ```
 

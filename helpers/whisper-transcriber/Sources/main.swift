@@ -53,7 +53,7 @@ if let idx = args.firstIndex(of: "--model"), idx + 1 < args.count {
     case "large-v3-turbo", "large-v3_turbo", "turbo", "v3-turbo":
         modelVariant = "large-v3_turbo"; prettyName = "Whisper large-v3-turbo"; approxSizeMB = 950
     case "large-v3", "v3":
-        modelVariant = "large-v3"; prettyName = "Whisper large-v3"; approxSizeMB = 1550
+        modelVariant = "large-v3"; prettyName = "Whisper large-v3"; approxSizeMB = 2900
     default:
         printError("Unknown model '\(choice)' — using large-v3_turbo")
     }

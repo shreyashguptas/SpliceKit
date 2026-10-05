@@ -23,8 +23,11 @@
         self.spinner.hidden = YES;
         [self.spinner stopAnimation:nil];
         self.transcribeButton.enabled = YES;
-        self.statusLabel.stringValue = [NSString stringWithFormat:@"%lu words, %lu segments",
+        NSString *summary = [NSString stringWithFormat:@"%lu words, %lu segments",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSegments.count];
+        self.statusLabel.stringValue = self.engineNotice
+            ? [NSString stringWithFormat:@"%@ %@", summary, self.engineNotice]
+            : summary;
     });
 
     SpliceKit_log(@"[Captions] Transcription complete: %lu words",
@@ -426,12 +429,33 @@
 
     SpliceKit_log(@"[Captions] Starting transcription with engine: %@", engineLabel);
 
+    // A Whisper engine whose transcriber is not installed falls back to Parakeet
+    // v3 rather than failing: Whisper large-v3 is the default engine, and a
+    // checkout that never built whisper-transcriber should still get captions.
+    NSFileManager *fm = [NSFileManager defaultManager];
+    self.engineNotice = nil;
+    if (![binaryName isEqualToString:@"parakeet-transcriber"]
+        && !(binaryPath && [fm isExecutableFileAtPath:binaryPath])) {
+        NSString *parakeetPath = [self parakeetTranscriberPath];
+        if (parakeetPath && [fm isExecutableFileAtPath:parakeetPath]) {
+            SpliceKit_log(@"[Captions] %@ transcriber not found (%@); falling back to Parakeet v3",
+                          engineLabel, binaryPath ?: @"not installed");
+            self.engineNotice = [NSString stringWithFormat:
+                @"(%@ is not installed, so Parakeet v3 was used. Run `make transcribers` to install it.)",
+                engineLabel];
+            binaryPath = parakeetPath;
+            modelArg = @"v3";
+            engineLabel = @"Parakeet v3";
+            binaryName = @"parakeet-transcriber";
+        }
+    }
+
     if (!binaryPath) {
         [self transcriptionFailedWithError:
             [NSString stringWithFormat:@"%@ transcriber not found. Re-run the SpliceKit patcher, or pick a different engine.", engineLabel]];
         return;
     }
-    if (![[NSFileManager defaultManager] isExecutableFileAtPath:binaryPath]) {
+    if (![fm isExecutableFileAtPath:binaryPath]) {
         [self transcriptionFailedWithError:
             [NSString stringWithFormat:@"%@ binary is not executable. Try: chmod +x ~/Applications/SpliceKit/tools/%@", engineLabel, binaryName]];
         return;
