@@ -12,6 +12,7 @@ Core/SpliceKitSwizzle.m
 Core/SpliceKitTime.m
 Core/SpliceKitProcess.m
 Core/SpliceKitStrings.m
+Core/SpliceKitWindows.m
 Audio/SpliceKitAudioBusDiagnostics.m
 Media/SpliceKitMediaExtensionGuard.m
 Media/SpliceKitVP9.mm

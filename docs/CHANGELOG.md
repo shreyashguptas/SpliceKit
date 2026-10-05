@@ -105,6 +105,18 @@ that this fork has removed.
   can no longer get lost on another desktop or display. The toolbar button brings a window
   that is open on another desktop, or minimized, to you instead of hiding it, and it goes
   dark when the window is closed with its close button or minimized.
+- **Every SpliceKit window behaves the same way now.** Social Captions, the Audio Mixer,
+  the SpliceKit Log, the Lua REPL and the windows Lua scripts open (`sk.alert`,
+  `sk.prompt`) all floated above every app; the Log and the Lua REPL also joined every
+  desktop. They now share the Transcript Editor's behaviour (`Sources/Core/SpliceKitWindows`):
+  a standard title bar with minimize, above Final Cut Pro's windows only while it is the
+  active app, behind other apps otherwise, and opened centred in front of Final Cut Pro on
+  the desktop you are on. The Splices menu items bring a window that is open on another
+  desktop or minimized to you instead of hiding it. `sk.toast` shows over Final Cut Pro's
+  window and only while Final Cut Pro is active, not at status-bar level on every desktop.
+  The Sections bar and the timeline Overview strip, which sit on the timeline, were
+  floating panels on every desktop and so showed above other apps; they are now
+  normal-level child windows of Final Cut Pro's window, on its desktop only.
 - **Captions failed out of the box: "Whisper large-v3 transcriber not found".** Whisper
   large-v3 is the caption panel's default engine, but its helper (`whisper-transcriber`)
   was only built with `scripts/build-transcribers.sh --all`, so `make install`,

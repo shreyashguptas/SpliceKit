@@ -10,6 +10,7 @@
 #import <float.h>
 #import <math.h>
 #import "SpliceKit.h"
+#import "SpliceKitWindows.h"
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitTime.h"
 
@@ -961,7 +962,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         return;
     }
     [self setupPanelIfNeeded];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
     [self startPolling];
 }
 
@@ -987,19 +988,15 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 - (void)setupPanelIfNeeded {
     if (self.panel) return;
 
-    NSRect frame = NSMakeRect(160, 140, 1360, 760);
-    NSUInteger styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                           NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
-
+    // A standard tool window; SpliceKitWindows.h has how it behaves.
+    NSRect frame = NSMakeRect(0, 0, 1360, 760);
     self.panel = [[NSPanel alloc] initWithContentRect:frame
-                                            styleMask:styleMask
+                                            styleMask:SpliceKitToolWindowStyleMask
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
     self.panel.title = @"Audio Mixer";
-    self.panel.floatingPanel = YES;
     self.panel.becomesKeyOnlyIfNeeded = YES;
-    self.panel.hidesOnDeactivate = NO;
-    self.panel.level = NSFloatingWindowLevel;
+    SpliceKit_adoptToolWindow(self.panel);
     self.panel.minSize = NSMakeSize(1080, 700);
     self.panel.delegate = self;
     self.panel.releasedWhenClosed = NO;

@@ -891,10 +891,15 @@ void SpliceKit_installTimelineOverviewBar(void) {
         sOverviewPanel.hasShadow = NO;
         sOverviewPanel.ignoresMouseEvents = NO;
         sOverviewPanel.acceptsMouseMovedEvents = YES;
-        sOverviewPanel.floatingPanel = YES;
+        // A child of FCP's window at the normal level: it stays glued to the timeline,
+        // on FCP's Space only, and goes behind other apps with FCP's window. It used to
+        // be a floating panel on every Space, so it sat above every app and desktop.
+        sOverviewPanel.floatingPanel = NO;
+        sOverviewPanel.level = NSNormalWindowLevel;
+        sOverviewPanel.hidesOnDeactivate = NO;
         sOverviewPanel.becomesKeyOnlyIfNeeded = YES;
-        sOverviewPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                            NSWindowCollectionBehaviorTransient;
+        sOverviewPanel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                            NSWindowCollectionBehaviorIgnoresCycle;
 
         if (bar.superview) [bar removeFromSuperview];
         bar.frame = NSMakeRect(0, 0, panelFrame.size.width, kOverviewBarHeight);

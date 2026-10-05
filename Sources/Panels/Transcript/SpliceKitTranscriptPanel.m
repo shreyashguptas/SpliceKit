@@ -24,6 +24,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "SpliceKitTranscriptPanel+Private.h"
+#import "SpliceKitWindows.h"
 
 // FCP doesn't link against Speech.framework, so we load it at runtime.
 // This avoids a hard dependency — if the framework isn't available (unlikely
@@ -223,20 +224,6 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
                 [self stopPlayheadTimer];
                 [self.panel orderOut:nil];
             }];
-
-        // Float above FCP only while FCP is the active app. WillResignActive
-        // runs while FCP is still frontmost, so the window drops to the normal
-        // level just above FCP's own windows and the next app covers it.
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSApplicationWillResignActiveNotification
-            object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-                [self applyWindowLevelForAppActive:NO];
-            }];
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSApplicationDidBecomeActiveNotification
-            object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-                [self applyWindowLevelForAppActive:YES];
-            }];
     }
     return self;
 }
@@ -253,10 +240,7 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
 
     [self setupPanelIfNeeded];
     [self restorePersistedStateForCurrentSequenceIfNeeded];
-    if (self.panel.isMiniaturized) [self.panel deminiaturize:nil];
-    [self placePanelInFrontOfFCP];
-    [self applyWindowLevelForAppActive:NSApp.isActive];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
     if (self.status == SpliceKitTranscriptStatusReady && self.mutableWords.count > 0) {
         [self startPlayheadTimer];
     }
@@ -277,24 +261,6 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
 
 - (BOOL)isVisible {
     return self.panel.isVisible;
-}
-
-// The toolbar button. Only a window the user can see right now is hidden: one
-// that is open on another Space (desktop) or minimized is brought here instead,
-// so one click always shows the editor in front of FCP.
-- (void)togglePanel {
-    if (![NSThread isMainThread]) {
-        SpliceKit_executeOnMainThread(^{
-            [self togglePanel];
-        });
-        return;
-    }
-
-    if (self.panel.isVisible && self.panel.isOnActiveSpace) {
-        [self hidePanel];
-    } else {
-        [self showPanel];
-    }
 }
 
 // The toolbar button's lit state follows this, so it also goes dark when the

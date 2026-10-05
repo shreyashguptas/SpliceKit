@@ -9,6 +9,7 @@
 #import "SpliceKitLuaPanel.h"
 #import "SpliceKitLua.h"
 #import "SpliceKit.h"
+#import "SpliceKitWindows.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -98,7 +99,9 @@ static NSFont *SpliceKitLuaPanel_monoFont(CGFloat size) {
 }
 
 - (void)togglePanel {
-    if (self.isVisible) [self hidePanel];
+    // Hide only a window the user can see here; one on another Space or minimized
+    // is brought here instead.
+    if (SpliceKit_toolWindowIsShownHere(self.panel)) [self hidePanel];
     else [self showPanel];
 }
 
@@ -108,7 +111,7 @@ static NSFont *SpliceKitLuaPanel_monoFont(CGFloat size) {
         return;
     }
     [self setupPanelIfNeeded];
-    [self.panel makeKeyAndOrderFront:nil];
+    SpliceKit_presentToolWindow(self.panel);
     [self.panel makeFirstResponder:self.inputField];
 }
 
@@ -127,30 +130,21 @@ static NSFont *SpliceKitLuaPanel_monoFont(CGFloat size) {
 - (void)setupPanelIfNeeded {
     if (self.panel) return;
 
+    // A standard tool window; SpliceKitWindows.h has how it behaves. It used to join
+    // every Space and float above every app.
     CGFloat width = 700.0, height = 480.0;
-    NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-    CGFloat x = NSMaxX(screenFrame) - width - 40.0;
-    CGFloat y = NSMidY(screenFrame) - height / 2.0;
-    NSRect frame = NSMakeRect(MAX(x, 60.0), MAX(y, 80.0), width, height);
-
+    NSRect frame = NSMakeRect(0, 0, width, height);
     self.panel = [[NSPanel alloc] initWithContentRect:frame
-                                            styleMask:(NSWindowStyleMaskTitled |
-                                                       NSWindowStyleMaskClosable |
-                                                       NSWindowStyleMaskResizable |
-                                                       NSWindowStyleMaskUtilityWindow)
+                                            styleMask:SpliceKitToolWindowStyleMask
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
     self.panel.title = @"Lua REPL";
-    self.panel.floatingPanel = YES;
     self.panel.becomesKeyOnlyIfNeeded = NO;
-    self.panel.hidesOnDeactivate = NO;
-    self.panel.level = NSFloatingWindowLevel;
+    SpliceKit_adoptToolWindow(self.panel);
     self.panel.minSize = NSMakeSize(400.0, 250.0);
     self.panel.releasedWhenClosed = NO;
     self.panel.delegate = self;
     self.panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    self.panel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
-                                    NSWindowCollectionBehaviorCanJoinAllSpaces;
 
     NSView *content = self.panel.contentView;
 

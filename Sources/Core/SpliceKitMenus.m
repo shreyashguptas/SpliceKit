@@ -25,6 +25,7 @@
 #import <setjmp.h>
 #import <pthread.h>
 #import "SpliceKitMenus.h"
+#import "SpliceKitWindows.h"
 
 #pragma mark - SpliceKit Menu
 //
@@ -42,60 +43,45 @@
     return instance;
 }
 
-- (void)toggleTranscriptPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitTranscriptPanel");
+// The menu items and the toolbar button. A tool window is hidden only when the user
+// can see it here (visible, on this Space, not minimized); one that is open on another
+// Space or minimized is shown in front of FCP instead, so one click always brings it.
+static void SpliceKit_toggleToolPanel(NSString *className) {
+    Class panelClass = objc_getClass(className.UTF8String);
     if (!panelClass) {
-        SpliceKit_log(@"SpliceKitTranscriptPanel class not found");
+        SpliceKit_log(@"%@ class not found", className);
         return;
     }
     id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    ((void (*)(id, SEL))objc_msgSend)(panel, @selector(togglePanel));
+    NSWindow *window = nil;
+    @try {
+        id value = [panel valueForKey:@"panel"];
+        if ([value isKindOfClass:[NSWindow class]]) window = value;
+    } @catch (__unused NSException *e) {}
+    BOOL shownHere = window ? SpliceKit_toolWindowIsShownHere(window)
+                            : ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
+    if (shownHere) {
+        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
+    } else {
+        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
+    }
+}
+
+- (void)toggleTranscriptPanel:(id)sender {
+    SpliceKit_toggleToolPanel(@"SpliceKitTranscriptPanel");
     // The toolbar button follows SpliceKitTranscriptVisibilityDidChangeNotification.
 }
 
 - (void)toggleCaptionPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitCaptionPanel");
-    if (!panelClass) {
-        SpliceKit_log(@"SpliceKitCaptionPanel class not found");
-        return;
-    }
-    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
-    if (visible) {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
-    } else {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
-    }
+    SpliceKit_toggleToolPanel(@"SpliceKitCaptionPanel");
 }
 
 - (void)toggleMixerPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitMixerPanel");
-    if (!panelClass) {
-        SpliceKit_log(@"SpliceKitMixerPanel class not found");
-        return;
-    }
-    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
-    if (visible) {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
-    } else {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
-    }
+    SpliceKit_toggleToolPanel(@"SpliceKitMixerPanel");
 }
 
 - (void)toggleLuaPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitLuaPanel");
-    if (!panelClass) {
-        SpliceKit_log(@"SpliceKitLuaPanel class not found");
-        return;
-    }
-    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
-    if (visible) {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
-    } else {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
-    }
+    SpliceKit_toggleToolPanel(@"SpliceKitLuaPanel");
 }
 
 - (void)toggleSections:(id)sender {

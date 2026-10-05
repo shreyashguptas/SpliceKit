@@ -1144,10 +1144,15 @@ static void SpliceKit_installSectionsBar(void) {
         sSectionsPanel.hasShadow = NO;
         sSectionsPanel.ignoresMouseEvents = NO;
         sSectionsPanel.acceptsMouseMovedEvents = YES;
-        sSectionsPanel.floatingPanel = YES;
+        // A child of FCP's window at the normal level: it stays glued to the timeline,
+        // on FCP's Space only, and goes behind other apps with FCP's window. It used to
+        // be a floating panel on every Space, so it sat above every app and desktop.
+        sSectionsPanel.floatingPanel = NO;
+        sSectionsPanel.level = NSNormalWindowLevel;
+        sSectionsPanel.hidesOnDeactivate = NO;
         sSectionsPanel.becomesKeyOnlyIfNeeded = YES;
-        sSectionsPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                            NSWindowCollectionBehaviorTransient;
+        sSectionsPanel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                            NSWindowCollectionBehaviorIgnoresCycle;
 
         bar.frame = NSMakeRect(0, 0, panelFrame.size.width, kSectionsBarHeight);
         bar.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
