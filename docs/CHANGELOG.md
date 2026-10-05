@@ -22,6 +22,13 @@ that this fork has removed.
   picked in the dropdown is remembered across launches (one set over MCP lasts the
   session), and opening a project with a saved transcript no longer switches the engine
   to the one that made it.
+- **`move_clips`: reorder primary-storyline clips in one call.** Name the clips by
+  handle and where they go (`before=` / `after=` a clip, or the end); passing every clip
+  gives a full reorder. It builds the permutation for the existing `spine.reorder` RPC,
+  which until now only Lua scripts could reach. One undo step ("Shuffle Clips" in Edit >
+  Undo, or the `begin_edit` group's name inside one); `dry_run` shows the new order first.
+  The move removes the primary storyline's transitions, and the answer says how many;
+  undo brings them back.
 - **`remove_browser_clip`: take a clip back out of a library.** SpliceKit could put clips
   into a library and never remove them, so every `import_media` and `import_url` call left
   one behind and nothing short of Final Cut Pro's own UI could clear it. The bridge RPC is

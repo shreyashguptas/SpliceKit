@@ -58,6 +58,8 @@ CUT: blade_at_times([...]) (many cuts, one call). One cut: seek_to_time(t) then
 TRIM: trim_clip(handle, edge="start"|"end", to_seconds= or delta_seconds=, dry_run) -- FCP's
   ripple trim by handle, exact; the answer re-reads the clip. trimStart/trimEnd/trimToPlayhead
   (destructive action) work on the selection at the playhead and are coarse.
+MOVE: move_clips([handles], before= or after=, dry_run) -- reorder primary-storyline clips in
+  one call (every clip in a new order = a full reorder); removes the storyline's transitions.
 TIMELINE RANGE (FCP's range selection in the timeline): set_timeline_range(start, end),
   timeline_edit_action("setRangeStart" | "setRangeEnd" | "clearRange").
 SELECT: select_clips([handles]) (no playhead move), select_clip_in_lane(lane),
@@ -138,6 +140,7 @@ get_timeline_clips() gives every clip a handle; browser_list_clips() does the sa
   select_clips(["obj_12"])                                   select without moving the playhead
   trim_clip("obj_12", edge="end", to_seconds=8.0, dry_run=True)   plan, then drop dry_run to apply
   add_clip_to_timeline("obj_5", edit="connect", start_seconds=12, end_seconds=18, at_seconds=45)
+  move_clips(["obj_7"], before="obj_2")                      move a clip, no cut/paste
   get_clip_info("obj_12")                                    what is in the clip
   begin_edit("Rough cut") ... end_edit()                     many calls, one undo step
 Re-run get_timeline_clips() if a handle comes back unresolved.
@@ -146,7 +149,7 @@ Re-run get_timeline_clips() if a handle comes back unresolved.
 - Prefer the exact, handle-based tools (add_clip_to_timeline, trim_clip, blade_at_times,
   select_clips, seek_to_time) over stepping the playhead frame by frame.
 - Color, retime, titles and effects need a selection: select_clips([handle]) first.
-- Check what a change will do with dry_run=True (add_clip_to_timeline, trim_clip) before doing it.
+- Check what a change will do with dry_run=True (add_clip_to_timeline, trim_clip, move_clips) before doing it.
 - After an edit, read the state back (get_timeline_clips) or look (capture_timeline); after a
   mistake, history_action("undo"). add_clip_to_timeline replaces the pasteboard.
 - "No active timeline module" / "No sequence in timeline" = no project open: open_project().

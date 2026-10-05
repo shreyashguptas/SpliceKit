@@ -305,6 +305,20 @@ A start-point trim on the primary storyline keeps the clip in place and changes 
 `delta_seconds=-0.5` works too (negative = edit point earlier). Each trim is one undo step (Edit >
 Undo shows the name SpliceKit passes, "Trim"; inside a `begin_edit` group, that group's step). Undo with `history_action("undo")`.
 
+### Move clips to a new position
+```
+get_timeline_clips()                                     # find the handles
+move_clips(["obj_7"], before="obj_2", dry_run=True)      # plan: the new order, nothing changed
+move_clips(["obj_7"], before="obj_2")                    # clip 7 now plays right before clip 2
+move_clips(["obj_4", "obj_9"], after="obj_1")            # two clips, in that order, after clip 1
+move_clips(["obj_3", "obj_1", "obj_2"])                  # every clip, in the new order: a full reorder
+```
+Primary-storyline clips only (gaps count as clips); connected clips travel with the clip they are
+attached to. With neither `before` nor `after`, the clips go to the end. One call is one undo step,
+"Shuffle Clips" in Edit > Undo; inside a `begin_edit` group it joins that group, so one undo
+reverts the whole group. Every transition on the primary storyline is removed by the move; the
+answer says how many, and undo brings them back. Undo with `history_action("undo")`.
+
 ### Add a source clip, or a range of it, to the timeline
 ```
 browser_list_clips()                                                       # name, event, handle, isProject
