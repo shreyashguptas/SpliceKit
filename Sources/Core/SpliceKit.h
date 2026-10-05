@@ -321,12 +321,6 @@ NSDictionary *SpliceKit_dualTimelineTogglePanel(NSDictionary *params);
 // eventName names the FCPXML <event> that holds the project; nil or empty for the default.
 NSString *SpliceKit_otioToFCPXMLInEvent(NSString *otioPath, NSString *eventName);
 
-#pragma mark - LiveCam
-
-NSDictionary *SpliceKit_handleLiveCamShow(NSDictionary *params);
-NSDictionary *SpliceKit_handleLiveCamHide(NSDictionary *params);
-NSDictionary *SpliceKit_handleLiveCamStatus(NSDictionary *params);
-
 #pragma mark - Cached Class References
 //
 // We look these up once at launch instead of calling objc_getClass() on every

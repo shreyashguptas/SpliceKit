@@ -8,9 +8,7 @@
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitPlugins.h"
-#import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
-#import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
 #import "SpliceKitMKV.h"
 #import "SpliceKitVP9.h"
@@ -83,25 +81,6 @@
     } else {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
-}
-
-- (void)toggleLiveCamPanel:(id)sender {
-    Class panelClass = objc_getClass("SpliceKitLiveCamPanel");
-    if (!panelClass) {
-        SpliceKit_log(@"SpliceKitLiveCamPanel class not found");
-        return;
-    }
-    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
-    if (visible) {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
-    } else {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
-    }
-}
-
-- (void)toggleCommandPalette:(id)sender {
-    [[SpliceKitCommandPalette sharedPalette] togglePalette];
 }
 
 - (void)toggleLuaPanel:(id)sender {
@@ -879,21 +858,6 @@ void SpliceKit_installMenu(void) {
     captionItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:captionItem];
 
-    NSMenuItem *liveCamItem = [[NSMenuItem alloc]
-        initWithTitle:@"LiveCam"
-               action:@selector(toggleLiveCamPanel:)
-        keyEquivalent:@""];
-    liveCamItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:liveCamItem];
-
-    NSMenuItem *paletteItem = [[NSMenuItem alloc]
-        initWithTitle:@"Command Palette"
-               action:@selector(toggleCommandPalette:)
-        keyEquivalent:@"p"];
-    paletteItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
-    paletteItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:paletteItem];
-
     NSMenuItem *luaItem = [[NSMenuItem alloc]
         initWithTitle:@"Lua REPL"
                action:@selector(toggleLuaPanel:)
@@ -1227,7 +1191,7 @@ void SpliceKit_installMenu(void) {
         SpliceKit_log(@"OTIO import/export added to File menu");
     }
 
-    SpliceKit_log(@"SpliceKit menu installed (Ctrl+Option+T Transcript, Ctrl+Option+C Captions, Cmd+Shift+P Palette, Ctrl+Option+L Lua REPL)");
+    SpliceKit_log(@"SpliceKit menu installed (Ctrl+Option+T Transcript, Ctrl+Option+C Captions, Ctrl+Option+L Lua REPL)");
 }
 
 static NSString * const kSpliceKitLiveCamToolbarID = @"SpliceKitLiveCamItemID";

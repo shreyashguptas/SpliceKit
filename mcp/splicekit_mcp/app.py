@@ -108,14 +108,12 @@ FCP'S UI: execute_menu_command(["Modify", "Balance Color"]), list_menus, toggle_
   window server when FCP's main thread is busy: mainThreadBusy, titles only; overlays such as the
   Viewer's on-screen controls are listed apart, not as dialogs) then
   click_dialog_button / fill_dialog_field / select_dialog_popup / toggle_dialog_checkbox /
-  dismiss_dialog (cancels by default; save/open panels cannot be confirmed from the bridge),
-  search_commands / execute_command (the Command
-  Palette's commands).
+  dismiss_dialog (cancels by default; save/open panels cannot be confirmed from the bridge).
 ESCAPE HATCHES (last resort, raw ObjC): call_method_with_args, call_method, get_object_property,
   raw_call, debug_eval; explore_class / search_methods find a selector; release_all_handles releases
   handles. lua_execute runs Lua inside FCP.
 Not routed here on purpose (developer tooling; their docstrings say what they do): debug_*,
-  livecam_*, events_*, plugin_*, bridge_* internals, runtime introspection beyond
+  events_*, plugin_*, bridge_* internals, runtime introspection beyond
   explore_class / search_methods, lua extras, deploy_and_restart.
 
 ## The action dispatchers (FCP's own commands on the current selection / playhead)

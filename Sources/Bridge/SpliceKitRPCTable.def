@@ -134,17 +134,6 @@ SK_RPC("stabilize.subject", SpliceKit_handleSubjectStabilize, @"destructive", @"
 SK_RPC("transitions.list", SpliceKit_handleTransitionsList, @"safe", @"Lists installed transition effects.")
 SK_RPC("transitions.apply", SpliceKit_handleTransitionsApply, @"destructive", @"Applies a transition at the current edit point.")
 
-// command.* namespace (command palette)
-SK_RPC("command.show", SpliceKit_handleCommandShow, @"state_dependent", @"Opens the in-app command palette window.")
-SK_RPC("command.hide", SpliceKit_handleCommandHide, @"state_dependent", @"Closes the command palette.")
-SK_RPC("command.search", SpliceKit_handleCommandSearch, @"safe", @"Fuzzy-searches available commands without executing them.")
-SK_RPC("command.execute", SpliceKit_handleCommandExecute, @"state_dependent", @"Runs a palette command by id.")
-
-// liveCam.* namespace
-SK_RPC("liveCam.show", SpliceKit_handleLiveCamShow, @"state_dependent", @"Opens the Live Cam floating panel.")
-SK_RPC("liveCam.hide", SpliceKit_handleLiveCamHide, @"state_dependent", @"Closes the Live Cam panel.")
-SK_RPC("liveCam.status", SpliceKit_handleLiveCamStatus, @"safe", @"Reports Live Cam panel and capture state.")
-
 // dualTimeline.* namespace
 SK_RPC("dualTimeline.status", SpliceKit_handleDualTimelineStatus, @"safe", @"Reports dual-timeline panel state.")
 SK_RPC("dualTimeline.open", SpliceKit_handleDualTimelineOpen, @"state_dependent", @"Opens the secondary timeline editor.")

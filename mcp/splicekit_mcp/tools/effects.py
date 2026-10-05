@@ -170,4 +170,4 @@ def apply_transition_to_all_clips() -> str:
 
     Use list_transitions() to see which transition is currently set as default.
     """
-    return _call_or_error("command.execute", action="addTransitionToAll", type="timeline")
+    return _call_or_error("timeline.action", action="addTransitionToAll")

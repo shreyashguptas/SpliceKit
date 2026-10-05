@@ -591,7 +591,7 @@ $HELPERS_LINE
   - the same server read from the running Final Cut Pro (bridge, ObjC runtime,
     and the timeline as far as an open project allowed — see the check above)
 
-Leave "$APP_NAME" open. Inside it, press Cmd+Shift+P for the Command Palette.
+Leave "$APP_NAME" open.
 EOF
         ;;
     skipped)

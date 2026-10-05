@@ -163,7 +163,6 @@ is left.
 | --- | --- | --- |
 | Transcript / caption panels, Parakeet or Whisper engine | model download on first use (table above); recognition is on-device | huggingface.co |
 | Transcript panel, Apple Speech engine | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` set on every request (`Sources/Panels/Transcript/SpliceKitTranscriptPanel.m`), so recognition stays on this Mac where macOS supports it | Apple framework, on-device |
-| Command palette, voice dictation | `SFSpeechRecognizer` with `requiresOnDeviceRecognition = YES` (`Sources/Panels/CommandPalette/SpliceKitCommandPalette+Dictation.m`); the text only fills the search field | Apple framework, on-device |
 | URL import | downloads the URL you pasted: direct media links with `NSURLSession`, YouTube/Vimeo through `yt-dlp` and `ffmpeg` found on PATH (or `SPLICEKIT_YTDLP_PATH` / `SPLICEKIT_FFMPEG_PATH`); `make url-import-tools` only symlinks binaries already on PATH and prints a `brew install` hint otherwise; it downloads nothing | the site you gave it |
 
 ### Only during installation (`make install`)

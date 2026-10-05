@@ -14,10 +14,8 @@
 + (instancetype)shared;
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCaptionPanel:(id)sender;
-- (void)toggleLiveCamPanel:(id)sender;
 - (void)toggleSections:(id)sender;
 - (void)toggleOverviewBar:(id)sender;
-- (void)toggleCommandPalette:(id)sender;
 - (void)toggleLuaPanel:(id)sender;
 - (void)runLuaScript:(id)sender;
 - (void)openLuaScriptsFolder:(id)sender;
@@ -46,7 +44,6 @@
 - (void)toggleMuteAudio:(id)sender;
 - (void)exportOTIO:(id)sender;
 - (void)importOTIO:(id)sender;
-- (void)toggleLiveCamPanel:(id)sender;
 - (void)updateToolbarButtonState:(BOOL)active;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, strong) NSMenu *luaScriptsMenu;

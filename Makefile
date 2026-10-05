@@ -368,11 +368,10 @@ deploy: $(OUTPUT)
 		'<key>CFBundlePackageType</key><string>FMWK</string>' \
 		'<key>CFBundleExecutable</key><string>SpliceKit</string>' \
 		'</dict></plist>' > "$(FW_DIR)/Versions/A/Resources/Info.plist"
-	@# Privacy usage descriptions for the transcript, LiveCam and palette voice dictation.
+	@# Privacy usage description for the transcript's Apple Speech engine. Camera and
+	@# microphone keep Final Cut Pro's own descriptions.
 	@# Info.plist edits must come before signing: the signature seals Info.plist.
-	@$(call plist_set,NSSpeechRecognitionUsageDescription,SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.)
-	@$(call plist_set,NSCameraUsageDescription,SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.)
-	@$(call plist_set,NSMicrophoneUsageDescription,SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.)
+	@$(call plist_set,NSSpeechRecognitionUsageDescription,SpliceKit uses speech recognition for transcript editing inside Final Cut Pro.)
 	@# Helper CLIs. The dylib looks in the framework's Resources first.
 	@mkdir -p "$(TOOLS_DIR)"
 	@$(MAKE) url-import-tools
