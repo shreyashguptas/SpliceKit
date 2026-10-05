@@ -121,6 +121,8 @@ def get_title_text() -> str:
     rendered with the correct content and font size.
 
     Requires a title clip to be selected first (use timeline_action("selectClipAtPlayhead")).
+    get_title_parameters(handle) reads every text field and inspector setting of a title
+    by handle, without selecting it.
     """
     return _call_or_error("inspector.getTitle")
 

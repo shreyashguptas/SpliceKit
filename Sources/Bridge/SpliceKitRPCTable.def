@@ -128,6 +128,10 @@ SK_RPC("scene.detect", SpliceKit_handleDetectSceneChanges, @"safe", @"Detect sce
 SK_RPC("effects.listAvailable", SpliceKit_handleEffectsListAvailable, @"safe", @"Browse library of installed effects.")
 SK_RPC("effects.apply", SpliceKit_handleEffectsApply, @"destructive", @"Apply an effect to the selected clip.")
 SK_RPC("titles.insert", SpliceKit_handleTitleInsert, @"destructive", @"Inserts a Motion title on the timeline at the playhead.")
+SK_RPC("titles.list", SpliceKit_handleTitlesList, @"safe", @"Installed titles and generators with category, theme and full effect ID.")
+SK_RPC("titles.add", SpliceKit_handleTitlesAdd, @"destructive", @"Connects a title or generator at an exact time, length and lane, with its text and parameters, as one undo step.")
+SK_RPC("titles.getParameters", SpliceKit_handleTitlesGetParameters, @"safe", @"A title or generator's text fields and published parameters, by handle.")
+SK_RPC("titles.setParameters", SpliceKit_handleTitlesSetParameters, @"destructive", @"Changes a title or generator's text, text style and published parameters as one undo step.")
 SK_RPC("stabilize.subject", SpliceKit_handleSubjectStabilize, @"destructive", @"Tracks a subject and writes position keyframes on the selected clip.")
 
 // transitions.* namespace

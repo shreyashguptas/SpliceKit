@@ -19,6 +19,7 @@ from . import library  # noqa: F401
 from . import runtime  # noqa: F401
 from . import transcript  # noqa: F401
 from . import effects  # noqa: F401
+from . import titles  # noqa: F401
 from . import ui  # noqa: F401
 from . import mixer  # noqa: F401
 from . import projects  # noqa: F401

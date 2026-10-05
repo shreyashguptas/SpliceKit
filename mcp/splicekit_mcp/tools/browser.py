@@ -355,10 +355,14 @@ def stabilize_subject() -> str:
 
 @splicekit_tool("insert_title", DESTRUCTIVE)
 def insert_title(name: str = "", effect_id: str = "") -> str:
-    """Insert a title or generator into the timeline.
+    """Insert a title or generator at the playhead, the effect of FCP's Connect Title.
+
+    For an exact time, length and lane, its words and its settings in one undo step,
+    use add_title instead; list_titles shows what is installed.
 
     Resolves by display name or effect ID. If name is provided, searches
-    all available title effects for a case-insensitive match.
+    all available title effects for a case-insensitive match (the first of several
+    templates sharing a name).
 
     Args:
         name: Display name of the title (e.g. "Basic Title", "Lower Third")
