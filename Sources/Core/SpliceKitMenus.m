@@ -51,12 +51,7 @@
         return;
     }
     id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
-    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
-    if (visible) {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
-    } else {
-        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
-    }
+    ((void (*)(id, SEL))objc_msgSend)(panel, @selector(togglePanel));
     // The toolbar button follows SpliceKitTranscriptVisibilityDidChangeNotification.
 }
 

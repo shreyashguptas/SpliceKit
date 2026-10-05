@@ -6,8 +6,6 @@
 
 #import "SpliceKitTranscriptPanel+Private.h"
 
-static NSString * const kTranscriptWindowFrameName = @"SpliceKitTranscriptEditor";
-
 @implementation SpliceKitTranscriptPanel (UI)
 
 #pragma mark - Window Level
@@ -20,6 +18,48 @@ static NSString * const kTranscriptWindowFrameName = @"SpliceKitTranscriptEditor
     if (!self.panel) return;
     // floatingPanel sets the level: NSFloatingWindowLevel or NSNormalWindowLevel.
     self.panel.floatingPanel = active;
+}
+
+#pragma mark - Placement
+
+// FCP's editing window: the main window when FCP is active, otherwise the
+// largest visible window that is not ours (mainWindow is nil while inactive).
+static NSWindow *SpliceKitTranscript_hostWindow(NSWindow *exclude) {
+    NSWindow *main = NSApp.mainWindow;
+    if (main && main != exclude && main.isVisible) return main;
+    NSWindow *best = nil;
+    for (NSWindow *w in NSApp.windows) {
+        if (w == exclude || !w.isVisible || [w isKindOfClass:[NSPanel class]]) continue;
+        if (!best || w.frame.size.width * w.frame.size.height >
+                     best.frame.size.width * best.frame.size.height) {
+            best = w;
+        }
+    }
+    return best;
+}
+
+// Every show starts here: the window is centred over FCP's editing window on
+// the display that window is on, whatever position it was left at. A window
+// remembered on another display or Space is how it got lost before.
+- (void)placePanelInFrontOfFCP {
+    NSWindow *host = SpliceKitTranscript_hostWindow(self.panel);
+    NSScreen *screen = host.screen ?: NSScreen.mainScreen;
+    NSRect visible = screen.visibleFrame;
+
+    NSRect frame = self.panel.frame;
+    frame.size.width = MAX(self.panel.minSize.width, MIN(frame.size.width, visible.size.width));
+    frame.size.height = MAX(self.panel.minSize.height, MIN(frame.size.height, visible.size.height));
+
+    // Centre on the part of FCP's window that is on this display.
+    NSRect target = host ? NSIntersectionRect(host.frame, visible) : NSZeroRect;
+    if (NSIsEmptyRect(target)) target = visible;
+    frame.origin.x = NSMidX(target) - frame.size.width / 2.0;
+    frame.origin.y = NSMidY(target) - frame.size.height / 2.0;
+
+    // Keep the whole window, title bar included, on the display.
+    frame.origin.x = MIN(MAX(frame.origin.x, NSMinX(visible)), NSMaxX(visible) - frame.size.width);
+    frame.origin.y = MIN(MAX(frame.origin.y, NSMinY(visible)), NSMaxY(visible) - frame.size.height);
+    [self.panel setFrame:frame display:NO];
 }
 
 #pragma mark - Panel UI Setup
@@ -47,25 +87,14 @@ static NSString * const kTranscriptWindowFrameName = @"SpliceKitTranscriptEditor
     // NSFloatingWindowLevel all the time, so it sat on top of every app.
     self.panel.hidesOnDeactivate = NO;
     [self applyWindowLevelForAppActive:NSApp.isActive];
-    // Lives on the Space it was opened on, like any window, and may also join
-    // FCP's own Space when FCP is full screen.
-    self.panel.collectionBehavior = NSWindowCollectionBehaviorManaged |
+    // Comes to the Space (desktop) the user is on when it is shown, instead of
+    // staying on the one it was first opened on, and may join FCP's Space when
+    // FCP is full screen.
+    self.panel.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace |
                                     NSWindowCollectionBehaviorFullScreenAuxiliary;
     self.panel.minSize = NSMakeSize(420, 350);
     self.panel.delegate = self;
     self.panel.releasedWhenClosed = NO;
-
-    // Reopen where the user last left it; the first time, centre it on the
-    // display FCP's window is on rather than a fixed spot on the main display.
-    if (![self.panel setFrameUsingName:kTranscriptWindowFrameName]) {
-        NSScreen *screen = NSApp.mainWindow.screen ?: NSScreen.mainScreen;
-        NSRect visible = screen.visibleFrame;
-        NSRect placed = self.panel.frame;
-        placed.origin.x = NSMidX(visible) - placed.size.width / 2.0;
-        placed.origin.y = NSMidY(visible) - placed.size.height / 2.0;
-        [self.panel setFrame:placed display:NO];
-    }
-    self.panel.frameAutosaveName = kTranscriptWindowFrameName;
 
     // Dark appearance to match FCP
     self.panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];

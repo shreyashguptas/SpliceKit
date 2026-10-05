@@ -62,6 +62,7 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 - (void)showPanel;
 - (void)hidePanel;
 - (BOOL)isVisible;
+- (void)togglePanel;  // the toolbar button: hide if on screen here, else show in front of FCP
 
 // Transcription
 - (void)transcribeTimeline;                    // auto-detect clips from current timeline

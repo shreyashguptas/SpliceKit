@@ -253,6 +253,9 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
 
     [self setupPanelIfNeeded];
     [self restorePersistedStateForCurrentSequenceIfNeeded];
+    if (self.panel.isMiniaturized) [self.panel deminiaturize:nil];
+    [self placePanelInFrontOfFCP];
+    [self applyWindowLevelForAppActive:NSApp.isActive];
     [self.panel makeKeyAndOrderFront:nil];
     if (self.status == SpliceKitTranscriptStatusReady && self.mutableWords.count > 0) {
         [self startPlayheadTimer];
@@ -274,6 +277,24 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
 
 - (BOOL)isVisible {
     return self.panel.isVisible;
+}
+
+// The toolbar button. Only a window the user can see right now is hidden: one
+// that is open on another Space (desktop) or minimized is brought here instead,
+// so one click always shows the editor in front of FCP.
+- (void)togglePanel {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{
+            [self togglePanel];
+        });
+        return;
+    }
+
+    if (self.panel.isVisible && self.panel.isOnActiveSpace) {
+        [self hidePanel];
+    } else {
+        [self showPanel];
+    }
 }
 
 // The toolbar button's lit state follows this, so it also goes dark when the

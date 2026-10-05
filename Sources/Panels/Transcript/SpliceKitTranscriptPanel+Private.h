@@ -140,6 +140,7 @@ extern NSString *const FCPAttrSegmentEndIndex;
 @interface SpliceKitTranscriptPanel (UI)
 - (void)setupPanelIfNeeded;
 - (void)applyWindowLevelForAppActive:(BOOL)active;
+- (void)placePanelInFrontOfFCP;
 - (void)updateSpeakerCheckboxState;
 - (void)rebuildTextView;
 - (void)startPlayheadTimer;

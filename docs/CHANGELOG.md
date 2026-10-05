@@ -100,10 +100,11 @@ that this fork has removed.
   `NSFloatingWindowLevel` all the time with `hidesOnDeactivate` off, so it sat on top of
   every other app. It now floats above Final Cut Pro's own windows only while Final Cut Pro
   is the active app, and drops to the normal level (behind the app you switch to) when it
-  is not. It has a standard title bar with minimize, stays on the Space it was opened on,
-  remembers its size and position, and opens on the display Final Cut Pro is on. The
-  toolbar button now goes dark when the window is closed with its close button or
-  minimized, not only when it is toggled.
+  is not. It has a standard title bar with minimize. Every time it is shown it opens centred
+  in front of Final Cut Pro's window, on the display and desktop (Space) you are on, so it
+  can no longer get lost on another desktop or display. The toolbar button brings a window
+  that is open on another desktop, or minimized, to you instead of hiding it, and it goes
+  dark when the window is closed with its close button or minimized.
 - **The OTIO round trip lost the edit.** Exporting the QA project — three items on the primary
   storyline, the first a compound clip holding two clips of its own, plus a connected clip
   anchored inside it — reported "1 track, 2 clips", and re-importing produced four gaps and
