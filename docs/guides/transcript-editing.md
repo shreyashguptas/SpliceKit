@@ -109,9 +109,22 @@ Silences between words are stored as `SpliceKitTranscriptSilence` objects:
 
 ## Transcription Engines
 
-The panel includes an engine selector dropdown with three options:
+The panel includes an engine selector dropdown:
 
-### Parakeet v3 (Default)
+### Whisper large-v3 (Default)
+
+- **Model**: OpenAI Whisper large-v3, the most accurate engine here
+- **Processing**: On-device via WhisperKit (the same helper the caption panel uses)
+- **Download**: Auto-downloads on first use (~3 GB)
+- **Speaker diarization**: Not supported; pick a Parakeet engine to label speakers
+- **Fallback**: if the Whisper helper is not installed, the run uses Parakeet v3 and the
+  status line and `get_transcript` say so (`make transcribers` installs it)
+
+### Whisper large-v3 turbo
+
+- Faster than large-v3 and nearly as accurate; ~1 GB download
+
+### Parakeet v3
 
 - **Model**: NVIDIA Parakeet TDT 0.6B
 - **Languages**: 25 languages (multilingual)
@@ -286,7 +299,8 @@ When enabled, the system groups words by speaker and labels each segment.
 ### Automatic Detection
 
 Enable the "Speaker Diarization" checkbox in the panel UI before transcribing.
-The Parakeet engine will automatically identify different speakers.
+The Parakeet engines identify different speakers automatically (Whisper does not
+label speakers, so the checkbox is off for it).
 
 ### Manual Speaker Assignment
 
@@ -451,5 +465,5 @@ move_transcript_words(start_index=200, count=50, dest_index=0)
 ---
 
 *SpliceKit's transcript panel runs entirely on-device. No audio data is sent
-to external servers. The Parakeet model auto-downloads on first use and runs
-locally via the FluidAudio framework.*
+to external servers. The Whisper and Parakeet models auto-download on first use and
+run locally via WhisperKit and the FluidAudio framework.*

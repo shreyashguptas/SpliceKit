@@ -378,11 +378,18 @@ def set_transcript_engine(engine: str) -> str:
 
     Args:
         engine: One of:
+            - "whisper" (= "whisperLargeV3"): OpenAI Whisper large-v3 via WhisperKit,
+              on-device; the panel's default and the most accurate. No speaker labels.
+              When its helper is not installed the run uses Parakeet v3 and says so.
+            - "whisperLargeV3Turbo": Whisper large-v3 turbo, faster, nearly as accurate
             - "parakeet" (= "parakeetV3"): NVIDIA Parakeet TDT 0.6B v3, multilingual,
-              on-device; the panel's default and the fastest
+              on-device; the fastest, and labels speakers
             - "parakeetV2": the English-optimized Parakeet model
             - "fcpNative": FCP's built-in AASpeechAnalyzer
             - "appleSpeech": Apple's SFSpeechRecognizer (slower; needs the Speech
               Recognition permission)
+
+    Applies to this Final Cut Pro session only: the engine the user picks in the panel's
+    dropdown is the one remembered across launches, and this does not change it.
     """
     return _call_or_error("transcript.setEngine", engine=engine)

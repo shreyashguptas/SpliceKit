@@ -380,7 +380,10 @@
 - (void)performTimelineTranscription {
     if (self.engine == SpliceKitTranscriptEngineFCPNative) {
         [self performFCPNativeTranscription];
-    } else if (self.engine == SpliceKitTranscriptEngineParakeet) {
+    } else if (self.engine == SpliceKitTranscriptEngineParakeet ||
+               self.engine == SpliceKitTranscriptEngineWhisper) {
+        // Parakeet and Whisper are command-line helpers with the same interface;
+        // -prepareCLIEngine picks which one this run uses.
         [self performParakeetTranscription];
     } else {
         [self performAppleSpeechTranscription];

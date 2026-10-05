@@ -7,6 +7,15 @@
 #import "SpliceKitTranscriptPanel+Private.h"
 #import "SpliceKitWindows.h"
 
+// The engine dropdown's titles. -engineChanged: and -selectEnginePopupForCurrentEngine
+// map between these and the engine / model properties.
+static NSString * const kEngineWhisperLargeV3 = @"Whisper large-v3";
+static NSString * const kEngineWhisperTurbo = @"Whisper large-v3 turbo";
+static NSString * const kEngineParakeetV3 = @"Parakeet v3";
+static NSString * const kEngineParakeetV2 = @"Parakeet v2";
+static NSString * const kEngineFCPNative = @"FCP Native";
+static NSString * const kEngineAppleSpeech = @"Apple Speech";
+
 @implementation SpliceKitTranscriptPanel (UI)
 
 #pragma mark - Panel UI Setup
@@ -61,13 +70,16 @@
     // Engine selector
     self.enginePopup = [[NSPopUpButton alloc] init];
     self.enginePopup.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.enginePopup addItemsWithTitles:@[@"FCP Native", @"Apple Speech", @"Parakeet v3", @"Parakeet v2"]];
+    // Most accurate first. Whisper does not label speakers; Parakeet does.
+    [self.enginePopup addItemsWithTitles:@[kEngineWhisperLargeV3, kEngineWhisperTurbo,
+                                           kEngineParakeetV3, kEngineParakeetV2,
+                                           kEngineFCPNative, kEngineAppleSpeech]];
     self.enginePopup.target = self;
     self.enginePopup.action = @selector(engineChanged:);
     self.enginePopup.font = [NSFont systemFontOfSize:11];
     self.enginePopup.controlSize = NSControlSizeSmall;
     [self.enginePopup setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [self.enginePopup selectItemAtIndex:2]; // Default to Parakeet v3
+    [self selectEnginePopupForCurrentEngine];
     [row1 addSubview:self.enginePopup];
 
     // Speaker detection checkbox
@@ -312,12 +324,16 @@
 
 - (void)engineChanged:(id)sender {
     NSString *selected = self.enginePopup.titleOfSelectedItem;
-    if ([selected isEqualToString:@"Apple Speech"]) {
+    if ([selected hasPrefix:@"Whisper"]) {
+        self.engine = SpliceKitTranscriptEngineWhisper;
+        self.whisperModel = [selected isEqualToString:kEngineWhisperTurbo] ? @"large-v3-turbo" : @"large-v3";
+        SpliceKit_log(@"[Transcript] Engine switched to Whisper %@", self.whisperModel);
+    } else if ([selected isEqualToString:kEngineAppleSpeech]) {
         self.engine = SpliceKitTranscriptEngineAppleSpeech;
         SpliceKit_log(@"[Transcript] Engine switched to Apple Speech (SFSpeechRecognizer)");
     } else if ([selected hasPrefix:@"Parakeet"]) {
         self.engine = SpliceKitTranscriptEngineParakeet;
-        if ([selected isEqualToString:@"Parakeet v2"]) {
+        if ([selected isEqualToString:kEngineParakeetV2]) {
             self.parakeetModelVersion = @"v2";
             SpliceKit_log(@"[Transcript] Engine switched to Parakeet v2 (English-optimized)");
         } else {
@@ -328,7 +344,27 @@
         self.engine = SpliceKitTranscriptEngineFCPNative;
         SpliceKit_log(@"[Transcript] Engine switched to FCP Native (AASpeechAnalyzer)");
     }
+    [self saveEngineChoice];
     [self updateSpeakerCheckboxState];
+}
+
+- (void)selectEnginePopupForCurrentEngine {
+    if (!self.enginePopup) return;
+    NSString *title = kEngineFCPNative;
+    switch (self.engine) {
+        case SpliceKitTranscriptEngineWhisper:
+            title = [self.whisperModel isEqualToString:@"large-v3-turbo"] ? kEngineWhisperTurbo : kEngineWhisperLargeV3;
+            break;
+        case SpliceKitTranscriptEngineParakeet:
+            title = [self.parakeetModelVersion isEqualToString:@"v2"] ? kEngineParakeetV2 : kEngineParakeetV3;
+            break;
+        case SpliceKitTranscriptEngineAppleSpeech:
+            title = kEngineAppleSpeech;
+            break;
+        case SpliceKitTranscriptEngineFCPNative:
+            break;
+    }
+    [self.enginePopup selectItemWithTitle:title];
 }
 
 - (void)speakerDetectionToggled:(id)sender {
@@ -357,6 +393,11 @@
         self.speakerDetectionCheckbox.state = NSControlStateValueOff;
         self.speakerDetectionEnabled = NO;
         self.speakerDetectionCheckbox.toolTip = @"Speaker detection requires macOS 26 or later";
+    } else if (self.engine == SpliceKitTranscriptEngineWhisper) {
+        self.speakerDetectionCheckbox.enabled = NO;
+        self.speakerDetectionCheckbox.state = NSControlStateValueOff;
+        self.speakerDetectionEnabled = NO;
+        self.speakerDetectionCheckbox.toolTip = @"Whisper does not label speakers. Pick a Parakeet engine to detect speakers.";
     } else {
         // FCP Native: no diarization
         self.speakerDetectionCheckbox.enabled = NO;

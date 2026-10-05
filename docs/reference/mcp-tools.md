@@ -559,8 +559,9 @@ Panel features:
 Deleting words performs: blade at start -> blade at end -> select segment -> delete
 Moving words performs: blade + cut at source -> move playhead -> paste at destination
 
-- `set_transcript_engine(engine="parakeet" | "parakeetV2" | "fcpNative" | "appleSpeech")` —
-  choose the speech recognition engine for the transcript panel.
+- `set_transcript_engine(engine="whisper" | "whisperLargeV3Turbo" | "parakeet" | "parakeetV2" | "fcpNative" | "appleSpeech")` —
+  choose the speech recognition engine for the transcript panel. The default is Whisper
+  large-v3 (most accurate, no speaker labels); Parakeet is the fastest and labels speakers.
 
 ### Captions
 

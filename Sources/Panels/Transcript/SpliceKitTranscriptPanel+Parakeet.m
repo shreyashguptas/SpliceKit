@@ -1,7 +1,9 @@
 //
 //  SpliceKitTranscriptPanel+Parakeet.m
-//  The Parakeet engine: locating or building the transcriber CLI and running it
-//  for a whole timeline (batch) or a single file.
+//  The command-line engines, Parakeet and Whisper: locating (or, for Parakeet, building)
+//  the transcriber CLI and running it for a whole timeline (batch) or a single file.
+//  Both helpers take the same arguments and print the same JSON, so one pipeline runs
+//  either; -prepareCLIEngine picks which for each run.
 //
 
 #import "SpliceKitTranscriptPanel+Private.h"
@@ -24,7 +26,10 @@
 
     // 2. Standard tool locations (portable — no user-specific paths)
     NSString *home = NSHomeDirectory();
+    // tools/ is where scripts/build-transcribers.sh installs it; helpers/ is the older layout.
     NSArray *searchPaths = @[
+        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/parakeet-transcriber"],
+        [home stringByAppendingPathComponent:@"Applications/SpliceKit/tools/parakeet-transcriber"],
         [home stringByAppendingPathComponent:@"Applications/SpliceKit/helpers/parakeet-transcriber"],
         [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/helpers/parakeet-transcriber"],
         [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/helpers/parakeet-transcriber/.build/release/parakeet-transcriber"],
@@ -38,6 +43,58 @@
 
     SpliceKit_log(@"[Transcript] parakeet-transcriber not found in any search path");
     return nil;
+}
+
+// whisper-transcriber, the caption panel's Whisper helper, in the same places the
+// caption panel looks (SpliceKitCaptionPanel+Transcription.m) and that
+// scripts/build-transcribers.sh installs to.
+- (NSString *)whisperTranscriberPath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *home = NSHomeDirectory();
+    NSArray *searchPaths = @[
+        [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"Contents/Frameworks/SpliceKit.framework/Versions/A/Resources/whisper-transcriber"],
+        [home stringByAppendingPathComponent:@"Applications/SpliceKit/tools/whisper-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Application Support/SpliceKit/tools/whisper-transcriber"],
+        [home stringByAppendingPathComponent:@"Library/Caches/SpliceKit/tools/whisper-transcriber/.build/release/whisper-transcriber"],
+    ];
+    for (NSString *path in searchPaths) {
+        if ([fm isExecutableFileAtPath:path]) return path;
+    }
+    return nil;
+}
+
+// Picks the helper for this run and fills in cliEngineName, cliModelArg, cliModelSize and
+// cliSpeakers. Returns the helper's path, or nil when Parakeet is not installed (the caller
+// then tries to build it). Whisper that is not installed falls back to Parakeet v3 for this
+// run, says so in cliEngineNotice and the log, and leaves the chosen engine as it is.
+- (NSString *)prepareCLIEngine {
+    self.cliEngineNotice = nil;
+    if (self.engine == SpliceKitTranscriptEngineWhisper) {
+        NSString *path = [self whisperTranscriberPath];
+        BOOL turbo = [self.whisperModel isEqualToString:@"large-v3-turbo"];
+        if (path) {
+            self.cliEngineName = turbo ? @"Whisper large-v3 turbo" : @"Whisper large-v3";
+            self.cliModelArg = turbo ? @"large-v3-turbo" : @"large-v3";
+            self.cliModelSize = turbo ? @"~1 GB" : @"~3 GB";
+            self.cliSpeakers = NO;  // Whisper does not label speakers
+            return path;
+        }
+        self.cliEngineNotice = @"Whisper is not installed, so Parakeet v3 was used. "
+                               @"Install Whisper with 'make transcribers' in the SpliceKit checkout.";
+        SpliceKit_log(@"[Transcript] whisper-transcriber not found; falling back to Parakeet v3");
+        self.cliEngineName = @"Parakeet v3";
+        self.cliModelArg = @"v3";
+        self.cliModelSize = @"~475 MB";
+        self.cliSpeakers = YES;
+        return [self parakeetTranscriberPath];
+    }
+    NSString *version = self.parakeetModelVersion ?: @"v3";
+    self.cliEngineName = [@"Parakeet " stringByAppendingString:version];
+    self.cliModelArg = version;
+    self.cliModelSize = @"~475 MB";
+    self.cliSpeakers = self.speakerDetectionEnabled;
+    return [self parakeetTranscriberPath];
 }
 
 - (NSString *)findParakeetTranscriberProjectDir {
@@ -104,19 +161,20 @@
     return YES;
 }
 
+// Runs the timeline through the Parakeet or the Whisper helper (named for the engine it
+// was first written for); -prepareCLIEngine decides which.
 - (void)performParakeetTranscription {
     SpliceKit_log(@"[Transcript] ────────────────────────────────────────");
-    SpliceKit_log(@"[Transcript] Starting Parakeet transcription (FluidAudio on-device)");
-    SpliceKit_log(@"[Transcript] Model: Parakeet %@, Speakers: %@",
-        self.parakeetModelVersion ?: @"v3",
-        self.speakerDetectionEnabled ? @"ON" : @"OFF");
+    // Check / build the CLI tool
+    NSString *binaryPath = [self prepareCLIEngine];
+    SpliceKit_log(@"[Transcript] Starting %@ transcription (on-device)", self.cliEngineName);
+    SpliceKit_log(@"[Transcript] Model: %@, Speakers: %@",
+        self.cliModelArg, self.cliSpeakers ? @"ON" : @"OFF");
 
     // Diagnostic: system info and environment
     NSDate *diagStartTime = [NSDate date];
     SpliceKitTranscriptDiag_logSystemInfo();
 
-    // Check / build the CLI tool
-    NSString *binaryPath = [self parakeetTranscriberPath];
     if (!binaryPath) {
         SpliceKit_log(@"[Transcript] Pre-built binary not found, attempting to build from source...");
         __block BOOL buildOK = NO;
@@ -161,14 +219,14 @@
         }
     }
 
-    SpliceKit_log(@"[Transcript] Using parakeet-transcriber at: %@", binaryPath);
+    SpliceKit_log(@"[Transcript] Using %@ helper at: %@", self.cliEngineName, binaryPath);
     SpliceKitTranscriptDiag_logBinaryInfo(binaryPath);
 
     // Verify the binary is executable
     if (![[NSFileManager defaultManager] isExecutableFileAtPath:binaryPath]) {
-        SpliceKit_log(@"[Transcript] ERROR: parakeet-transcriber exists but is not executable");
+        SpliceKit_log(@"[Transcript] ERROR: %@ helper exists but is not executable", self.cliEngineName);
         [self setErrorState:[NSString stringWithFormat:
-            @"Parakeet binary is not executable:\n%@\n\nRe-install it with: make install", binaryPath]];
+            @"%@ helper is not executable:\n%@\n\nRe-install it with: make install", self.cliEngineName, binaryPath]];
         return;
     }
 
@@ -222,7 +280,7 @@
     }
 
     SpliceKit_log(@"[Transcript] Found %lu items on timeline", (unsigned long)clips.count);
-    SpliceKitTranscriptDiag_logClipInfos(clips, @"Parakeet");
+    SpliceKitTranscriptDiag_logClipInfos(clips, self.cliEngineName);
 
     // Filter to clips with media URLs
     NSMutableArray *transcribableClips = [NSMutableArray array];
@@ -334,7 +392,7 @@
         } else if (skippedTooShort > 0 && skippedNoMedia == 0) {
             reason = [NSString stringWithFormat:
                 @"All %lu clips are too short for transcription (< 0.5 seconds). "
-                @"Parakeet needs at least 1 second of audio.", (unsigned long)skippedTooShort];
+                @"%@ needs at least 1 second of audio.", (unsigned long)skippedTooShort, self.cliEngineName];
         } else if (skippedNoMedia > 0) {
             reason = @"No clips with source media files found. The timeline may only contain gaps, generators, or titles.";
         }
@@ -347,8 +405,8 @@
     [self.mutableSilences removeAllObjects];
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateStatusUI:[NSString stringWithFormat:@"Transcribing %lu clips with Parakeet...",
-            (unsigned long)transcribableClips.count]];
+        [self updateStatusUI:[NSString stringWithFormat:@"Transcribing %lu clips with %@...",
+            (unsigned long)transcribableClips.count, self.cliEngineName]];
         self.progressBar.hidden = NO;
         self.progressBar.indeterminate = NO;
         self.progressBar.doubleValue = 0;
@@ -368,7 +426,7 @@
     NSData *manifestData = [NSJSONSerialization dataWithJSONObject:manifestEntries options:0 error:nil];
     [manifestData writeToFile:manifestPath atomically:YES];
 
-    SpliceKit_log(@"[Transcript] Parakeet batch: %lu clips, %lu unique source files",
+    SpliceKit_log(@"[Transcript] %@ batch: %lu clips, %lu unique source files", self.cliEngineName,
         (unsigned long)transcribableClips.count, (unsigned long)uniqueFiles.count);
     for (NSString *file in uniqueFiles) {
         BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:file];
@@ -382,11 +440,11 @@
 
     // Build arguments for batch mode
     NSMutableArray *taskArgs = [NSMutableArray arrayWithObjects:@"--batch", manifestPath, @"--progress", nil];
-    if (self.speakerDetectionEnabled) {
+    if (self.cliSpeakers) {
         [taskArgs addObject:@"--speakers"];
     }
     [taskArgs addObject:@"--model"];
-    [taskArgs addObject:self.parakeetModelVersion ?: @"v3"];
+    [taskArgs addObject:self.cliModelArg];
 
     SpliceKitTranscriptDiag_logProcessLaunch(binaryPath, taskArgs);
 
@@ -447,25 +505,25 @@
                     dispatch_async(dispatch_get_main_queue(), ^{
                         self.progressBar.indeterminate = NO;
                         self.progressBar.doubleValue = frac;
-                        [self updateStatusUI:[NSString stringWithFormat:@"Parakeet: %@", msg]];
+                        [self updateStatusUI:[NSString stringWithFormat:@"%@: %@", self.cliEngineName, msg]];
                     });
                 }
             } else if ([line hasPrefix:@"ERROR:"]) {
                 NSString *errMsg = [line substringFromIndex:6];
-                SpliceKit_log(@"[Transcript] Parakeet: %@", errMsg);
+                SpliceKit_log(@"[Transcript] %@: %@", self.cliEngineName, errMsg);
                 // Show actionable errors in the UI too
                 if ([errMsg containsString:@"Network"] || [errMsg containsString:@"network"] ||
                     [errMsg containsString:@"connect"] || [errMsg containsString:@"internet"]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [self updateStatusUI:@"Parakeet: Network error — check internet connection"];
+                        [self updateStatusUI:[NSString stringWithFormat:@"%@: Network error — check internet connection", self.cliEngineName]];
                     });
                 } else if ([errMsg containsString:@"rate-limited"] || [errMsg containsString:@"rate limit"]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [self updateStatusUI:@"Parakeet: Download rate-limited — wait a few minutes and retry"];
+                        [self updateStatusUI:[NSString stringWithFormat:@"%@: Download rate-limited — wait a few minutes and retry", self.cliEngineName]];
                     });
                 } else if ([errMsg containsString:@"disk"] || [errMsg containsString:@"space"]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [self updateStatusUI:@"Parakeet: Not enough disk space (~475 MB needed)"];
+                        [self updateStatusUI:[NSString stringWithFormat:@"%@: Not enough disk space (%@ needed)", self.cliEngineName, self.cliModelSize]];
                     });
                 } else if ([errMsg containsString:@"INFO:"]) {
                     // Informational, just log
@@ -483,19 +541,19 @@
     @try {
         [task launch];
         self.activeHelperTask = task;
-        SpliceKit_log(@"[Transcript] Parakeet process started (PID %d)", task.processIdentifier);
+        SpliceKit_log(@"[Transcript] %@ process started (PID %d)", self.cliEngineName, task.processIdentifier);
         [task waitUntilExit];
     } @catch (NSException *e) {
-        SpliceKit_log(@"[Transcript] ERROR: Failed to launch parakeet-transcriber: %@", e.reason);
+        SpliceKit_log(@"[Transcript] ERROR: Failed to launch %@: %@", binaryPath.lastPathComponent, e.reason);
         stdoutPipe.fileHandleForReading.readabilityHandler = nil;
         stderrPipe.fileHandleForReading.readabilityHandler = nil;
         NSString *hint = @"";
         if ([e.reason containsString:@"launch path"]) {
             hint = @"\n\nThe binary may be corrupted. Try re-running the SpliceKit patcher.";
         } else if ([e.reason containsString:@"Permission"]) {
-            hint = @"\n\nTry: chmod +x ~/Applications/SpliceKit/helpers/parakeet-transcriber";
+            hint = [NSString stringWithFormat:@"\n\nTry: chmod +x \"%@\"", binaryPath];
         }
-        [self setErrorState:[NSString stringWithFormat:@"Could not launch Parakeet transcriber: %@%@", e.reason, hint]];
+        [self setErrorState:[NSString stringWithFormat:@"Could not launch the %@ transcriber: %@%@", self.cliEngineName, e.reason, hint]];
         return;
     }
 
@@ -550,7 +608,7 @@
     }
 
     if (exitCode != 0) {
-        SpliceKit_log(@"[Transcript] ─── Parakeet failed (exit code %d) ───", exitCode);
+        SpliceKit_log(@"[Transcript] ─── %@ failed (exit code %d) ───", self.cliEngineName, exitCode);
 
         // Collect all stderr output for diagnostics: what the handler kept plus
         // anything still in the pipe.
@@ -608,41 +666,41 @@
                 if (why.count >= 8) break;
             }
             if (why.count > 0) {
-                userError = [NSString stringWithFormat:@"Parakeet could not transcribe any clip. %@",
-                    [why componentsJoinedByString:@"; "]];
+                userError = [NSString stringWithFormat:@"%@ could not transcribe any clip. %@",
+                    self.cliEngineName, [why componentsJoinedByString:@"; "]];
             }
         }
 
         if (userError) {
             // per-file reasons from the helper, above
         } else if ([allLower containsString:@"invalid audio"] || [allLower containsString:@"at least 1 second"]) {
-            userError = @"Audio clips are too short for transcription. Parakeet requires at least 1 second of audio per clip.";
+            userError = [NSString stringWithFormat:@"Audio clips are too short for transcription. %@ requires at least 1 second of audio per clip.", self.cliEngineName];
         } else if ([allLower containsString:@"no such file"] || [allLower containsString:@"file not found"]) {
             userError = @"Source media file not found. The media may have been moved or is offline. Check File > Relink Files in FCP.";
         } else if ([allLower containsString:@"network"] || [allLower containsString:@"connect"] ||
                    [allLower containsString:@"urlsession"] || [allLower containsString:@"timed out"]) {
-            userError = @"Could not download the Parakeet AI model. Check your internet connection and try again. "
-                        @"The model (~475 MB) is downloaded once and cached locally.";
+            userError = [NSString stringWithFormat:@"Could not download the %@ model. Check your internet connection and try again. "
+                        @"The model (%@) is downloaded once and cached locally.", self.cliEngineName, self.cliModelSize];
         } else if ([allLower containsString:@"rate-limited"] || [allLower containsString:@"rate limit"] ||
                    [allLower containsString:@"429"]) {
             userError = @"Model download was rate-limited. Wait a few minutes and try again.";
         } else if ([allLower containsString:@"disk"] || [allLower containsString:@"no space"] ||
                    [allLower containsString:@"not enough space"]) {
-            userError = @"Not enough disk space for the Parakeet model (~475 MB required). Free up some space and try again.";
+            userError = [NSString stringWithFormat:@"Not enough disk space for the %@ model (%@ required). Free up some space and try again.", self.cliEngineName, self.cliModelSize];
         } else if ([allLower containsString:@"memory"] || [allLower containsString:@"cannot allocate"] ||
                    [allLower containsString:@"out of memory"]) {
-            userError = @"Not enough memory to run Parakeet. Close other apps and try again, or switch to Apple Speech engine.";
+            userError = [NSString stringWithFormat:@"Not enough memory to run %@. Close other apps and try again, or pick a lighter engine in the dropdown.", self.cliEngineName];
         } else if ([allLower containsString:@"intel"] || [allLower containsString:@"neural engine"] ||
                    [allLower containsString:@"coreml"] || [allLower containsString:@"not supported"]) {
-            userError = @"Parakeet requires Apple Silicon (M1 or later). Switch to \"Apple Speech\" in the engine dropdown.";
+            userError = [NSString stringWithFormat:@"%@ requires Apple Silicon (M1 or later). Switch to \"Apple Speech\" in the engine dropdown.", self.cliEngineName];
         } else if ([allLower containsString:@"permission"] || [allLower containsString:@"denied"]) {
             userError = @"Permission denied reading media file. Check that FCP has Full Disk Access in System Settings > Privacy.";
         } else if ([allLower containsString:@"corrupt"] || [allLower containsString:@"invalid data"]) {
             userError = @"Media file appears to be corrupted or in an unsupported format.";
         } else if (exitCode == 9) {
-            userError = @"Parakeet was killed (likely out of memory). Close other apps and try again with fewer clips.";
+            userError = [NSString stringWithFormat:@"%@ was killed (likely out of memory). Close other apps and try again with fewer clips.", self.cliEngineName];
         } else if (exitCode == 6) {
-            userError = @"Parakeet crashed (SIGABRT). This may be a compatibility issue. Try switching to Apple Speech engine.";
+            userError = [NSString stringWithFormat:@"%@ crashed (SIGABRT). This may be a compatibility issue. Try another engine in the dropdown.", self.cliEngineName];
         } else {
             // Generic fallback with the actual output: the helper's ERROR: lines
             // (without its TIP: lines), else its last line.
@@ -666,20 +724,20 @@
                 }
             }
             if (lastLine.length > 0) {
-                userError = [NSString stringWithFormat:@"Parakeet transcription failed: %@", lastLine];
+                userError = [NSString stringWithFormat:@"%@ transcription failed: %@", self.cliEngineName, lastLine];
             } else {
-                userError = [NSString stringWithFormat:@"Parakeet transcription failed (exit code %d). "
-                    @"Try switching to \"Apple Speech\" engine.", exitCode];
+                userError = [NSString stringWithFormat:@"%@ transcription failed (exit code %d). "
+                    @"Try another engine in the dropdown.", self.cliEngineName, exitCode];
             }
         }
 
         SpliceKit_log(@"[Transcript] User-facing error: %@", userError);
-        SpliceKit_log(@"[Transcript] ─── End of Parakeet error ───");
+        SpliceKit_log(@"[Transcript] ─── End of %@ error ───", self.cliEngineName);
         [self setErrorState:userError];
         return;
     }
 
-    SpliceKit_log(@"[Transcript] Parakeet finished successfully (exit code 0)");
+    SpliceKit_log(@"[Transcript] %@ finished successfully (exit code 0)", self.cliEngineName);
 
     // Parse batch JSON output: [{"file":"path","words":[...]}, ...]
     NSData *jsonData;
@@ -690,8 +748,8 @@
     SpliceKit_log(@"[Transcript] Parsing output (%lu bytes)", (unsigned long)jsonData.length);
 
     if (jsonData.length == 0) {
-        SpliceKit_log(@"[Transcript] ERROR: Parakeet produced no output (0 bytes on stdout)");
-        [self setErrorState:@"Parakeet produced no output. The audio may be silent or too short. Try a longer clip."];
+        SpliceKit_log(@"[Transcript] ERROR: %@ produced no output (0 bytes on stdout)", self.cliEngineName);
+        [self setErrorState:[NSString stringWithFormat:@"%@ produced no output. The audio may be silent or too short. Try a longer clip.", self.cliEngineName]];
         return;
     }
 
@@ -715,13 +773,13 @@
     NSArray *batchResults = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&jsonError];
 
     if (![batchResults isKindOfClass:[NSArray class]]) {
-        SpliceKit_log(@"[Transcript] ERROR: Parakeet returned invalid JSON: %@",
+        SpliceKit_log(@"[Transcript] ERROR: %@ returned invalid JSON: %@", self.cliEngineName,
             jsonError ? jsonError.localizedDescription : @"not an array");
         // Log first 500 chars of what we got
         NSString *preview = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] ?: @"(binary data)";
         if (preview.length > 500) preview = [preview substringToIndex:500];
         SpliceKit_log(@"[Transcript] Raw output preview: %@", preview);
-        [self setErrorState:@"Parakeet returned unexpected output. Check the log for details."];
+        [self setErrorState:[NSString stringWithFormat:@"%@ returned unexpected output. Check the log for details.", self.cliEngineName]];
         return;
     }
 
@@ -765,8 +823,8 @@
                 [why addObject:[NSString stringWithFormat:@"%@: %@", file.lastPathComponent, errorsByFile[file]]];
                 if (why.count >= 8) break;
             }
-            [self setErrorState:[NSString stringWithFormat:@"Parakeet could not transcribe any clip. %@",
-                [why componentsJoinedByString:@"; "]]];
+            [self setErrorState:[NSString stringWithFormat:@"%@ could not transcribe any clip. %@",
+                self.cliEngineName, [why componentsJoinedByString:@"; "]]];
             return;
         }
     }
@@ -834,7 +892,7 @@
                 }
             }
 
-            SpliceKit_log(@"[Transcript] Parakeet got %lu words from %@",
+            SpliceKit_log(@"[Transcript] %@ got %lu words from %@", self.cliEngineName,
                 (unsigned long)wordsAdded, mediaURL.lastPathComponent);
             SpliceKitTranscriptDiag_logWordFiltering(mediaURL.lastPathComponent,
                 wordDicts, trimStart, mediaOrigin, clipDuration, wordsAdded);
@@ -883,14 +941,15 @@
         self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
         NSUInteger skippedCount = self.skippedSources.count;
-        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)%@",
-            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count,
-            skippedCount ? [NSString stringWithFormat:@", %lu clips skipped", (unsigned long)skippedCount] : @""]];
+        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (%@)%@%@",
+            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count, self.cliEngineName,
+            skippedCount ? [NSString stringWithFormat:@", %lu clips skipped", (unsigned long)skippedCount] : @"",
+            self.cliEngineNotice.length ? @" — Whisper is not installed, so Parakeet was used" : @""]];
 
-        SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
+        SpliceKit_log(@"[Transcript] %@ transcription complete: %lu words, %lu silences", self.cliEngineName,
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
         SpliceKitTranscriptDiag_logSummary(
-            [NSString stringWithFormat:@"Parakeet %@", self.parakeetModelVersion ?: @"v3"],
+            self.cliEngineName,
             -[diagStartTime timeIntervalSinceNow],
             self.mutableWords.count,
             self.mutableSilences.count,
@@ -900,7 +959,7 @@
     });
 }
 
-// Transcribe one file with the Parakeet CLI.
+// Transcribe one file with the Parakeet or Whisper CLI.
 //
 // Deliberately separate from performParakeetTranscription, which is built
 // around the timeline: it collects clips, deduplicates their source media,
@@ -909,22 +968,22 @@
 // reusing it would mean threading a synthetic clip through several hundred
 // lines of timeline-specific code. Single-file mode is one CLI invocation.
 - (void)transcribeFileWithParakeet:(NSURL *)audioURL timelineStart:(double)timelineStart generation:(NSUInteger)generation {
-    NSString *binaryPath = [self parakeetTranscriberPath];
+    NSString *binaryPath = [self prepareCLIEngine];
     if (!binaryPath) {
-        [self setErrorState:@"Parakeet transcriber not installed.\n\n"
+        [self setErrorState:[NSString stringWithFormat:@"%@ transcriber not installed.\n\n"
                             "Build and install it from your SpliceKit checkout:\n"
-                            "    make install"];
-        SpliceKit_log(@"[Transcript] ERROR: parakeet-transcriber not found for single-file transcription");
+                            "    make install", self.cliEngineName]];
+        SpliceKit_log(@"[Transcript] ERROR: %@ helper not found for single-file transcription", self.cliEngineName);
         return;
     }
 
-    SpliceKit_log(@"[Transcript] Parakeet single file: %@", audioURL.path);
+    SpliceKit_log(@"[Transcript] %@ single file: %@", self.cliEngineName, audioURL.path);
     SpliceKitTranscriptDiag_logBinaryInfo(binaryPath);
 
     NSMutableArray *args = [NSMutableArray arrayWithObjects:audioURL.path, @"--progress", nil];
-    if (self.speakerDetectionEnabled) [args addObject:@"--speakers"];
+    if (self.cliSpeakers) [args addObject:@"--speakers"];
     [args addObject:@"--model"];
-    [args addObject:self.parakeetModelVersion ?: @"v3"];
+    [args addObject:self.cliModelArg];
 
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = binaryPath;
@@ -969,7 +1028,7 @@
         self.activeHelperTask = task;
         [task waitUntilExit];
     } @catch (NSException *e) {
-        [self setErrorState:[NSString stringWithFormat:@"Could not run parakeet-transcriber: %@", e.reason]];
+        [self setErrorState:[NSString stringWithFormat:@"Could not run %@: %@", binaryPath.lastPathComponent, e.reason]];
         return;
     }
     outPipe.fileHandleForReading.readabilityHandler = nil;
@@ -1007,9 +1066,9 @@
                       task.terminationStatus, detail.length ? @"; " : @"", detail];
         }
         [self setErrorState:[NSString stringWithFormat:
-            @"Parakeet failed (exit %d)%@%@", task.terminationStatus,
+            @"%@ failed (exit %d)%@%@", self.cliEngineName, task.terminationStatus,
             detail.length ? @": " : @"", detail]];
-        SpliceKit_log(@"[Transcript] Parakeet single-file failed (%d): %@", task.terminationStatus, stderrText);
+        SpliceKit_log(@"[Transcript] %@ single-file failed (%d): %@", self.cliEngineName, task.terminationStatus, stderrText);
         return;
     }
 
@@ -1017,7 +1076,7 @@
     id parsed = [NSJSONSerialization JSONObjectWithData:stdoutData options:0 error:&jsonError];
     if (![parsed isKindOfClass:[NSArray class]]) {
         [self setErrorState:[NSString stringWithFormat:
-            @"Parakeet returned output that could not be parsed: %@",
+            @"%@ returned output that could not be parsed: %@", self.cliEngineName,
             jsonError.localizedDescription ?: @"not a JSON array"]];
         return;
     }
@@ -1054,10 +1113,10 @@
         [words addObject:word];
     }
 
-    SpliceKit_log(@"[Transcript] Parakeet single file: %lu words", (unsigned long)words.count);
+    SpliceKit_log(@"[Transcript] %@ single file: %lu words", self.cliEngineName, (unsigned long)words.count);
 
     if (words.count == 0) {
-        [self setErrorState:@"Parakeet found no speech in that file."];
+        [self setErrorState:[NSString stringWithFormat:@"%@ found no speech in that file.", self.cliEngineName]];
         return;
     }
 

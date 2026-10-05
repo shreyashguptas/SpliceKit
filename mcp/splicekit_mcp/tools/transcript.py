@@ -65,6 +65,12 @@ def _transcript_header_lines(r: dict) -> list:
         lines.append(f"Source: file {src.get('path', '?')}")
     elif src:
         lines.append("Source: timeline" + (" (primary storyline only)" if src.get("primaryStorylineOnly") else ""))
+    engine = r.get("engine")
+    if engine:
+        model = r.get("whisperModel") or r.get("parakeetModel")
+        lines.append(f"Engine: {engine}" + (f" {model}" if model else ""))
+    if r.get("engineNotice"):
+        lines.append(f"Engine fallback: {r['engineNotice']}")
     lines.append(f"Words: {r.get('wordCount', 0)}")
     lines.append(f"Silences: {r.get('silenceCount', 0)}")
     lines.append(f"Silence threshold: {r.get('silenceThreshold', 0.3):.1f}s")

@@ -52,6 +52,7 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
     SpliceKitTranscriptEngineFCPNative = 0,   // FCP's built-in AASpeechAnalyzer (fast, on-device)
     SpliceKitTranscriptEngineAppleSpeech,     // SFSpeechRecognizer (slower, network-capable)
     SpliceKitTranscriptEngineParakeet,        // NVIDIA Parakeet TDT 0.6B via FluidAudio (on-device, auto-downloads)
+    SpliceKitTranscriptEngineWhisper,         // OpenAI Whisper via WhisperKit (on-device, auto-downloads; no speaker labels)
 };
 
 @interface SpliceKitTranscriptPanel : NSObject
@@ -94,8 +95,14 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 
 // Engine selection
-@property (nonatomic) SpliceKitTranscriptEngine engine; // default: SpliceKitTranscriptEngineFCPNative
+@property (nonatomic) SpliceKitTranscriptEngine engine; // default: SpliceKitTranscriptEngineWhisper (large-v3)
 @property (nonatomic, copy) NSString *parakeetModelVersion; // @"v3" (multilingual) or @"v2" (English)
+@property (nonatomic, copy) NSString *whisperModel; // @"large-v3" (highest quality) or @"large-v3-turbo" (faster)
+// The engine as transcript state and the RPCs name it: fcpNative, appleSpeech, parakeet, whisper.
+- (NSString *)engineIdentifier;
+// Puts the open panel's engine dropdown and speaker checkbox in step with `engine`
+// after it was changed from outside the panel (the transcript.setEngine RPC).
+- (void)refreshEngineControls;
 
 // Silence operations
 @property (nonatomic) double silenceThreshold;  // seconds, default 0.3

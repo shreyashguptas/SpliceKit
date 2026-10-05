@@ -311,8 +311,7 @@ static NSDictionary *SpliceKit_clipInfoTranscriptWords(double start, double end,
             case SpliceKitTranscriptStatusReady:        out[@"status"] = @"ready"; break;
             case SpliceKitTranscriptStatusError:        out[@"status"] = @"error"; break;
         }
-        out[@"engine"] = (panel.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
-                         (panel.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
+        out[@"engine"] = [panel engineIdentifier];
 
         NSArray<SpliceKitTranscriptWord *> *words = panel.words;
         out[@"timelineWordCount"] = @(words.count);

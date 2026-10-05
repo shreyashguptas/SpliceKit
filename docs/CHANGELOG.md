@@ -9,6 +9,19 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **The Transcript Editor can transcribe with Whisper large-v3, and does by default.** The
+  engine dropdown now offers Whisper large-v3 (most accurate) and Whisper large-v3 turbo
+  (faster) next to Parakeet, FCP Native and Apple Speech, through the same
+  `whisper-transcriber` helper the caption panel uses; `set_transcript_engine` takes
+  `whisper` / `whisperLargeV3` and `whisperLargeV3Turbo`. Whisper does not label speakers,
+  so the Speakers checkbox is off for it; Parakeet still does. When Whisper is not
+  installed a run falls back to Parakeet v3, and the status line and `get_transcript`
+  (`engineNotice`) say so. The panel's status and error messages name the engine that ran,
+  the dropdown follows an engine set over MCP, and the panel now also finds a Parakeet
+  helper installed under `~/Library/Application Support/SpliceKit/tools/`. The engine
+  picked in the dropdown is remembered across launches (one set over MCP lasts the
+  session), and opening a project with a saved transcript no longer switches the engine
+  to the one that made it.
 - **`remove_browser_clip`: take a clip back out of a library.** SpliceKit could put clips
   into a library and never remove them, so every `import_media` and `import_url` call left
   one behind and nothing short of Final Cut Pro's own UI could clear it. The bridge RPC is
