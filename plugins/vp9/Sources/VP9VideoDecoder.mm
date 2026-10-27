@@ -53,6 +53,14 @@ struct AlignedBaseClass {
     CMBaseClass baseClass;
 };
 
+// The decoder class is 4-byte packed like CMBaseClass: its function pointers follow
+// a 4-byte version, so without the same lead-in they sit off 8-byte boundaries and
+// the linker cannot fix them up at load time on x86_64 ("pointer not aligned").
+struct AlignedDecoderClass {
+    uint8_t pad[kCMBasePadSize];
+    VTVideoDecoderClass decoderClass;
+};
+
 struct VP9Decoder {
     CFAllocatorRef allocator { nullptr };
     VTVideoDecoderSession ourSession { nullptr };
@@ -342,17 +350,20 @@ static OSStatus FinishDelayedFrames(VTVideoDecoderRef ref) {
     return noErr;
 }
 
-static const VTVideoDecoderClass kDecoderClass = {
-    kVTVideoDecoder_ClassVersion_1,
-    StartSession, DecodeFrame,
-    CopySupportedPropertyDictionary, SetDecoderProperties, CopySerializableProperties,
-    CanAcceptFormatDescription, FinishDelayedFrames,
-    nullptr, nullptr, nullptr,
+static const AlignedDecoderClass kDecoderClass = {
+    {},
+    {
+        kVTVideoDecoder_ClassVersion_1,
+        StartSession, DecodeFrame,
+        CopySupportedPropertyDictionary, SetDecoderProperties, CopySerializableProperties,
+        CanAcceptFormatDescription, FinishDelayedFrames,
+        nullptr, nullptr, nullptr,
+    }
 };
 
 static const VTVideoDecoderVTable kDecoderVTable = {
     { nullptr, &kBaseClass.baseClass },
-    &kDecoderClass,
+    &kDecoderClass.decoderClass,
 };
 
 } // namespace

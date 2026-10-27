@@ -137,6 +137,10 @@ if $CHECK_ONLY; then
     else
         warn "No config file yet at: $CLAUDE_CONFIG"
     fi
+elif [[ -f "$CLAUDE_CONFIG" ]] && "$(host_python)" "$CONFIG_TOOL" matches "$CLAUDE_CONFIG" "$VENV_PYTHON" "$MCP_SERVER"; then
+    # Already pointing at this checkout's server with this interpreter: nothing to
+    # write, so it does not matter that Claude Desktop is running.
+    log "Already configured: $CLAUDE_CONFIG (splicekit -> $MCP_SERVER)"
 elif pgrep -x Claude >/dev/null 2>&1; then
     # Claude Desktop owns this file and rewrites it wholesale when it saves its
     # own preferences, dropping keys it did not have in memory. Writing while it

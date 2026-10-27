@@ -8,6 +8,45 @@
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitServerInternal.h"
 
+// Final Cut Pro's main window: a PEWindow. [NSApp mainWindow] is nil while FCP is in
+// the background, or one of SpliceKit's own windows when that has focus, and the
+// fallback used to take the widest visible window: SpliceKit's Sections bar is a
+// borderless child panel a few points wider than the main window, so with it shown
+// every capture came back as a 24-pixel strip. So: the main window if it is FCP's,
+// else the largest visible PEWindow, else the largest visible top-level window that
+// is not a panel.
+static NSWindow *SpliceKit_captureMainWindow(void) {
+    Class feWindowClass = objc_getClass("PEWindow");
+    NSWindow *mainWindow = [NSApp mainWindow];
+    if (mainWindow && feWindowClass && [mainWindow isKindOfClass:feWindowClass]) return mainWindow;
+    NSWindow *bestFCP = nil, *bestOther = nil;
+    CGFloat bestFCPArea = 0, bestOtherArea = 0;
+    for (NSWindow *w in [NSApp windows]) {
+        if (![w isVisible] || w.parentWindow || [w isKindOfClass:[NSPanel class]]) continue;
+        CGFloat area = w.frame.size.width * w.frame.size.height;
+        if (feWindowClass && [w isKindOfClass:feWindowClass]) {
+            if (area > bestFCPArea) { bestFCPArea = area; bestFCP = w; }
+        } else if (area > bestOtherArea) {
+            bestOtherArea = area; bestOther = w;
+        }
+    }
+    return bestFCP ?: (mainWindow ?: bestOther);
+}
+
+// One of Final Cut Pro's own windows, as composited on screen, Metal content (Viewer,
+// timeline) included. CGWindowListCreateImage is deprecated in favour of
+// ScreenCaptureKit, but that needs the Screen Recording permission and is asynchronous,
+// while this, for the app's own windows, needs neither and still works (macOS 27.2,
+// FCP 12.4). NSView's cacheDisplayInRect: is no substitute: it leaves Metal views blank.
+// The one call lives here so moving to ScreenCaptureKit later is a single change.
+static CGImageRef SpliceKit_captureOwnWindow(CGWindowID windowID) CF_RETURNS_RETAINED {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return CGWindowListCreateImage(CGRectNull, kCGWindowListOptionIncludingWindow, windowID,
+                                   kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution);
+#pragma clang diagnostic pop
+}
+
 #pragma mark - Capture Viewer Screenshot
 
 static NSView *SpliceKit_findPlayerViewForCapture(NSWindow *mainWindow,
@@ -215,14 +254,7 @@ NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
     SpliceKit_executeOnMainThread(^{
         @try {
             // Find the main FCP window
-            NSWindow *mainWindow = [NSApp mainWindow];
-            if (!mainWindow) {
-                for (NSWindow *w in [NSApp windows]) {
-                    if ([w isVisible] && (!mainWindow || w.frame.size.width > mainWindow.frame.size.width)) {
-                        mainWindow = w;
-                    }
-                }
-            }
+            NSWindow *mainWindow = SpliceKit_captureMainWindow();
             if (!mainWindow) {
                 result = @{@"error": @"No visible FCP window found"};
                 return;
@@ -230,14 +262,7 @@ NSDictionary *SpliceKit_handleCaptureViewer(NSDictionary *params) {
 
             CGWindowID windowID = (CGWindowID)[mainWindow windowNumber];
 
-            // Capture the full window using CGWindowListCreateImage (captures GPU/Metal content)
-            // CGRectNull = capture the entire window bounds
-            CGImageRef fullImage = CGWindowListCreateImage(
-                CGRectNull,
-                kCGWindowListOptionIncludingWindow,
-                windowID,
-                kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution
-            );
+            CGImageRef fullImage = SpliceKit_captureOwnWindow(windowID);
 
             if (!fullImage) {
                 result = @{@"error": @"CGWindowListCreateImage returned nil — screen recording permission may be needed"};
@@ -335,14 +360,7 @@ NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
     SpliceKit_executeOnMainThread(^{
         @try {
             // Find the main FCP window
-            NSWindow *mainWindow = [NSApp mainWindow];
-            if (!mainWindow) {
-                for (NSWindow *w in [NSApp windows]) {
-                    if ([w isVisible] && (!mainWindow || w.frame.size.width > mainWindow.frame.size.width)) {
-                        mainWindow = w;
-                    }
-                }
-            }
+            NSWindow *mainWindow = SpliceKit_captureMainWindow();
             if (!mainWindow) {
                 result = @{@"error": @"No visible FCP window found"};
                 return;
@@ -350,13 +368,7 @@ NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
 
             CGWindowID windowID = (CGWindowID)[mainWindow windowNumber];
 
-            // Capture the full window using CGWindowListCreateImage (captures GPU/Metal content)
-            CGImageRef fullImage = CGWindowListCreateImage(
-                CGRectNull,
-                kCGWindowListOptionIncludingWindow,
-                windowID,
-                kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution
-            );
+            CGImageRef fullImage = SpliceKit_captureOwnWindow(windowID);
 
             if (!fullImage) {
                 result = @{@"error": @"CGWindowListCreateImage returned nil — screen recording permission may be needed"};
@@ -478,14 +490,7 @@ NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
     SpliceKit_executeOnMainThread(^{
         @try {
             // Find the main FCP window
-            NSWindow *mainWindow = [NSApp mainWindow];
-            if (!mainWindow) {
-                for (NSWindow *w in [NSApp windows]) {
-                    if ([w isVisible] && (!mainWindow || w.frame.size.width > mainWindow.frame.size.width)) {
-                        mainWindow = w;
-                    }
-                }
-            }
+            NSWindow *mainWindow = SpliceKit_captureMainWindow();
             if (!mainWindow) {
                 result = @{@"error": @"No visible FCP window found"};
                 return;
@@ -493,12 +498,7 @@ NSDictionary *SpliceKit_handleCaptureInspector(NSDictionary *params) {
 
             CGWindowID windowID = (CGWindowID)[mainWindow windowNumber];
 
-            CGImageRef fullImage = CGWindowListCreateImage(
-                CGRectNull,
-                kCGWindowListOptionIncludingWindow,
-                windowID,
-                kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution
-            );
+            CGImageRef fullImage = SpliceKit_captureOwnWindow(windowID);
 
             if (!fullImage) {
                 result = @{@"error": @"CGWindowListCreateImage returned nil — screen recording permission may be needed"};

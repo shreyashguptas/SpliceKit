@@ -9,6 +9,14 @@
 @implementation SpliceKitCaptionPanel (Transcription)
 
 - (void)transcriptionFinishedWithWords:(NSArray<SpliceKitTranscriptWord *> *)words {
+    // The transcriber finishes on a background queue, and what follows (regrouping,
+    // saving the draft for the open project) asks Final Cut Pro which timeline is open,
+    // which can lay out its window. AppKit aborts on layout off the main thread: that
+    // crashed FCP at the end of a Whisper caption run on 12.4.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self transcriptionFinishedWithWords:words]; });
+        return;
+    }
     NSArray<SpliceKitTranscriptWord *> *normalizedWords =
         [self normalizedCaptionWordsFromWords:words context:@"Transcriber output"];
     @synchronized (self.mutableWords) {

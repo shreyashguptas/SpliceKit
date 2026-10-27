@@ -421,6 +421,15 @@ static void SpliceKit_dualTimelineRelaxBrowserWidthConstraintsForContainer(id co
 
 static void SpliceKit_dualTimelineRelaxOuterBrowserWidthConstraintsForContainer(id container) {
     if (!container) return;
+    // This edits constraints and lays the window out, and it runs as a side effect of
+    // looking up the active timeline, which callers on background queues do (the caption
+    // transcriber did, and AppKit aborted FCP). Off the main thread, do it there instead.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SpliceKit_dualTimelineRelaxOuterBrowserWidthConstraintsForContainer(container);
+        });
+        return;
+    }
     NSString *containerIdentifier = SpliceKit_dualTimelineIdentifierForContainer(container) ?: @"";
     if (![containerIdentifier isEqualToString:kSpliceKitDualEditorContainerID]) {
         return;

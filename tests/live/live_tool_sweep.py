@@ -515,8 +515,11 @@ CASES.update({
                          kind="read", timeout=180),
     "analyze_song_structure": Case(args={"file_path": "$AUDIO_FILE"},
                                    kind="read", timeout=180),
+    # It shows the Sections bar over the timeline; leaving it up made every later
+    # capture in the session pick that strip.
     "song_structure_sections": Case(args={"file_path": "$AUDIO_FILE"},
-                                    kind="read", timeout=180),
+                                    kind="read", timeout=180,
+                                    cleanup=[("sections_hide", {})]),
     "beat_sync_blade": Case(args={"file_path": "$AUDIO_FILE", "dry_run": True},
                             kind="read", timeout=180),
     # toggle_structure_blocks does the removal here, which is the only way its real

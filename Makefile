@@ -13,6 +13,15 @@ SPLICEKIT_VERSION = $(shell tr -d ' \n' < VERSION)
 VERSION_DEFINE = -DSPLICEKIT_VERSION=\"$(SPLICEKIT_VERSION)\"
 DSYM = $(OUTPUT).dSYM
 
+# Each compile prints one short line ("  CC  Sources/Core/SpliceKit.m"); make V=1 shows
+# the full compiler commands instead.
+V ?= 0
+ifeq ($(V),1)
+Q =
+else
+Q = @
+endif
+
 # Read canonical source list from Sources/SOURCES.txt
 SOURCES = $(addprefix Sources/, $(shell grep -v '^\#' Sources/SOURCES.txt | grep -v '^$$'))
 # Every object depends on every header: they are small, and a changed struct or
@@ -131,7 +140,9 @@ all: $(OUTPUT)
 
 symbols: $(DSYM)
 
+# The @: recipes keep make from printing "Nothing to be done for 'tools'" on every deploy.
 tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(AUDIO_LEVELS) $(BEAT_DETECTOR)
+	@:
 
 # ---------------------------------------------------------------------------
 # MCP server setup (Python venv + dependencies)
@@ -245,23 +256,20 @@ url-import-tools:
 	@YTDLP_PATH="$$(command -v yt-dlp || true)"; \
 	if [ -n "$$YTDLP_PATH" ]; then \
 		ln -sf "$$YTDLP_PATH" "$(TOOLS_DIR)/yt-dlp"; \
-		echo "Linked yt-dlp -> $$YTDLP_PATH"; \
 	else \
-		echo "yt-dlp not found in PATH. Install with: brew install yt-dlp"; \
+		echo "[i] Optional: yt-dlp is not installed, so import_url cannot fetch YouTube and similar sites (brew install yt-dlp)"; \
 	fi
 	@FFMPEG_PATH="$$(command -v ffmpeg || true)"; \
 	if [ -n "$$FFMPEG_PATH" ]; then \
 		ln -sf "$$FFMPEG_PATH" "$(TOOLS_DIR)/ffmpeg"; \
-		echo "Linked ffmpeg -> $$FFMPEG_PATH"; \
 	else \
-		echo "ffmpeg not found in PATH. Install with: brew install ffmpeg"; \
+		echo "[i] Optional: ffmpeg is not installed, so import_url cannot convert downloads (brew install ffmpeg)"; \
 	fi
 	@FFPROBE_PATH="$$(command -v ffprobe || true)"; \
 	if [ -n "$$FFPROBE_PATH" ]; then \
 		ln -sf "$$FFPROBE_PATH" "$(TOOLS_DIR)/ffprobe"; \
-		echo "Linked ffprobe -> $$FFPROBE_PATH"; \
 	else \
-		echo "ffprobe not found in PATH. Install with: brew install ffmpeg"; \
+		echo "[i] Optional: ffprobe is not installed (it comes with ffmpeg: brew install ffmpeg)"; \
 	fi
 
 $(BUILD_DIR):
@@ -274,45 +282,53 @@ $(BUILD_DIR)/obj: | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/obj
 
 $(SILENCE_DETECTOR): helpers/silence-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(SILENCE_DETECTOR) helpers/silence-detector.swift
+	@echo "  SWIFT  helpers/silence-detector.swift"
+	$(Q)swiftc -O -suppress-warnings -o $(SILENCE_DETECTOR) helpers/silence-detector.swift
 	@echo "Built: $(SILENCE_DETECTOR)"
 
 $(STRUCTURE_ANALYZER): helpers/structure-analyzer.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) helpers/structure-analyzer.swift
+	@echo "  SWIFT  helpers/structure-analyzer.swift"
+	$(Q)swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) helpers/structure-analyzer.swift
 	@echo "Built: $(STRUCTURE_ANALYZER)"
 
 $(BEAT_DETECTOR): helpers/beat-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) helpers/beat-detector.swift
+	@echo "  SWIFT  helpers/beat-detector.swift"
+	$(Q)swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) helpers/beat-detector.swift
 	@codesign --force --sign - $(BEAT_DETECTOR) >/dev/null 2>&1 || true
 	@echo "Built: $(BEAT_DETECTOR)"
 
 # Peak/RMS levels of a media file's audio (timeline.getAudioLevels shells out to it:
 # in-process AVFoundation audio decoding deadlocks inside Final Cut Pro).
 $(AUDIO_LEVELS): helpers/audio-levels.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(AUDIO_LEVELS) helpers/audio-levels.swift
+	@echo "  SWIFT  helpers/audio-levels.swift"
+	$(Q)swiftc -O -suppress-warnings -o $(AUDIO_LEVELS) helpers/audio-levels.swift
 	@codesign --force --sign - $(AUDIO_LEVELS) >/dev/null 2>&1 || true
 	@echo "Built: $(AUDIO_LEVELS)"
 
 # Lua static library — compiled as C (no -fobjc-arc)
 $(BUILD_DIR)/lua/%.o: $(LUA_DIR)/%.c | $(BUILD_DIR)/lua
-	$(CC) $(ARCHS) $(MIN_VERSION) -DLUA_USE_MACOSX -O2 -Wall -c $< -o $@
+	@echo "  CC  $<"
+	$(Q)$(CC) $(ARCHS) $(MIN_VERSION) -DLUA_USE_MACOSX -O2 -Wall -c $< -o $@
 
 $(LUA_LIB): $(LUA_OBJS) | $(BUILD_DIR)
-	libtool -static -o $@ $^
+	$(Q)libtool -static -o $@ $^
 	@echo "Built: $(LUA_LIB)"
 
 $(BUILD_DIR)/obj/%.o: Sources/%.m $(HEADERS) | $(BUILD_DIR)/obj
 	@mkdir -p $(@D)
-	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
+	@echo "  CC  $<"
+	$(Q)$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		$(INCLUDES) -I $(LUA_DIR) -c $< -o $@
 
 $(BUILD_DIR)/obj/%.o: Sources/%.mm $(HEADERS) | $(BUILD_DIR)/obj
 	@mkdir -p $(@D)
-	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
+	@echo "  CC  $<"
+	$(Q)$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		$(INCLUDES) -I $(LUA_DIR) -c $< -o $@
 
 $(OUTPUT): $(OBJS) $(LUA_LIB) | $(BUILD_DIR)
-	$(CC) $(ARCHS) $(MIN_VERSION) $(FRAMEWORKS) $(LINKER_FLAGS) \
+	@echo "  LD  $(OUTPUT)"
+	$(Q)$(CC) $(ARCHS) $(MIN_VERSION) $(FRAMEWORKS) $(LINKER_FLAGS) \
 		$(INSTALL_NAME) $(OBJS) $(LUA_LIB) $(CPP_LIBS) -o $(OUTPUT)
 	@# -undefined dynamic_lookup lets calls into FCP internals resolve at load time,
 	@# but it also silently permits unresolved SpliceKit_* symbols (missing .m files
@@ -326,8 +342,7 @@ $(OUTPUT): $(OBJS) $(LUA_LIB) | $(BUILD_DIR)
 		rm -f $(OUTPUT); \
 		exit 1; \
 	fi
-	@echo "Built: $(OUTPUT)"
-	@file $(OUTPUT)
+	@echo "Built: $(OUTPUT) ($$(lipo -archs $(OUTPUT)))"
 
 $(DSYM): $(OUTPUT)
 	dsymutil "$(OUTPUT)" -o "$(DSYM)"
@@ -339,20 +354,24 @@ clean:
 $(VP9_DECODER_EXEC): $(VP9_DECODER_SOURCES) $(VP9_DECODER_INFO) | $(BUILD_DIR)
 	@mkdir -p "$(VP9_DECODER_BUNDLE)/Contents/MacOS"
 	@cp "$(VP9_DECODER_INFO)" "$(VP9_DECODER_BUNDLE)/Contents/Info.plist"
-	$(CC) $(VP9_CFLAGS) $(VP9_FRAMEWORKS) $(VP9_DECODER_SOURCES) $(VP9_LDFLAGS) -o "$(VP9_DECODER_EXEC)"
-	@codesign --force --sign - "$(VP9_DECODER_BUNDLE)" >/dev/null
+	@echo "  CC  $(VP9_DECODER_SOURCES)"
+	$(Q)$(CC) $(VP9_CFLAGS) $(VP9_FRAMEWORKS) $(VP9_DECODER_SOURCES) $(VP9_LDFLAGS) -o "$(VP9_DECODER_EXEC)"
+	@out="$$(codesign --force --sign - "$(VP9_DECODER_BUNDLE)" 2>&1)" || { echo "$$out" >&2; exit 1; }
 	@echo "Built: $(VP9_DECODER_BUNDLE)"
 
 vp9: $(VP9_DECODER_EXEC)
+	@:
 
 $(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
 	@mkdir -p "$(MKV_IMPORT_BUNDLE)/Contents/MacOS"
 	@cp "$(MKV_IMPORT_INFO)" "$(MKV_IMPORT_BUNDLE)/Contents/Info.plist"
-	$(CC) $(MKV_CFLAGS) $(MKV_FRAMEWORKS) $(MKV_IMPORT_SOURCES) $(MKV_LDFLAGS) -o "$(MKV_IMPORT_EXEC)"
-	@codesign --force --sign - "$(MKV_IMPORT_BUNDLE)" >/dev/null
+	@echo "  CC  $(MKV_IMPORT_SOURCES)"
+	$(Q)$(CC) $(MKV_CFLAGS) $(MKV_FRAMEWORKS) $(MKV_IMPORT_SOURCES) $(MKV_LDFLAGS) -o "$(MKV_IMPORT_EXEC)"
+	@out="$$(codesign --force --sign - "$(MKV_IMPORT_BUNDLE)" 2>&1)" || { echo "$$out" >&2; exit 1; }
 	@echo "Built: $(MKV_IMPORT_BUNDLE)"
 
 mkv: $(MKV_IMPORT_EXEC)
+	@:
 
 # Install this checkout into the patched app: the framework, the helper CLIs,
 # the plugin bundles, the Lua scripts, then re-sign. `make install` runs this
@@ -362,10 +381,10 @@ mkv: $(MKV_IMPORT_EXEC)
 deploy: $(OUTPUT)
 	@test -d "$(MODDED_APP)" || { echo "[X] No patched app at $(MODDED_APP) — run 'make install' first"; exit 1; }
 	@echo "=== Deploying SpliceKit $(SPLICEKIT_VERSION) into $(MODDED_APP) ==="
-	@$(MAKE) -k tools vp9 mkv || echo "[!] Some helpers or plugin bundles did not build; their features will report them missing."
+	@$(MAKE) --no-print-directory -k tools vp9 mkv || echo "[!] Some helpers or plugin bundles did not build; their features will report them missing."
 	@rm -rf "$(FW_DIR)"
 	@mkdir -p "$(FW_DIR)/Versions/A/Resources"
-	cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
+	@cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
 	@# -n so repeated deploys replace the symlink instead of following it into Versions/A.
 	@cd "$(FW_DIR)/Versions" && ln -sfn A Current
 	@cd "$(FW_DIR)" && ln -sfn Versions/Current/SpliceKit SpliceKit
@@ -386,7 +405,7 @@ deploy: $(OUTPUT)
 	@$(call plist_set,NSSpeechRecognitionUsageDescription,SpliceKit uses speech recognition for transcript editing inside Final Cut Pro.)
 	@# Helper CLIs. The dylib looks in the framework's Resources first.
 	@mkdir -p "$(TOOLS_DIR)"
-	@$(MAKE) url-import-tools
+	@$(MAKE) --no-print-directory url-import-tools
 	@for h in silence-detector structure-analyzer audio-levels beat-detector; do \
 		cp "$(BUILD_DIR)/$$h" "$(TOOLS_DIR)/$$h" 2>/dev/null || true; \
 	done
