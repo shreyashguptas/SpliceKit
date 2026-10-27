@@ -989,8 +989,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
     NSDictionary *state = SpliceKit_loadSequenceState(sequence);
     NSDictionary *captions = [state[@"captions"] isKindOfClass:[NSDictionary class]] ? state[@"captions"] : nil;
     NSDictionary *transcript = [state[@"transcript"] isKindOfClass:[NSDictionary class]] ? state[@"transcript"] : nil;
-    NSString *sequenceKey = [state[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]]
-        ? state[@"sequenceIdentity"][@"cacheKey"] : nil;
+    NSString *sequenceKey = SpliceKit_sequenceIdentity(sequence)[@"cacheKey"];
     if (!captions && !transcript) return;
     if (sequenceKey.length > 0 &&
         [self.lastRestoredSequenceKey isEqualToString:sequenceKey] &&
@@ -1070,8 +1069,7 @@ const double kWP_FadeOutDuration = 5.0 / 30.0;
         ? captions[@"generatedRuntimeEntries"] : nil;
     NSDictionary *styleDict = [captions[@"generatedStyle"] isKindOfClass:[NSDictionary class]]
         ? captions[@"generatedStyle"] : nil;
-    NSString *sequenceKey = [state[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]]
-        ? state[@"sequenceIdentity"][@"cacheKey"] : nil;
+    NSString *sequenceKey = SpliceKit_sequenceIdentity(sequence)[@"cacheKey"];
     BOOL panelVisible = (self.panel && self.panel.isVisible);
     SpliceKit_log(@"[Captions] Persisted caption repair begin: sequenceKey=%@ panelVisible=%@ runtimeEntries=%lu",
                   sequenceKey ?: @"<nil>",
