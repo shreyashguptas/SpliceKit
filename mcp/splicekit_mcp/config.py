@@ -1,5 +1,7 @@
 """Where the bridge listens, SpliceKit's version, and the repository root."""
 
+import hashlib
+import hmac
 import sys
 import os
 import logging
@@ -32,10 +34,12 @@ def _bridge_address() -> tuple:
 SPLICEKIT_HOST, SPLICEKIT_PORT = _bridge_address()
 
 
-# The bridge runs nothing for a connection until a request carries its key ("auth"):
-# 64 hex characters the patched Final Cut Pro writes here on first launch, readable by
-# this user only. Read on every connect, so a key made after this server started (FCP
-# installed or relaunched later) is picked up. SPLICEKIT_BRIDGE_KEY overrides the file.
+# The bridge runs nothing for a connection until the client proves it holds the bridge
+# key: 64 hex characters the patched Final Cut Pro writes here on first launch, readable
+# by this user only. The key never crosses the socket: each connection opens with a
+# bridge.hello nonce and requests carry bridge_answer(nonce) as "auth". Read on every
+# connect, so a key made after this server started is picked up. SPLICEKIT_BRIDGE_KEY
+# overrides the file.
 BRIDGE_KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
 
 
@@ -49,6 +53,15 @@ def bridge_key() -> str:
             return handle.read().strip()
     except OSError:
         return ""
+
+
+def bridge_answer(nonce: str, key: str = None) -> str:
+    """HMAC-SHA256(key, nonce) in lowercase hex: the "auth" the bridge accepts for the
+    connection that sent `nonce`. "" without a nonce or a key (the bridge then refuses)."""
+    key = bridge_key() if key is None else key
+    if not nonce or not key:
+        return ""
+    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
 
 
 # The repository root (the directory holding VERSION, Makefile and build/). This file

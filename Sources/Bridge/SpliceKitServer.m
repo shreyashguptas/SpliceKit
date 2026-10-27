@@ -19,6 +19,7 @@
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitServerInternal.h"
 #import "SpliceKitPlugins.h"
+#import <CommonCrypto/CommonHMAC.h>
 
 #define SPLICEKIT_TCP_PORT 9876
 
@@ -522,10 +523,18 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 // Loopback alone did not keep strangers out. A web page can POST to
 // http://127.0.0.1:9876, and this loop used to answer each HTTP header line with a
 // parse error and then run the JSON body, lua.execute included. So a line that is not
-// a JSON object now closes the connection, and nothing runs until a request carries
-// the bridge key ("auth": "<key>"): 256 random bits in a file only this user can read,
-// made on first launch and kept, so clients survive restarts. One good key
-// authenticates the rest of the connection.
+// a JSON object now closes the connection, and nothing runs until the client proves it
+// holds the bridge key: 256 random bits in a file only this user can read, made on
+// first launch and kept, so clients survive restarts.
+//
+// The proof is a challenge, so the key itself never crosses the socket. Every
+// connection opens with a notification from the bridge,
+//     {"jsonrpc":"2.0","method":"bridge.hello","params":{"nonce":"<64 hex>","auth":"hmac-sha256"}}
+// and the client's requests carry "auth": HMAC-SHA256(key, nonce) in lowercase hex,
+// with the key file's 64 characters as the HMAC key and the nonce's 64 as the message.
+// A program that grabbed the port while Final Cut Pro was closed would only ever see
+// an answer to its own nonce, worthless against the real bridge's fresh one. One good
+// answer authenticates the rest of the connection.
 //
 
 NSString *SpliceKit_bridgeKeyPath(void) {
@@ -578,10 +587,29 @@ static NSString *SpliceKit_loadOrCreateBridgeKey(void) {
     return key;
 }
 
-// Constant time, so the comparison does not tell a guesser how much of a key was right.
-static BOOL SpliceKit_bridgeKeyMatches(id candidate) {
-    if (!sBridgeKey || ![candidate isKindOfClass:[NSString class]]) return NO;
-    NSData *a = [sBridgeKey dataUsingEncoding:NSUTF8StringEncoding];
+static NSString *SpliceKit_newNonce(void) {
+    uint8_t bytes[32];
+    arc4random_buf(bytes, sizeof(bytes));
+    NSMutableString *nonce = [NSMutableString stringWithCapacity:64];
+    for (size_t i = 0; i < sizeof(bytes); i++) [nonce appendFormat:@"%02x", bytes[i]];
+    return nonce;
+}
+
+// The answer a client holding the key gives to `nonce`.
+static NSString *SpliceKit_bridgeAnswer(NSString *nonce) {
+    NSData *key = [sBridgeKey dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *message = [nonce dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t mac[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, key.bytes, key.length, message.bytes, message.length, mac);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (size_t i = 0; i < sizeof(mac); i++) [hex appendFormat:@"%02x", mac[i]];
+    return hex;
+}
+
+// Constant time, so the comparison does not tell a guesser how much of an answer was right.
+static BOOL SpliceKit_bridgeAnswerMatches(NSString *nonce, id candidate) {
+    if (!sBridgeKey || nonce.length == 0 || ![candidate isKindOfClass:[NSString class]]) return NO;
+    NSData *a = [SpliceKit_bridgeAnswer(nonce) dataUsingEncoding:NSUTF8StringEncoding];
     NSData *b = [(NSString *)candidate dataUsingEncoding:NSUTF8StringEncoding];
     if (a.length != b.length) return NO;
     const uint8_t *pa = a.bytes, *pb = b.bytes;
@@ -656,6 +684,14 @@ static void SpliceKit_handleClient(int clientFd) {
     char firstMethod[128] = {0};
     char lastMethod[128] = {0};
 
+    // The challenge: this connection's nonce, sent before anything is read.
+    NSString *nonce = SpliceKit_newNonce();
+    SpliceKit_writeResponse(clientFd, @{
+        @"jsonrpc": @"2.0",
+        @"method": @"bridge.hello",
+        @"params": @{@"nonce": nonce, @"auth": @"hmac-sha256"},
+    });
+
     BOOL authenticated = NO;
     char *buffer = NULL;
     size_t bufferSize = 0;
@@ -694,19 +730,20 @@ static void SpliceKit_handleClient(int clientFd) {
             }
 
             if (!authenticated) {
-                if (request && SpliceKit_bridgeKeyMatches(request[@"auth"])) {
+                if (request && SpliceKit_bridgeAnswerMatches(nonce, request[@"auth"])) {
                     authenticated = YES;
                 } else {
                     response[@"error"] = @{
                         @"code": @(-32003),
                         @"message": [NSString stringWithFormat:
-                            @"Unauthorized: SpliceKit's bridge needs its key. Send it as \"auth\" in "
-                            @"the request: the contents of %@ (the patched Final Cut Pro writes it "
-                            @"on first launch).", SpliceKit_bridgeKeyPath()],
+                            @"Unauthorized: answer this connection's bridge.hello nonce. Send \"auth\": "
+                            @"HMAC-SHA256 of the nonce keyed with the contents of %@ (the patched "
+                            @"Final Cut Pro writes it on first launch), in lowercase hex.",
+                            SpliceKit_bridgeKeyPath()],
                     };
                     SpliceKit_writeResponse(clientFd, response);
                     SpliceKit_log(@"Closed connection fd=%d: %@", clientFd,
-                                  request[@"auth"] ? @"wrong bridge key" : @"no bridge key");
+                                  request[@"auth"] ? @"wrong answer to the bridge challenge" : @"no answer to the bridge challenge");
                     break;
                 }
             }

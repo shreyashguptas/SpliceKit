@@ -11,8 +11,14 @@ Usage:
     python3 splicekit_client.py --interactive             # same
     python3 splicekit_client.py "system.version"          # one-shot call
     python3 splicekit_client.py "system.getClasses" '{"filter":"FF"}'
+    python3 splicekit_client.py --watch haptic            # print events as they arrive
+
+The bridge key never goes over the socket: the client answers each connection's
+bridge.hello nonce with HMAC-SHA256(key, nonce), as the MCP server does.
 """
 
+import hashlib
+import hmac
 import os
 import socket
 import json
@@ -21,7 +27,9 @@ import readline  # enables arrow keys / history in the interactive REPL
 
 SPLICEKIT_HOST = "127.0.0.1"
 SPLICEKIT_PORT = 9876
-# Sent as "auth" with every request; the patched Final Cut Pro writes it on first launch.
+# The bridge key, which the patched Final Cut Pro writes on first launch. It never goes
+# over the socket: each connection opens with a bridge.hello nonce, and every request
+# carries HMAC-SHA256(key, nonce) as "auth".
 BRIDGE_KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
 
 
@@ -34,6 +42,14 @@ def bridge_key():
             return handle.read().strip()
     except OSError:
         return ""
+
+
+def bridge_answer(nonce):
+    """HMAC-SHA256(key, nonce) hex, the "auth" for the connection that sent `nonce`."""
+    key = bridge_key()
+    if not nonce or not key:
+        return ""
+    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
 
 
 class SpliceKit:
@@ -55,8 +71,24 @@ class SpliceKit:
         """Connect to the SpliceKit TCP server."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
+        self._buffer = b""
+        self._nonce = self._read_hello()
         # stderr, so one-shot output on stdout stays pure JSON (pipeable into jq)
         print(f"Connected to SpliceKit at {self.host}:{self.port}", file=sys.stderr)
+
+    def _read_hello(self):
+        """The nonce of the bridge.hello every connection opens with ("" if none came)."""
+        while b"\n" not in self._buffer:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                return ""
+            self._buffer += chunk
+        line, rest = self._buffer.split(b"\n", 1)
+        frame = json.loads(line)
+        if frame.get("method") == "bridge.hello":
+            self._buffer = rest
+            return frame.get("params", {}).get("nonce", "")
+        return ""
 
     def close(self):
         """Close the connection."""
@@ -77,7 +109,7 @@ class SpliceKit:
             "method": method,
             "params": params,
             "id": self._id_counter,
-            "auth": bridge_key(),
+            "auth": bridge_answer(self._nonce),
         }
         self.sock.sendall(json.dumps(request).encode() + b"\n")
         response = self._read_response(self._id_counter)
@@ -242,7 +274,7 @@ def interactive_mode():
                 fcp._id_counter += 1
                 req["id"] = fcp._id_counter
                 req["jsonrpc"] = "2.0"
-                req.setdefault("auth", bridge_key())
+                req.setdefault("auth", bridge_answer(fcp._nonce))
                 fcp.sock.sendall(json.dumps(req).encode() + b"\n")
                 print(json.dumps(fcp._read_response(req["id"]), indent=2))
             elif cmd == "version":
@@ -259,9 +291,31 @@ def interactive_mode():
     fcp.close()
 
 
+def watch_events(patterns):
+    """Subscribe to event types (e.g. "haptic") and print each notification as it arrives."""
+    fcp = SpliceKit()
+    print(json.dumps(fcp.call("events.subscribe", patterns=patterns)), file=sys.stderr)
+    try:
+        while True:
+            while b"\n" not in fcp._buffer:
+                chunk = fcp.sock.recv(1 << 20)
+                if not chunk:
+                    return
+                fcp._buffer += chunk
+            line, fcp._buffer = fcp._buffer.split(b"\n", 1)
+            if line.strip():
+                print(line.decode(), flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        fcp.close()
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--interactive":
         interactive_mode()
+    elif len(sys.argv) > 2 and sys.argv[1] == "--watch":
+        watch_events(sys.argv[2:])
     elif len(sys.argv) > 1:
         # One-shot mode: pass method name and optional JSON params as args
         fcp = SpliceKit()

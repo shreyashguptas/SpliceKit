@@ -148,6 +148,12 @@ class FakeBridge(threading.Thread):
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
+                # Like the real bridge, open with the challenge (the answer is not checked
+                # here; without it every connection would wait out the client's hello wait).
+                hello = {"jsonrpc": "2.0", "method": "bridge.hello",
+                         "params": {"nonce": "0" * 64, "auth": "hmac-sha256"}}
+                self.wfile.write((json.dumps(hello) + "\n").encode())
+                self.wfile.flush()
                 while True:
                     line = self.rfile.readline()
                     if not line:

@@ -71,18 +71,26 @@ that this fork has removed.
   127.0.0.1:9876 answered each line of a browser's HTTP request with a parse error and then
   ran the JSON body, so any page could POST a request (`lua.execute` included) and have it
   run. A connection whose line is not a JSON object (an HTTP request, a WebSocket handshake) is
-  now closed before its body is read, and nothing runs until a request carries the bridge key
-  as `"auth"`: 256 random bits the patched app writes on first launch to
-  `~/Library/Application Support/SpliceKit/bridge-key`, readable by you only. One good key
-  authenticates the rest of the connection; a missing or wrong one is refused
-  ("Unauthorized", -32003) and the connection closed. Before the key, a line may be at most
+  now closed before its body is read, and nothing runs until the client proves it holds the
+  bridge key: 256 random bits the patched app writes on first launch to
+  `~/Library/Application Support/SpliceKit/bridge-key`, readable by you only. The key itself
+  never crosses the socket: every connection opens with a `bridge.hello` nonce and requests
+  carry `"auth"`: HMAC-SHA256(key, nonce), so a program that grabbed the port while Final Cut
+  Pro was closed would collect nothing it could use. One good answer authenticates the rest
+  of the connection; a missing or wrong one (or the raw key, or another connection's answer)
+  is refused ("Unauthorized", -32003) and the connection closed. Before the key, a line may be at most
   64 KB, so nobody on the Mac can grow FCP's memory with an endless one; the key file is never
   read or chmod-ed through a symlink, and only the process that holds the port reads or makes
-  it. The MCP server, `scripts/splicekit_client.py`,
-  `tests/live/live_rpc.py` and the Logitech haptics plugin send it. Requests are also read whole
+  it. The MCP server, `scripts/splicekit_client.py` (which gains `--watch <event type>`),
+  `tests/live/live_rpc.py` and the Logitech haptics plugin answer the challenge. Requests are also read whole
   once authenticated, however long (a fixed 64 KB buffer cut longer ones in two), and a JSON array no longer
   reaches the dispatcher. Live check: `tests/live/live_bridge_security_check.py`
   (`Sources/Bridge/SpliceKitServer.m`).
+- **Rebuilding the patched copy can no longer leave you without one.** The patcher deleted the
+  existing patched app before copying Final Cut Pro (about 7 GB), so a copy that failed part way
+  (a full disk, an interrupted run) left nothing to launch. It now copies beside the old one,
+  swaps the finished copy in, and only then deletes the old one; a failed copy leaves the old
+  app as it was (`patcher/patch_fcp.sh`).
 - **`deploy_and_restart` makes sure Final Cut Pro really started.** It ran `open` the moment
   the old process exited and never checked the result; macOS, still finishing the quit, could
   treat that as a no-op, so twice on 12.4 the tool reported "Launched" with nothing running and

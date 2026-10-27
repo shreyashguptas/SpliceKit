@@ -281,10 +281,11 @@ batch_export(folder="/path/to/output")           # every clip as its own file; f
 - "Handle not found" -> Released or stale. Re-read with `get_timeline_clips()`.
 - "No responder handled X" -> Action not available (wrong state or no selection).
 - Broken pipe -> Stale connection. Next call auto-reconnects.
-- "Unauthorized: SpliceKit's bridge needs its key" -> the client sent no or a wrong `auth`.
-  The key is `~/Library/Application Support/SpliceKit/bridge-key` (written by the patched
-  FCP on first launch); the MCP server, `scripts/splicekit_client.py` and
-  `tests/live/live_rpc.py` read it. A raw `nc` request must include `"auth": "<key>"`.
+- "Unauthorized: answer this connection's bridge.hello nonce" -> the client sent no or a
+  wrong `auth`. Each connection opens with a nonce; `auth` is HMAC-SHA256(key, nonce) with
+  the key from `~/Library/Application Support/SpliceKit/bridge-key` (written by the patched
+  FCP on first launch). The MCP server, `scripts/splicekit_client.py` and
+  `tests/live/live_rpc.py` do it; for a raw call use `python3 scripts/splicekit_client.py <method>`.
 - A modal dialog is blocking -> `detect_dialog()`, then `click_dialog_button` / `dismiss_dialog`.
 
 ## Where to look

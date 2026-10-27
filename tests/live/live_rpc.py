@@ -7,6 +7,8 @@ inside Final Cut Pro (newline-delimited JSON-RPC 2.0), the parsed response back.
 Lines that are not the reply to this request (event notifications, which carry a
 "method" and no "id") are skipped rather than returned as the answer.
 """
+import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -29,18 +31,42 @@ def bridge_key():
         return ""
 
 
+def bridge_answer(nonce, key=None):
+    """HMAC-SHA256(key, nonce) hex: what the bridge accepts as "auth" on the connection
+    that sent `nonce` in its bridge.hello. The key itself never goes over the socket."""
+    key = bridge_key() if key is None else key
+    if not nonce or not key:
+        return ""
+    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+
+
+def read_hello(sock, data=b""):
+    """(nonce, leftover bytes): the challenge the bridge opens every connection with."""
+    while b"\n" not in data:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return "", data
+        data += chunk
+    line, rest = data.split(b"\n", 1)
+    frame = json.loads(line.decode())
+    if frame.get("method") == "bridge.hello":
+        return str(frame.get("params", {}).get("nonce", "")), rest
+    return "", data
+
+
 def rpc(method, params=None, timeout=10, *, host=None, port=None):
     """Send one request and return the parsed response ({"result": ...} or {"error": ...})."""
     request_id = next(_ids)
-    req = {"jsonrpc": "2.0", "method": method, "id": request_id, "auth": bridge_key()}
+    req = {"jsonrpc": "2.0", "method": method, "id": request_id}
     if params:
         req["params"] = params
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect((host or HOST, port or PORT))
+        nonce, data = read_hello(s)
+        req["auth"] = bridge_answer(nonce)
         s.sendall((json.dumps(req) + "\n").encode())
-        data = b""
         while True:
             while b"\n" not in data:
                 chunk = s.recv(1 << 20)

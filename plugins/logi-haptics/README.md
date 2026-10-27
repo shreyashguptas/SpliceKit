@@ -114,11 +114,10 @@ swizzle module is `Sources/Haptics/SpliceKitHapticBridge.m`, registered through
    | `trim_limit`      | Trim a clip's edge inward until you run out of media handles — the "wall" hit is the haptic.               |
    | `jkl_pressure`    | Press and **hold** the FF or RW arrow under the viewer, then push harder. Each rate-bucket step fires.     |
 
-6. **Optional: live-tap the JSON-RPC stream** with `nc` to see the raw
+6. **Optional: live-tap the JSON-RPC stream** from the repository root to see the raw
    broadcast — useful if a haptic isn't reaching the plugin:
    ```bash
-   ( printf '{"jsonrpc":"2.0","id":1,"method":"events.subscribe","params":{"patterns":["haptic"]},"auth":"%s"}\n' \
-       "$(cat ~/Library/Application\ Support/SpliceKit/bridge-key)"; cat ) | nc 127.0.0.1 9876
+   python3 scripts/splicekit_client.py --watch haptic
    ```
    Each FCP haptic should print one notification line, e.g.:
    ```

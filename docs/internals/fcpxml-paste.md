@@ -1324,16 +1324,20 @@ class SpliceKitClient {
                       completion: @escaping ([String: Any]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             requestID += 1
-            // The bridge runs nothing until a request carries its key (see SpliceKitServer.m).
+            // The bridge runs nothing until a request answers the bridge.hello nonce its
+            // connection opened with: "auth" = HMAC-SHA256(key, nonce) in lowercase hex
+            // (import CryptoKit; see SpliceKitServer.m). `nonce` is read off that first line.
             let keyPath = NSHomeDirectory() + "/Library/Application Support/SpliceKit/bridge-key"
             let key = (try? String(contentsOfFile: keyPath, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let mac = HMAC<SHA256>.authenticationCode(for: Data(nonce.utf8),
+                                                      using: SymmetricKey(data: Data(key.utf8)))
             let request: [String: Any] = [
                 "jsonrpc": "2.0",
                 "method": method,
                 "params": params,
                 "id": requestID,
-                "auth": key
+                "auth": mac.map { String(format: "%02x", $0) }.joined()
             ]
             
             guard let data = try? JSONSerialization.data(withJSONObject: request),

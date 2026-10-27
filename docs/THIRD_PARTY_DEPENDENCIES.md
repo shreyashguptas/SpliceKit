@@ -159,7 +159,7 @@ is left.
 
 | Path | Where | Goes to |
 | --- | --- | --- |
-| JSON-RPC bridge inside Final Cut Pro | `Sources/Bridge/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only; runs nothing until a connection sends the bridge key (`~/Library/Application Support/SpliceKit/bridge-key`, mode 0600) and closes a connection whose first line is not JSON (a browser's HTTP request) |
+| JSON-RPC bridge inside Final Cut Pro | `Sources/Bridge/SpliceKitServer.m` (`INADDR_LOOPBACK`) | listens on 127.0.0.1:9876 only; runs nothing until a connection answers its nonce with HMAC-SHA256 under the bridge key (`~/Library/Application Support/SpliceKit/bridge-key`, mode 0600; the key is never sent) and closes a connection whose first line is not JSON (a browser's HTTP request) |
 | MCP server, `scripts/splicekit_client.py`, the Loupedeck haptics plugin | `mcp/splicekit_mcp/config.py` and the named files, `plugins/logi-haptics/FCPHapticsPlugin/src/FCPHapticsPlugin.cs` | connect to 127.0.0.1:9876; the MCP server refuses a non-loopback `SPLICEKIT_HOST` unless `SPLICEKIT_ALLOW_REMOTE=1` |
 | Test suites | `tests/` | a fake bridge on 127.0.0.1 |
 
