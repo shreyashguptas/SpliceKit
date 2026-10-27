@@ -51,6 +51,12 @@ That one command does the whole install and asks before it installs anything:
 It is safe to re-run; every step checks whether it already did its work. To see
 what is and isn't set up without changing anything, run `make install-check`.
 
+It also checks your Final Cut Pro version against the one this repository was last
+checked against (`FCP_TESTED_VERSION`). When Apple has shipped a newer one, it says
+so and tells you to ask Claude to update the repository for it; once that is done,
+`make install` rebuilds the patched copy from the new version. `make fcp-compat`
+lists the Final Cut Pro classes and methods SpliceKit uses that a release no longer has.
+
 ## Use
 
 Open "Final Cut Pro Modified". Claude Desktop and Claude Code are configured by

@@ -9,6 +9,15 @@ that this fork has removed.
 ## [Unreleased]
 
 ### Added
+- **`make install` checks your Final Cut Pro version.** `FCP_TESTED_VERSION` names the
+  release this checkout was last checked against (12.3, build 450152). When the App Store copy
+  is a different one, `make install` and `make install-check` say so and tell you to ask
+  Claude to update the repository for it; when the repository matches the App Store copy but
+  the patched copy is older (it never updates itself), `make install` offers to rebuild it from
+  the new release. `make fcp-compat` lists the FCP classes, methods, ivars and keys SpliceKit
+  uses that a release no longer has, with the lines that use them, against
+  `patcher/fcp-names-baseline.txt` (`make fcp-baseline` rewrites it). Against 12.4 it finds
+  one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
 - **Titles and generators, fully: list, add exactly, read and change every setting.**
   `list_titles` lists every installed title and generator (Apple's and your own Motion
   templates) with its category, theme and full effect ID, and flags the names several templates

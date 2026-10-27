@@ -97,7 +97,7 @@ MKV_LDFLAGS = -bundle $(CPP_LIBS)
 # never be what an unqualified `make` does.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy tools url-import-tools symbols vp9 mkv mcp-setup mcp-doctor mcp-check mcp-check-live install install-check transcribers test test-unit
+.PHONY: all clean deploy tools url-import-tools symbols vp9 mkv mcp-setup mcp-doctor mcp-check mcp-check-live install install-check fcp-compat fcp-baseline transcribers test test-unit
 
 # One command to set up a fresh machine: Python 3.10+, a patched and renamed
 # copy of Final Cut Pro, the MCP server (proven over the wire with
@@ -108,6 +108,18 @@ install:
 
 install-check:
 	@bash scripts/install.sh --check
+
+# Final Cut Pro updates. FCP_TESTED_VERSION names the release this checkout was
+# last checked against; make install says when the Mac has another one.
+# fcp-compat lists the FCP classes and methods SpliceKit uses that a release no
+# longer has (FCP_APP=... to scan another copy; default: the App Store one).
+# fcp-baseline rewrites patcher/fcp-names-baseline.txt from the checked release.
+FCP_APP ?=
+fcp-compat:
+	@/usr/bin/python3 -I scripts/fcp_compat.py scan $(if $(FCP_APP),--app "$(FCP_APP)")
+
+fcp-baseline:
+	@/usr/bin/python3 -I scripts/fcp_compat.py baseline $(if $(FCP_APP),--app "$(FCP_APP)")
 
 # Build the Parakeet/Whisper CLI helpers on their own and install them into the
 # patched app plus Application Support. `make install` does this already; this
