@@ -20,6 +20,20 @@ that this fork has removed.
   one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
 
 ### Changed
+- **`make install` and `make deploy` are quiet and warning-free.** The build prints one short
+  line per file (`  CC  Sources/...`; `make V=1` shows the full compiler commands), so a
+  routine install no longer scrolls past hundreds of lines. A clean build has no warnings:
+  the two deprecated-but-irreplaceable macOS calls (window capture, the FCPXML paste's screen
+  freeze) each live in one documented helper; the drag-and-drop hook reads the legacy
+  filenames pasteboard type by name; and the VP9 decoder's class table gets the same 4-byte
+  lead-in its base class already had, so its pointers are aligned on Intel Macs (the linker
+  warned "pointer not aligned" and fell back from chained fixups). `codesign`'s "replacing
+  existing signature", make's "Nothing to be done", and the optional yt-dlp / ffmpeg notes
+  are gone or reworded as `[i] Optional:`.
+- **`make install` no longer reports Claude Desktop as an error when it is already set up.**
+  It refused to touch the config while Claude Desktop was running, even when the config
+  already pointed at this checkout; it now says "Already configured" and moves on
+  (`scripts/claude_config.py matches`).
 - **Checked against Final Cut Pro 12.4 (build 454072).** The patched copy is rebuilt from 12.4
   (`make install` offers this once the App Store copy is 12.4), and everything was run live on
   it: the MCP live check, the bridge endpoint suite, the timeline read checks, the titles check and the tool
@@ -67,6 +81,19 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Final Cut Pro no longer crashes when a caption transcription finishes.** The caption
+  panel's transcriber ends on a background queue, and the code after it (regrouping, saving the
+  draft for the open project) looked up the active timeline, a lookup that also loosens the
+  dual-timeline browser's width constraints and lays the window out. AppKit aborts on layout off
+  the main thread, so a Whisper caption run could take FCP down at the end (seen on 12.4 in the
+  live sweep). The finish now runs on the main thread, and the constraint change always does.
+- **Captures no longer come back as a thin strip while the Sections bar is showing.** With
+  Final Cut Pro in the background, `capture_viewer`, `capture_timeline` and `capture_inspector`
+  fell back to the widest visible window, and SpliceKit's Sections bar is a floating panel a few
+  points wider than the main window, so every capture was a 2563 x 24 image of it. They now use
+  Final Cut Pro's own main window (a `PEWindow`), and never a panel or child window. The live
+  tool sweep also hides the Sections bar after `song_structure_sections`, which it used to
+  leave up.
 - **Security: a web page can no longer drive Final Cut Pro through the bridge.** The bridge on
   127.0.0.1:9876 answered each line of a browser's HTTP request with a parse error and then
   ran the JSON body, so any page could POST a request (`lua.execute` included) and have it
