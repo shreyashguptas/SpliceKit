@@ -6,8 +6,9 @@ python3. Merges into the existing config: other MCP servers and every
 unrelated preference are preserved untouched.
 
 Usage:
-    claude_config.py show  <config.json>
-    claude_config.py write <config.json> <python-path> <server-path>
+    claude_config.py show    <config.json>
+    claude_config.py matches <config.json> <python-path> <server-path>   # exit 0 when already set
+    claude_config.py write   <config.json> <python-path> <server-path>
 """
 from __future__ import annotations
 
@@ -57,6 +58,14 @@ def show(path: str) -> int:
     return 1
 
 
+def matches(path: str, python_path: str, server_path: str) -> int:
+    """0 when the splicekit entry already runs this server with this interpreter."""
+    entry = servers_of(load(path), path).get("splicekit")
+    if isinstance(entry, dict) and entry.get("command") == python_path and entry.get("args") == [server_path]:
+        return 0
+    return 1
+
+
 def write(path: str, python_path: str, server_path: str) -> int:
     cfg = load(path)
     servers = servers_of(cfg, path)
@@ -76,6 +85,8 @@ def write(path: str, python_path: str, server_path: str) -> int:
 def main(argv: list[str]) -> int:
     if len(argv) >= 3 and argv[1] == "show":
         return show(argv[2])
+    if len(argv) >= 5 and argv[1] == "matches":
+        return matches(argv[2], argv[3], argv[4])
     if len(argv) >= 5 and argv[1] == "write":
         return write(argv[2], argv[3], argv[4])
     print(__doc__)
