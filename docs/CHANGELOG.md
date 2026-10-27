@@ -94,6 +94,18 @@ that this fork has removed.
   Final Cut Pro's own main window (a `PEWindow`), and never a panel or child window. The live
   tool sweep also hides the Sections bar after `song_structure_sections`, which it used to
   leave up.
+- **WebM and MKV (VP9/VP8) clips play at the right speed again.** Final Cut plays these
+  through a stream-copied MP4 ("shadow") that SpliceKit writes with ffmpeg, rewriting the
+  timestamps to a constant frame rate. ffmpeg 9 changed how that rewrite (`setts`) reads its
+  expressions, so frames meant to be 1/30 s apart came out one second apart: the Viewer showed
+  about one source frame per second. The rewrite now sets the stream's time base first
+  (`-time_base:v`), which reads the same on old and new ffmpeg, and a remux whose length does
+  not match the source is rejected instead of used. A true 30 fps or 24 fps file was also taken
+  for 29.97 / 23.976 (the nearest standard rate now wins), which played 0.1% slow against
+  its audio. Shadows made by older builds are not reused. Checked live on 12.4: 30, 24 and
+  60 fps clips show the right frame at every time tried, and a clip with a flash and a beep on
+  every second stays in sync in Final Cut's own export. A clip imported with `import_media`
+  before this fix keeps its broken copy in the library; import it again.
 - **Security: a web page can no longer drive Final Cut Pro through the bridge.** The bridge on
   127.0.0.1:9876 answered each line of a browser's HTTP request with a parse error and then
   ran the JSON body, so any page could POST a request (`lua.execute` included) and have it

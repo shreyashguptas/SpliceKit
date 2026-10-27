@@ -54,12 +54,22 @@ BOOL SpliceKitURLImportCanonicalFrameTimingForRate(double fps,
         { 60.0,             60000, 1000 },
     };
 
+    // The nearest known rate, not the first one within tolerance: 30 and 29.97
+    // (and 24 and 23.976) are both within 0.05 of each other, and taking the
+    // first turned a true 30 fps WebM into 29.97, 0.1% slow against its audio.
+    size_t nearest = SIZE_MAX;
+    double nearestDistance = 0.05;
     for (size_t i = 0; i < sizeof(knownRates) / sizeof(knownRates[0]); ++i) {
-        if (fabs(fps - knownRates[i].fps) <= 0.05) {
-            if (outTimescale) *outTimescale = knownRates[i].timescale;
-            if (outFrameTicks) *outFrameTicks = knownRates[i].frameTicks;
-            return YES;
+        double distance = fabs(fps - knownRates[i].fps);
+        if (distance <= nearestDistance) {
+            nearest = i;
+            nearestDistance = distance;
         }
+    }
+    if (nearest != SIZE_MAX) {
+        if (outTimescale) *outTimescale = knownRates[nearest].timescale;
+        if (outFrameTicks) *outFrameTicks = knownRates[nearest].frameTicks;
+        return YES;
     }
 
     int timescale = (int)lrint(fps * 1000.0);
@@ -108,6 +118,46 @@ BOOL SpliceKitURLImportNormalizationModeNeedsTimestampRewrite(NSString *mode) {
     NSString *normalized = SpliceKitURLImportTrimmedString(mode);
     return [normalized isEqualToString:@"rewrite_timestamps"] ||
            [normalized isEqualToString:@"remux_copy_rewrite_timestamps"];
+}
+
+// The ffmpeg arguments that rewrite a VP9/VP8 stream's timestamps to constant frame
+// rate: frame N at N * frameTicks / timescale seconds.
+//   DTS = N * frameTicks -- packets arrive in decode (DTS) order, so the packet
+//     index N is already the decode index.
+//   PTS = DTS + round((src_pts - src_dts) in source frames) * frameTicks keeps
+//     h264/hevc/av1 B-frame display order. `(PTS-DTS)*TB` is the offset in
+//     seconds, times `timescale/frameTicks` (= fps) is the offset in frames,
+//     round() snaps it to whole frames (cancelling the millisecond quantization
+//     of Matroska timestamps), times `frameTicks` turns it back into ticks. For
+//     VP9/VP8 the source PTS equals the DTS and the term is 0.
+// `-time_base:v` puts the stream in 1/timescale before the setts filter runs, so
+// the filter's input and output time bases are the same and `N * frameTicks`
+// means ticks of 1/timescale on every ffmpeg. Without it, ffmpeg 9 evaluates the
+// expressions in the source time base (Matroska's 1/1000) and then rescales:
+// N*1000 became N seconds, a 30 fps clip played one frame per second in Final Cut.
+NSArray<NSString *> *SpliceKitURLImportTimestampRewriteArguments(int timescale, int frameTicks) {
+    if (timescale <= 0 || frameTicks <= 0) return @[];
+    NSString *settsArg = [NSString stringWithFormat:
+        @"setts=time_base=1/%d:dts=N*%d:pts=N*%d+round((PTS-DTS)*TB*%d/%d)*%d:duration=%d",
+        timescale, frameTicks, frameTicks, timescale, frameTicks, frameTicks, frameTicks];
+    return @[
+        @"-time_base:v", [NSString stringWithFormat:@"1/%d", timescale],
+        @"-bsf:v", settsArg,
+    ];
+}
+
+// A stream-copy remux keeps every frame, so its output runs as long as the source.
+// nil when it does; otherwise why not, so a remux with broken timestamps (like the
+// ffmpeg 9 one above, 30x too long) fails loudly instead of reaching Final Cut.
+NSString *SpliceKitURLImportRemuxDurationMismatch(NSDictionary *sourceInfo, NSDictionary *outputInfo) {
+    double source = SpliceKitURLImportParseFractionString(sourceInfo[@"duration"]);
+    double output = SpliceKitURLImportParseFractionString(outputInfo[@"duration"]);
+    if (!(source > 0.0) || !(output > 0.0)) return nil;
+    double tolerance = MAX(0.5, source * 0.05);
+    if (fabs(output - source) <= tolerance) return nil;
+    return [NSString stringWithFormat:
+        @"The remuxed file runs %.3f s but the source runs %.3f s; its timestamps are wrong.",
+        output, source];
 }
 
 NSString *SpliceKitURLImportOutputExtensionForNormalizationMode(NSString *mode) {

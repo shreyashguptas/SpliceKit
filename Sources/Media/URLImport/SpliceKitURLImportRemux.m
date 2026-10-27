@@ -79,20 +79,8 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
         ]];
     }
     if (needsTimestampRewrite) {
-        // B-frame-safe CFR timestamp rewrite (see the matching comment in
-        // normalizeJob:). DTS = N * frameTicks; PTS preserves the source
-        // PTS-DTS offset snapped to whole frame-durations so h264/hevc/av1
-        // display order survives. For VP9/VP8 the offset term collapses to 0.
-        NSString *settsArg = [NSString stringWithFormat:
-            @"setts=time_base=1/%d:dts=N*%d:pts=N*%d+round((PTS-DTS)*TB*%d/%d)*%d:duration=%d",
-            canonicalTimescale,
-            canonicalFrameTicks,
-            canonicalFrameTicks,
-            canonicalTimescale,
-            canonicalFrameTicks,
-            canonicalFrameTicks,
-            canonicalFrameTicks];
-        [arguments addObjectsFromArray:@[@"-bsf:v", settsArg]];
+        [arguments addObjectsFromArray:SpliceKitURLImportTimestampRewriteArguments(canonicalTimescale,
+                                                                                   canonicalFrameTicks)];
     }
     [arguments addObjectsFromArray:@[@"-movflags", @"+faststart", outputPath]];
     SpliceKit_log(@"[VP9Import] ffmpeg remux args: %@", [arguments componentsJoinedByString:@" "]);
@@ -121,6 +109,13 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
         if (outError) *outError = rewrittenInfo[@"error"];
         return nil;
     }
+    NSString *mismatch = SpliceKitURLImportRemuxDurationMismatch(mediaInfo, rewrittenInfo);
+    if (mismatch) {
+        SpliceKit_log(@"[VP9Import] remux rejected for %@: %@", sourcePath.lastPathComponent, mismatch);
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        if (outError) *outError = mismatch;
+        return nil;
+    }
 
     return @{
         @"path": outputPath,
@@ -138,6 +133,8 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
 // session that triggers the hook 5× per Media Import row (thumbnail →
 // metadata → preview → validate → import) pays the ~200ms ffmpeg cost once
 // and then reuses the on-disk shadow instantly.
+static const int kSpliceKitURLImportShadowFormatVersion = 2;
+
 static NSString *SpliceKitURLImportShadowFilenameForSource(NSString *sourcePath, NSString *extension) {
     if (sourcePath.length == 0) return nil;
     NSError *attrError = nil;
@@ -151,7 +148,13 @@ static NSString *SpliceKitURLImportShadowFilenameForSource(NSString *sourcePath,
         [[sourcePath lastPathComponent] stringByDeletingPathExtension]);
     if (base.length == 0) base = @"shadow";
 
-    NSString *key = [NSString stringWithFormat:@"%@|%llu|%lld", sourcePath, size, mtimeInt];
+    // The format version is part of the key: bump it whenever the remux writes
+    // different output, so shadows made by an older build are not reused.
+    // 2: timestamp rewrite fixed for ffmpeg 9 (version 1 shadows of VP9/VP8
+    //    Matroska play one frame per second) and 30 / 24 fps no longer taken
+    //    for 29.97 / 23.976.
+    NSString *key = [NSString stringWithFormat:@"%@|%llu|%lld|%d", sourcePath, size, mtimeInt,
+                     kSpliceKitURLImportShadowFormatVersion];
     const char *cStr = key.UTF8String;
     NSUInteger hash = 5381;
     for (NSUInteger i = 0; cStr && cStr[i]; i++) {
