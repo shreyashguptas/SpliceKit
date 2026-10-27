@@ -43,15 +43,24 @@ sign_all() {
     xattr -cr "$APP" 2>/dev/null || true
 
     local bundle
+    # codesign reports "replacing existing signature" for every bundle on every
+    # deploy; keep its output for when it fails.
+    quiet_codesign() {
+        local out
+        if ! out="$(codesign "$@" 2>&1)"; then
+            printf '%s\n' "$out" >&2
+            return 1
+        fi
+    }
     for bundle in "$APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle" \
                   "$APP/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"; do
         if [[ -e "$bundle" ]]; then
-            codesign --force --options runtime --sign "$identity" "$bundle" || return 1
+            quiet_codesign --force --options runtime --sign "$identity" "$bundle" || return 1
         fi
     done
-    codesign --force --options runtime --sign "$identity" \
+    quiet_codesign --force --options runtime --sign "$identity" \
         "$APP/Contents/Frameworks/SpliceKit.framework" || return 1
-    codesign --force --options runtime --sign "$identity" \
+    quiet_codesign --force --options runtime --sign "$identity" \
         --entitlements "$ENTITLEMENTS" "$APP" || return 1
 }
 
@@ -60,7 +69,7 @@ if [[ -n "$IDENTITY" ]]; then
     echo "[i] Using signing identity: $IDENTITY"
 else
     IDENTITY="-"
-    echo "[i] No local codesigning identity found; signing ad-hoc (macOS may be stricter about launching it)"
+    echo "[i] Signing ad-hoc (no Developer ID certificate on this Mac; that is expected)"
 fi
 
 if ! sign_all "$IDENTITY"; then

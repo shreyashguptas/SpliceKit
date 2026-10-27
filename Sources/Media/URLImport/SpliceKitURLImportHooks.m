@@ -84,7 +84,9 @@ static NSArray<NSURL *> *SpliceKitURLImportFileURLsFromPasteboard(NSPasteboard *
                                                        options:@{ NSPasteboardURLReadingFileURLsOnlyKey : @YES }];
     if (urls.count > 0) return urls;
 
-    NSArray *filenamePaths = [pasteboard propertyListForType:NSFilenamesPboardType];
+    // Older apps still put a plain list of paths on the pasteboard under the legacy
+    // filenames type (NSFilenamesPboardType, deprecated). Read it by its type name.
+    NSArray *filenamePaths = [pasteboard propertyListForType:@"NSFilenamesPboardType"];
     if (![filenamePaths isKindOfClass:[NSArray class]] || filenamePaths.count == 0) return @[];
 
     NSMutableArray<NSURL *> *fileURLs = [NSMutableArray arrayWithCapacity:filenamePaths.count];

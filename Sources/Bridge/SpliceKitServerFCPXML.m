@@ -679,6 +679,16 @@ NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
 
 static IMP sOrigPasteAnchored = NULL;
 static IMP sOrigPaste = NULL;
+
+// The one place the deprecated screen-update calls are made (see the paste below).
+static void SpliceKit_setScreenUpdatesFrozen(BOOL frozen) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (frozen) NSDisableScreenUpdates();
+    else NSEnableScreenUpdates();
+#pragma clang diagnostic pop
+}
+
 static NSCache *sFCPXMLNativeCache = nil;
 
 // --- Shared FCPXML-to-native conversion function ---
@@ -777,14 +787,16 @@ BOOL SpliceKit_convertFCPXMLToNativeClipboard(void) {
     SpliceKit_log(@"[FCPXMLPaste] Importing as: %@", tempProjectName);
 
     // --- Improvement #3: Freeze screen updates to hide project switch ---
-    // NSDisableScreenUpdates() is deprecated but functional. Safety timeout
-    // ensures screen unfreezes even if the pipeline hangs.
-    NSDisableScreenUpdates();
+    // NSDisableScreenUpdates() is deprecated but still works, and nothing replaces it:
+    // NSAnimationContext groups animations, it does not hold back a project switch
+    // across several run-loop turns. Safety timeout ensures screen unfreezes even if
+    // the pipeline hangs.
+    SpliceKit_setScreenUpdatesFrozen(YES);
     __block BOOL screenFrozen = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
         dispatch_get_main_queue(), ^{
         if (screenFrozen) {
-            NSEnableScreenUpdates();
+            SpliceKit_setScreenUpdatesFrozen(NO);
             SpliceKit_log(@"[FCPXMLPaste] Safety: unfroze screen after timeout");
         }
     });
@@ -928,7 +940,7 @@ cleanup:
     // --- Improvement #3: Unfreeze screen ---
     if (screenFrozen) {
         screenFrozen = NO;
-        NSEnableScreenUpdates();
+        SpliceKit_setScreenUpdatesFrozen(NO);
     }
 
     return success;
