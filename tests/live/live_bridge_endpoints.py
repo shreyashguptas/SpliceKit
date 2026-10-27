@@ -425,6 +425,9 @@ def test_titles():
 
 def test_stabilize():
     print("\n[stabilize.subject]")
+    # With a clip selected this really stabilizes it (keyframes on the open project,
+    # and longer than the read timeout): deselect so only the refusal is exercised.
+    rpc("timeline.selectItems", {"handles": []})
     r = rpc("stabilize.subject")
     if "error" in str(r):
         # Expected: no clip selected or no timeline
@@ -491,9 +494,11 @@ def test_debug_framerate():
 
 def test_debug_runtime():
     print("\n[debug.runtime]")
-    ok("listLoadedImages", rpc("debug.listLoadedImages"),
+    # Both walk every loaded image (about 20 s and 17 s on FCP 12.4 / macOS 27.2),
+    # past the default 10 s read timeout.
+    ok("listLoadedImages", rpc("debug.listLoadedImages", timeout=90),
        lambda r: _res(r).get("count", 0) > 0)
-    ok("getNotificationNames", rpc("debug.getNotificationNames"))
+    ok("getNotificationNames", rpc("debug.getNotificationNames", timeout=90))
     ok("dumpRuntimeMetadata", rpc("debug.dumpRuntimeMetadata", {"binary": "Flexo", "classesOnly": True}))
     ok("getImageSymbols", rpc("debug.getImageSymbols", {"binary": "Flexo", "limit": 5}))
     ok("getImageSections", rpc("debug.getImageSections", {"binary": "Flexo"}))

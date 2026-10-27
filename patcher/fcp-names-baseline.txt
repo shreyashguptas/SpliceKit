@@ -3,7 +3,7 @@
 # make fcp-compat reports the ones a newer release no longer has.
 # called = handed to the ObjC runtime (class, selector, ivar, KVC key);
 # other  = any other string literal that matched.
-# fcp: 12.3 450152
+# fcp: 12.4 454072
 other A4bkI8U6kRJmBTQDqKJcJrg
 called AASpeechAnalyzer
 other ASw2gOhIuSd2wQ8jgLyN3Ew
@@ -64,6 +64,7 @@ other Enabled
 other EndTime
 other Error:
 other Errors
+other FAILED
 called FFAddEffectCommand
 called FFAnchoredCaption
 called FFAnchoredCollection
@@ -700,7 +701,6 @@ called clearCachedValues
 called clearContents
 called clearSelection:
 called clearUserDefaults:
-other clicked
 called clickedItem
 other clip
 other clipDescription
@@ -922,6 +922,7 @@ other eventName
 other eventViewer
 called events
 other exception
+other exclusive
 called execute
 other executed
 other exists
@@ -1015,6 +1016,7 @@ other grid
 other group:
 called guessAudioBuiltInMainRoleUID
 other half
+other hand
 other handle
 called handlerDidUpdateSkimming:
 other handles
@@ -1043,6 +1045,7 @@ other hideClip:
 called hideSubmodule:
 other highlightColor
 other highlightsBy
+other histogram
 called holdOffBGRenderFor:
 other hvc1
 called identifier
@@ -1815,6 +1818,7 @@ other source
 other sourceClip
 other sourceMedia
 other space
+other spacer
 called speaker
 other speakerLabel
 other speed
@@ -1865,7 +1869,7 @@ other subscribed
 called subviews
 other success
 other summary
-called supportsBeatDetection
+called supportsBeatGrid
 called suspendLayerUpdatesForAnchoredClips
 other suspended
 other swizzle
@@ -2006,6 +2010,7 @@ other validate
 called validateMenuItem:
 called validateURLs:withURLsInfo:forImportToLocation:showWarnings:window:copyFiles:acceptedURLs:options:
 called value
+other verified
 other version
 other verticalZoomToFit
 other verticalZoomToFit:

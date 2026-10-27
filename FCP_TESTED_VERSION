@@ -4,5 +4,5 @@
 # Mac and say so when they differ. After checking a new release (make fcp-compat,
 # then the live checks, as in .claude/CLAUDE.md "When Final Cut Pro updates"),
 # set both lines to it and refresh the baseline: make fcp-baseline
-version=12.3
-build=450152
+version=12.4
+build=454072

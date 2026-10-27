@@ -29,8 +29,8 @@ What to know before you rely on it:
 
 ## Install
 
-You need a Mac on macOS 14 or newer with Final Cut Pro in `/Applications`
-(developed against Final Cut Pro 12.3) and about 10 GB of free disk space. Quit
+You need a Mac with Final Cut Pro in `/Applications` (developed against Final Cut
+Pro 12.4, which needs macOS 26.6 or newer) and about 10 GB of free disk space. Quit
 Final Cut Pro and Claude Desktop first. Then:
 
 ```bash

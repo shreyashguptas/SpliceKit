@@ -58,7 +58,7 @@ static double SpliceKit_beatGridMedian(NSArray<NSNumber *> *values) {
 }
 
 // Why Final Cut Pro will not analyse this clip, in its own predicates' terms
-// (-[FFAnchoredObject canDetectBeats] and _supportsBeatGrid).
+// (-[FFAnchoredObject canDetectBeats] and supportsBeatGrid, _supportsBeatGrid before 12.4).
 static NSString *SpliceKit_beatGridUnsupportedReason(NSDictionary *entry, BOOL sequenceSupports) {
     id item = entry[@"item"];
     if ([entry[@"isConnectedStoryline"] boolValue])
@@ -289,9 +289,13 @@ NSDictionary *SpliceKit_handleTimelineGetBeatGrid(NSDictionary *params) {
                 ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
             if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
 
-            SEL supportsSel = NSSelectorFromString(@"supportsBeatDetection");
-            BOOL sequenceSupports = [sequence respondsToSelector:supportsSel]
-                ? SpliceKit_boolForSelector(sequence, @"supportsBeatDetection") : YES;
+            // The sequence-level gate: -supportsBeatDetection up to 12.3, renamed
+            // -supportsBeatGrid (FFAnchoredSequence's override) in 12.4.
+            BOOL sequenceSupports = YES;
+            if ([sequence respondsToSelector:NSSelectorFromString(@"supportsBeatGrid")])
+                sequenceSupports = SpliceKit_boolForSelector(sequence, @"supportsBeatGrid");
+            else if ([sequence respondsToSelector:NSSelectorFromString(@"supportsBeatDetection")])
+                sequenceSupports = SpliceKit_boolForSelector(sequence, @"supportsBeatDetection");
 
             NSMutableDictionary *timelineInfo = [NSMutableDictionary dictionary];
             CMTime fd = SpliceKit_sequenceFrameDuration(sequence);

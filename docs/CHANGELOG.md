@@ -10,7 +10,7 @@ that this fork has removed.
 
 ### Added
 - **`make install` checks your Final Cut Pro version.** `FCP_TESTED_VERSION` names the
-  release this checkout was last checked against (12.3, build 450152). When the App Store copy
+  release this checkout was last checked against (now 12.4, build 454072). When the App Store copy
   is a different one, `make install` and `make install-check` say so and tell you to ask
   Claude to update the repository for it; when the repository matches the App Store copy but
   the patched copy is older (it never updates itself), `make install` offers to rebuild it from
@@ -18,6 +18,68 @@ that this fork has removed.
   uses that a release no longer has, with the lines that use them, against
   `patcher/fcp-names-baseline.txt` (`make fcp-baseline` rewrites it). Against 12.4 it finds
   one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
+
+### Changed
+- **Checked against Final Cut Pro 12.4 (build 454072).** The patched copy is rebuilt from 12.4
+  (`make install` offers this once the App Store copy is 12.4), and everything was run live on
+  it: the MCP live check, the bridge endpoint suite, the timeline read checks, the titles check and the tool
+  sweep. 12.4 needs macOS 26.6 or newer. Of the 2,064 FCP names SpliceKit used on 12.3, one was
+  gone: `-[FFAnchoredSequence supportsBeatDetection]`, renamed `supportsBeatGrid`;
+  `get_beat_grid` reads either, and FCP's beat detection was checked live on 12.4 (a 120 BPM
+  click track: 33 beats, 0.500 s apart).
+- **`import_otio` imports into an existing event and names it, instead of making one.**
+  The `.otio` -> FCPXML converter named the event after the timeline, so every call created
+  an event; removing the project it brought in then left an empty one behind. It now imports
+  into the library's first event, which is where `import_media` puts things too, and takes an
+  `event` argument to pick another. It creates a new project and leaves the open one alone.
+- **`cleanup_temp_projects` also sweeps the scratch *events* SpliceKit's own FCPXML declares**
+  (`SpliceKit Captions`, `SpliceKit Structure`), removing one as a unit when it holds nothing
+  but SpliceKit scratch. That is the only way to clear a scratch project Final Cut Pro has not
+  loaded: an unloaded sequence has no reachable `FFSequenceRecord`, but its event always does.
+  It only ever matches names SpliceKit generates itself.
+- **`export_otio` reports what it could not carry**, in `not_carried_across`, instead of
+  dropping it quietly.
+- **The MCP server now runs on the official MCP Python SDK 2.x** (`mcp>=2.2,<3`,
+  `MCPServer`), which implements the current stable protocol revision
+  2026-07-28. Older clients that still use the legacy `initialize` handshake
+  connect exactly as before. Tool annotations are built as the SDK's
+  `ToolAnnotations` model, and the server reports SpliceKit's version to the
+  client. An unexpected exception inside a tool now reaches the client as a
+  `ToolError` carrying the exception text, instead of the SDK's bare
+  "Error executing tool" message.
+- **`make install` verifies the whole chain before it reports success.** The
+  MCP server is started as a stdio subprocess and driven with the official SDK
+  (`tests/mcp_server_check.py`): both connect modes, every tool, resource and
+  prompt against a stand-in bridge; then the patched Final Cut Pro is opened
+  and read from through the same server. New targets: `make mcp-check`,
+  `make mcp-check-live`; new install flag `--no-launch`; the patcher gained
+  `--yes` and leaves the MCP config to `make install`
+  (`SPLICEKIT_SKIP_MCP_CONFIG=1`). `make install` now finds a Homebrew
+  keg-only Python, treats a running Claude Desktop (config not written) as
+  an unfinished install, and no longer swallows Ctrl-C after a menu.
+- **`detect_beats` output is formatted** for reading in the MCP answer: beat, bar, and section
+  timestamps are grouped with BPM and duration, and **`limit`** (default 16) controls how many
+  timestamps of each kind are printed; the rest are summarized while full counts stay in the
+  summary.
+- **`deploy_and_restart` no longer runs `make deploy` before quitting Final Cut Pro.** Deploy
+  replaced the dylib inside the running app bundle and could leave the bridge broken on relaunch.
+  The order is now quit, then `make deploy` (skipped when `skip_build` is passed), then relaunch.
+  It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
+
+### Fixed
+- **`deploy_and_restart` makes sure Final Cut Pro really started.** It ran `open` the moment
+  the old process exited and never checked the result; macOS, still finishing the quit, could
+  treat that as a no-op, so twice on 12.4 the tool reported "Launched" with nothing running and
+  the bridge never came back. It now waits for the new process and asks once more when none
+  appears (`mcp/splicekit_mcp/tools/dev.py`).
+- **A new project no longer opens an old project's transcript or captions.** Saved transcripts
+  and captions were filed under the project's name alone (the library and event names read
+  empty), so a project named like an earlier one, such as a fresh test library's
+  "QA Timeline", restored the earlier project's words; deleting or moving those words would
+  have cut the wrong parts of the timeline. They are now filed under Final Cut Pro's own
+  identifier for the project too, and a transcript saved the old way is still restored for the
+  project it came from. Switching to a project with nothing saved now clears the panel instead
+  of keeping the last project's words (`Sources/Core/SpliceKitRuntime.m`).
 - **Titles and generators, fully: list, add exactly, read and change every setting.**
   `list_titles` lists every installed title and generator (Apple's and your own Motion
   templates) with its category, theme and full effect ID, and flags the names several templates
@@ -98,48 +160,6 @@ that this fork has removed.
   (`placementVerified` is now a real check). The server's instructions are now
   a task-organized map of the editing tools (developer/debug families are left
   out on purpose).
-
-### Changed
-- **`import_otio` imports into an existing event and names it, instead of making one.**
-  The `.otio` -> FCPXML converter named the event after the timeline, so every call created
-  an event; removing the project it brought in then left an empty one behind. It now imports
-  into the library's first event, which is where `import_media` puts things too, and takes an
-  `event` argument to pick another. It creates a new project and leaves the open one alone.
-- **`cleanup_temp_projects` also sweeps the scratch *events* SpliceKit's own FCPXML declares**
-  (`SpliceKit Captions`, `SpliceKit Structure`), removing one as a unit when it holds nothing
-  but SpliceKit scratch. That is the only way to clear a scratch project Final Cut Pro has not
-  loaded: an unloaded sequence has no reachable `FFSequenceRecord`, but its event always does.
-  It only ever matches names SpliceKit generates itself.
-- **`export_otio` reports what it could not carry**, in `not_carried_across`, instead of
-  dropping it quietly.
-- **The MCP server now runs on the official MCP Python SDK 2.x** (`mcp>=2.2,<3`,
-  `MCPServer`), which implements the current stable protocol revision
-  2026-07-28. Older clients that still use the legacy `initialize` handshake
-  connect exactly as before. Tool annotations are built as the SDK's
-  `ToolAnnotations` model, and the server reports SpliceKit's version to the
-  client. An unexpected exception inside a tool now reaches the client as a
-  `ToolError` carrying the exception text, instead of the SDK's bare
-  "Error executing tool" message.
-- **`make install` verifies the whole chain before it reports success.** The
-  MCP server is started as a stdio subprocess and driven with the official SDK
-  (`tests/mcp_server_check.py`): both connect modes, every tool, resource and
-  prompt against a stand-in bridge; then the patched Final Cut Pro is opened
-  and read from through the same server. New targets: `make mcp-check`,
-  `make mcp-check-live`; new install flag `--no-launch`; the patcher gained
-  `--yes` and leaves the MCP config to `make install`
-  (`SPLICEKIT_SKIP_MCP_CONFIG=1`). `make install` now finds a Homebrew
-  keg-only Python, treats a running Claude Desktop (config not written) as
-  an unfinished install, and no longer swallows Ctrl-C after a menu.
-- **`detect_beats` output is formatted** for reading in the MCP answer: beat, bar, and section
-  timestamps are grouped with BPM and duration, and **`limit`** (default 16) controls how many
-  timestamps of each kind are printed; the rest are summarized while full counts stay in the
-  summary.
-- **`deploy_and_restart` no longer runs `make deploy` before quitting Final Cut Pro.** Deploy
-  replaced the dylib inside the running app bundle and could leave the bridge broken on relaunch.
-  The order is now quit, then `make deploy` (skipped when `skip_build` is passed), then relaunch.
-  It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
-
-### Fixed
 - **`move_clips` (and `spine.reorder`): undo, redo, undo works, and no crash.** The move
   kept its own undo entry, whose redo registered nothing: after undo -> redo the next undo
   was an empty "Shuffle Clips" step and the clips stayed moved. It also rebuilt the primary
