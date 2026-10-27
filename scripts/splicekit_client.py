@@ -13,6 +13,7 @@ Usage:
     python3 splicekit_client.py "system.getClasses" '{"filter":"FF"}'
 """
 
+import os
 import socket
 import json
 import sys
@@ -20,6 +21,19 @@ import readline  # enables arrow keys / history in the interactive REPL
 
 SPLICEKIT_HOST = "127.0.0.1"
 SPLICEKIT_PORT = 9876
+# Sent as "auth" with every request; the patched Final Cut Pro writes it on first launch.
+BRIDGE_KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
+
+
+def bridge_key():
+    """The bridge key: SPLICEKIT_BRIDGE_KEY, else the key file, else "" (refused, with why)."""
+    if os.environ.get("SPLICEKIT_BRIDGE_KEY"):
+        return os.environ["SPLICEKIT_BRIDGE_KEY"].strip()
+    try:
+        with open(BRIDGE_KEY_PATH, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
 
 
 class SpliceKit:
@@ -63,6 +77,7 @@ class SpliceKit:
             "method": method,
             "params": params,
             "id": self._id_counter,
+            "auth": bridge_key(),
         }
         self.sock.sendall(json.dumps(request).encode() + b"\n")
         response = self._read_response(self._id_counter)
@@ -227,6 +242,7 @@ def interactive_mode():
                 fcp._id_counter += 1
                 req["id"] = fcp._id_counter
                 req["jsonrpc"] = "2.0"
+                req.setdefault("auth", bridge_key())
                 fcp.sock.sendall(json.dumps(req).encode() + b"\n")
                 print(json.dumps(fcp._read_response(req["id"]), indent=2))
             elif cmd == "version":

@@ -13,6 +13,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -165,6 +166,33 @@ class ServerV2Tests(unittest.TestCase):
         for i, r in results.items():
             self.assertEqual(r["echo"], f"method.{i}", r)
         self.assertEqual(sorted(req["id"] for req in fake.sent), list(range(1, 9)))
+
+    def test_every_request_carries_the_bridge_key(self):
+        # The bridge runs nothing for a connection until a request brings its key, and a
+        # reconnect must not need a separate handshake: the key rides on every request.
+        fake = FakeSocket()
+        b = self._patched_bridge(fake)
+        os.environ["SPLICEKIT_BRIDGE_KEY"] = "ab" * 32
+        self.addCleanup(os.environ.pop, "SPLICEKIT_BRIDGE_KEY", None)
+        b.call("one")
+        b.call("two")
+        self.assertEqual([req["auth"] for req in fake.sent], ["ab" * 32] * 2)
+
+    def test_bridge_key_is_read_from_the_key_file(self):
+        m = self.module
+        os.environ.pop("SPLICEKIT_BRIDGE_KEY", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bridge-key")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("cd" * 32 + "\n")
+            old = m.BRIDGE_KEY_PATH
+            set_package_global(m, "BRIDGE_KEY_PATH", path)
+            try:
+                self.assertEqual(m.bridge_key(), "cd" * 32)
+                os.remove(path)
+                self.assertEqual(m.bridge_key(), "", "no key file: send none and let the bridge say why")
+            finally:
+                set_package_global(m, "BRIDGE_KEY_PATH", old)
 
     def test_connect_timeout_then_read_timeout_and_per_call_override(self):
         fake = FakeSocket()

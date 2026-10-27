@@ -9,17 +9,30 @@ Lines that are not the reply to this request (event notifications, which carry a
 """
 import itertools
 import json
+import os
 import socket
 
 HOST = "127.0.0.1"
 PORT = 9876
 _ids = itertools.count(1)
+KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
+
+
+def bridge_key():
+    """The key the bridge wants as "auth" (SPLICEKIT_BRIDGE_KEY, else the key file)."""
+    if os.environ.get("SPLICEKIT_BRIDGE_KEY"):
+        return os.environ["SPLICEKIT_BRIDGE_KEY"].strip()
+    try:
+        with open(KEY_PATH, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
 
 
 def rpc(method, params=None, timeout=10, *, host=None, port=None):
     """Send one request and return the parsed response ({"result": ...} or {"error": ...})."""
     request_id = next(_ids)
-    req = {"jsonrpc": "2.0", "method": method, "id": request_id}
+    req = {"jsonrpc": "2.0", "method": method, "id": request_id, "auth": bridge_key()}
     if params:
         req["params"] = params
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

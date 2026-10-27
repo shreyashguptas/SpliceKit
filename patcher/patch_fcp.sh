@@ -568,7 +568,7 @@ ${BOLD}MCP server:${NC}
   $MCP_STATUS_LINE
 
 ${BOLD}Quick test:${NC}
-  echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc 127.0.0.1 $BRIDGE_PORT
+  printf '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1,\"auth\":\"%s\"}\\\\n' \"\$(cat ~/Library/Application\\ Support/SpliceKit/bridge-key)\" | nc 127.0.0.1 $BRIDGE_PORT
 
 ${BOLD}Uninstall:${NC}
   $0 --uninstall

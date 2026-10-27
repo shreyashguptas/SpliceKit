@@ -14,7 +14,10 @@ anywhere. If you want the original project and its releases, go to the link abov
 It never touches your Final Cut Pro. It makes a copy of it at
 `/Applications/Final Cut Pro Modified.app` (about 7 GB), injects the SpliceKit
 library built from this checkout, and re-signs the copy. Everything runs inside
-that copy: a local bridge on `127.0.0.1:9876` that the MCP server talks to. Your
+that copy: a local bridge on `127.0.0.1:9876` that the MCP server talks to. The
+bridge runs nothing for a connection that has not sent its key (a random value in
+`~/Library/Application Support/SpliceKit/bridge-key`, readable by you only), and it
+hangs up on anything that is not JSON-RPC, so a web page cannot drive it. Your
 original app, libraries and media are unchanged, and you can keep using them
 with either app.
 

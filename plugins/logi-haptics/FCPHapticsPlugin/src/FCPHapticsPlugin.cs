@@ -53,6 +53,28 @@ namespace Loupedeck.FCPHapticsPlugin
         private const Int32 SpliceKitPort = 9876;
         private const Int32 ReconnectDelayMs = 3000;
 
+        // SpliceKit runs nothing for a connection until a request carries its bridge key
+        // ("auth"): 64 hex characters the patched Final Cut Pro writes to this file on
+        // first launch. Read on every connect, so a key made after the plugin loaded works.
+        private static String ReadBridgeKey()
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support", "SpliceKit", "bridge-key");
+            try
+            {
+                return File.ReadAllText(path).Trim();
+            }
+            catch (IOException)
+            {
+                return String.Empty;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return String.Empty;
+            }
+        }
+
         private CancellationTokenSource _cts;
         private Thread _bridgeThread;
 
@@ -172,7 +194,8 @@ namespace Loupedeck.FCPHapticsPlugin
                 jsonrpc = "2.0",
                 id = 1,
                 method = "events.subscribe",
-                @params = new { patterns = new[] { "haptic" } }
+                @params = new { patterns = new[] { "haptic" } },
+                auth = ReadBridgeKey()
             });
             var subscribeBytes = Encoding.UTF8.GetBytes(subscribeRequest + "\n");
             stream.Write(subscribeBytes, 0, subscribeBytes.Length);

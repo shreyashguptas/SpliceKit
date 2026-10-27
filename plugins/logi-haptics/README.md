@@ -117,8 +117,8 @@ swizzle module is `Sources/Haptics/SpliceKitHapticBridge.m`, registered through
 6. **Optional: live-tap the JSON-RPC stream** with `nc` to see the raw
    broadcast — useful if a haptic isn't reaching the plugin:
    ```bash
-   ( printf '{"jsonrpc":"2.0","id":1,"method":"events.subscribe","params":{"patterns":["haptic"]}}\n'; \
-     cat ) | nc 127.0.0.1 9876
+   ( printf '{"jsonrpc":"2.0","id":1,"method":"events.subscribe","params":{"patterns":["haptic"]},"auth":"%s"}\n' \
+       "$(cat ~/Library/Application\ Support/SpliceKit/bridge-key)"; cat ) | nc 127.0.0.1 9876
    ```
    Each FCP haptic should print one notification line, e.g.:
    ```

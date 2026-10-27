@@ -67,6 +67,19 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Security: a web page can no longer drive Final Cut Pro through the bridge.** The bridge on
+  127.0.0.1:9876 answered each line of a browser's HTTP request with a parse error and then
+  ran the JSON body, so any page could POST a request (`lua.execute` included) and have it
+  run. A connection whose line is not a JSON object (an HTTP request, a WebSocket handshake) is
+  now closed before its body is read, and nothing runs until a request carries the bridge key
+  as `"auth"`: 256 random bits the patched app writes on first launch to
+  `~/Library/Application Support/SpliceKit/bridge-key`, readable by you only. One good key
+  authenticates the rest of the connection; a missing or wrong one is refused
+  ("Unauthorized", -32003) and the connection closed. The MCP server, `scripts/splicekit_client.py`,
+  `tests/live/live_rpc.py` and the Logitech haptics plugin send it. Requests are also read whole
+  now, however long (a fixed 64 KB buffer cut longer ones in two), and a JSON array no longer
+  reaches the dispatcher. Live check: `tests/live/live_bridge_security_check.py`
+  (`Sources/Bridge/SpliceKitServer.m`).
 - **`deploy_and_restart` makes sure Final Cut Pro really started.** It ran `open` the moment
   the old process exited and never checked the result; macOS, still finishing the quit, could
   treat that as a no-op, so twice on 12.4 the tool reported "Launched" with nothing running and

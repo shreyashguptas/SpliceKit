@@ -5,7 +5,7 @@ import json
 import atexit
 import threading
 
-from .config import SPLICEKIT_HOST, SPLICEKIT_PORT
+from .config import SPLICEKIT_HOST, SPLICEKIT_PORT, bridge_key
 
 
 class BridgeConnection:
@@ -100,7 +100,10 @@ class BridgeConnection:
 
         self._id += 1
         expected_id = self._id
-        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": expected_id})
+        # The key on every request: the first one on a connection authenticates it, and a
+        # reconnect needs no separate handshake.
+        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": expected_id,
+                          "auth": bridge_key()})
         try:
             # Protocol: newline-delimited JSON, one request/response per line.
             # The server may also emit unsolicited `method:"event"` frames

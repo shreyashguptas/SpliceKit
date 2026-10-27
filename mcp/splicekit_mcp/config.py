@@ -32,6 +32,25 @@ def _bridge_address() -> tuple:
 SPLICEKIT_HOST, SPLICEKIT_PORT = _bridge_address()
 
 
+# The bridge runs nothing for a connection until a request carries its key ("auth"):
+# 64 hex characters the patched Final Cut Pro writes here on first launch, readable by
+# this user only. Read on every connect, so a key made after this server started (FCP
+# installed or relaunched later) is picked up. SPLICEKIT_BRIDGE_KEY overrides the file.
+BRIDGE_KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
+
+
+def bridge_key() -> str:
+    """The bridge key, or "" when there is none yet (the bridge then refuses, saying why)."""
+    key = os.environ.get("SPLICEKIT_BRIDGE_KEY")
+    if key:
+        return key.strip()
+    try:
+        with open(BRIDGE_KEY_PATH, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
 # The repository root (the directory holding VERSION, Makefile and build/). This file
 # is mcp/splicekit_mcp/config.py, so that is three levels up.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
