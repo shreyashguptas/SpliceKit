@@ -69,9 +69,12 @@ Frame rate: 24.0 fps
 
 Or use the JSON-RPC method:
 
-```json
-{"method": "lua.executeFile", "params": {"path": "my_first_script.lua"}}
+```bash
+python3 scripts/splicekit_client.py lua.executeFile '{"path": "my_first_script.lua"}'
 ```
+
+(The bridge only runs requests from a client that answers its challenge with the bridge
+key; the MCP tools `lua_execute` / `lua_execute_file` and `scripts/splicekit_client.py` do.)
 
 ### Live Coding
 

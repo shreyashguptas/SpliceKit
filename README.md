@@ -14,7 +14,11 @@ anywhere. If you want the original project and its releases, go to the link abov
 It never touches your Final Cut Pro. It makes a copy of it at
 `/Applications/Final Cut Pro Modified.app` (about 7 GB), injects the SpliceKit
 library built from this checkout, and re-signs the copy. Everything runs inside
-that copy: a local bridge on `127.0.0.1:9876` that the MCP server talks to. Your
+that copy: a local bridge on `127.0.0.1:9876` that the MCP server talks to. The
+bridge runs nothing for a connection that cannot prove it holds its key (a random value
+in `~/Library/Application Support/SpliceKit/bridge-key`, readable by you only, which never
+itself goes over the connection), and it hangs up on anything that is not JSON-RPC, so a
+web page cannot drive it. Your
 original app, libraries and media are unchanged, and you can keep using them
 with either app.
 
@@ -29,8 +33,8 @@ What to know before you rely on it:
 
 ## Install
 
-You need a Mac on macOS 14 or newer with Final Cut Pro in `/Applications`
-(developed against Final Cut Pro 12.3) and about 10 GB of free disk space. Quit
+You need a Mac with Final Cut Pro in `/Applications` (developed against Final Cut
+Pro 12.4, which needs macOS 26.6 or newer) and about 10 GB of free disk space. Quit
 Final Cut Pro and Claude Desktop first. Then:
 
 ```bash
@@ -50,6 +54,12 @@ That one command does the whole install and asks before it installs anything:
 
 It is safe to re-run; every step checks whether it already did its work. To see
 what is and isn't set up without changing anything, run `make install-check`.
+
+It also checks your Final Cut Pro version against the one this repository was last
+checked against (`FCP_TESTED_VERSION`). When Apple has shipped a newer one, it says
+so and tells you to ask Claude to update the repository for it; once that is done,
+`make install` rebuilds the patched copy from the new version. `make fcp-compat`
+lists the Final Cut Pro classes and methods SpliceKit uses that a release no longer has.
 
 ## Use
 

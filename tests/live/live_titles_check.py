@@ -5,7 +5,9 @@ live_titles_check.py — titles.* against a LIVE Final Cut Pro, every change und
     python3 tests/live/live_titles_check.py [--project NAME]
 
 Needs a throwaway project open (default "Titles Test") whose primary storyline runs from
-0 s to at least 20 s; it refuses to run on any other project name. Every add and edit
+0 s to at least 20 s, with one connected clip on lane 1 from 4 s to 6 s (the occupied
+lane the refusals are checked against; a 30 s gap plus a Basic Title there will do). It
+refuses to run on any other project name or without that clip. Every add and edit
 it makes is undone with one undo and checked: the timeline and the title's settings must
 be back where they started.
 
@@ -75,6 +77,12 @@ def main():
         return 2
     baseline = connected()
     print(f"project {args.project!r}: {len(baseline)} connected clips")
+    # Without it the "occupied lane" refusal adds a title instead, and every later
+    # baseline comparison fails one clip off.
+    if not any(lane == 1 and 3.0 <= start <= 4.0 for start, lane, _ in baseline):
+        print("refusing to run: the project needs a connected clip on lane 1 from 4 s to 6 s "
+              "(see the docstring)")
+        return 2
 
     print("\n[catalog]")
     bugs = call("titles.list", {"kind": "title", "filter": "Bug"}).get("items", [])

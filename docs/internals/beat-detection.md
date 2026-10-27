@@ -134,6 +134,15 @@ return clipType != 2;
 
 So some sequence types are excluded before clip-level predicates even matter.
 
+**Final Cut Pro 12.4 renamed both gates.** `-[FFAnchoredSequence supportsBeatDetection]`
+is now an override of `-supportsBeatGrid`, and `-[FFAnchoredObject _supportsBeatGrid]` lost
+its underscore (`supportsBeatGrid`); `supportsBeatDetectionForObjects:` and
+`allObjectsSupportsBeatDetection:` became `anyObjectHasAvailableBeatGridAction:` and
+`allObjectsHaveAvailableBeatGridAction:`. `canDetectBeats`, `canShowBeats`, `canHideBeats`
+and `detectBeatsOnSelection:` are unchanged. `timeline.getBeatGrid` reads `supportsBeatGrid`
+and falls back to `supportsBeatDetection`, so it answers on both releases. Verified live on
+12.4 with the same 120 BPM click track: 33 beats, median spacing 0.500 s.
+
 ### `_supportsBeatGrid`
 
 The most important gate is `-[FFAnchoredObject _supportsBeatGrid]`.
@@ -600,7 +609,7 @@ When `Enable Beat Detection` is disabled, check these in order:
    - `hasAudio`
    - `hasTimingMetadata`
    - `isFlexMusicObject`
-   - sequence `supportsBeatDetection`
+   - sequence `supportsBeatGrid` (`supportsBeatDetection` before 12.4)
 4. If `hasVideo == true`, that alone is enough to fail built-in detection
 5. If you are only selecting expanded audio components, expect failure there too
 6. If the source media has an audio track, verify it with `detect_beats(file_path=...)`
@@ -611,7 +620,7 @@ Useful runtime probes through SpliceKit:
 call_method_with_args(target=clip, selector="canDetectBeats", args="[]")
 call_method_with_args(target=clip, selector="canShowBeats", args="[]")
 call_method_with_args(target=clip, selector="canHideBeats", args="[]")
-call_method_with_args(target=clip, selector="_supportsBeatGrid", args="[]")
+call_method_with_args(target=clip, selector="supportsBeatGrid", args="[]")   # _supportsBeatGrid before 12.4
 call_method_with_args(target=clip, selector="hasTimingMetadata", args="[]")
 call_method_with_args(target=assetRef, selector="originalMediaURL", args="[]")
 detect_beats(file_path="/resolved/source/file.mp4")

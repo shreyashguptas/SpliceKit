@@ -5,7 +5,7 @@ import json
 import atexit
 import threading
 
-from .config import SPLICEKIT_HOST, SPLICEKIT_PORT
+from .config import SPLICEKIT_HOST, SPLICEKIT_PORT, bridge_answer
 
 
 class BridgeConnection:
@@ -20,6 +20,7 @@ class BridgeConnection:
         self.sock = None
         self._buf = b""  # leftover bytes from previous recv (newline-delimited protocol)
         self._id = 0     # monotonically increasing JSON-RPC request ID
+        self._nonce = ""  # this connection's bridge.hello challenge
         # The mcp 2.x SDK runs synchronous tools in worker threads, so two tool calls
         # can be in flight at once (a client sending parallel calls, or a call that is
         # still running after the client gave up on it). One socket, one read buffer and
@@ -27,6 +28,7 @@ class BridgeConnection:
         self._lock = threading.Lock()
 
     CONNECT_TIMEOUT = 5    # loopback either accepts at once or refuses
+    HELLO_TIMEOUT = 2      # the bridge sends its challenge as soon as it accepts
     READ_TIMEOUT = 30      # some bridge calls wait on FCP's main thread (20 s watchdog inside)
 
     def ensure_connected(self):
@@ -40,9 +42,33 @@ class BridgeConnection:
             except OSError:
                 sock.close()
                 raise
-            sock.settimeout(self.READ_TIMEOUT)
             self.sock = sock
             self._buf = b""
+            self._nonce = self._read_hello()
+            sock.settimeout(self.READ_TIMEOUT)
+
+    def _read_hello(self) -> str:
+        """The nonce from the bridge.hello that opens every connection ("" if none came;
+        the bridge then refuses the first request and says why). A first line that is not
+        the hello is left in the buffer for the reply loop."""
+        self.sock.settimeout(self.HELLO_TIMEOUT)
+        try:
+            while b"\n" not in self._buf:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    return ""
+                self._buf += chunk
+        except OSError:
+            return ""
+        line, rest = self._buf.split(b"\n", 1)
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            return ""
+        if isinstance(frame, dict) and frame.get("method") == "bridge.hello":
+            self._buf = rest
+            return str((frame.get("params") or {}).get("nonce") or "")
+        return ""
 
     def reset(self):
         """Drop the connection (the next call reconnects). Safe to call from any thread;
@@ -51,7 +77,7 @@ class BridgeConnection:
             self._drop_socket()
 
     def _drop_socket(self):
-        sock, self.sock, self._buf = self.sock, None, b""
+        sock, self.sock, self._buf, self._nonce = self.sock, None, b"", ""
         if sock is not None:
             try:
                 sock.close()
@@ -100,7 +126,10 @@ class BridgeConnection:
 
         self._id += 1
         expected_id = self._id
-        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": expected_id})
+        # The answer to this connection's challenge on every request: the first one
+        # authenticates the connection, and the key itself never leaves this process.
+        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": expected_id,
+                          "auth": bridge_answer(self._nonce)})
         try:
             # Protocol: newline-delimited JSON, one request/response per line.
             # The server may also emit unsolicited `method:"event"` frames

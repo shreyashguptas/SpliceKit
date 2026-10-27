@@ -3,6 +3,7 @@ namespace Loupedeck.FCPHapticsPlugin
     using System;
     using System.IO;
     using System.Net.Sockets;
+    using System.Security.Cryptography;
     using System.Text;
     using System.Text.Json;
     using System.Threading;
@@ -52,6 +53,67 @@ namespace Loupedeck.FCPHapticsPlugin
         private const String SpliceKitHost = "127.0.0.1";
         private const Int32 SpliceKitPort = 9876;
         private const Int32 ReconnectDelayMs = 3000;
+
+        // SpliceKit runs nothing for a connection until the client proves it holds the
+        // bridge key: 64 hex characters the patched Final Cut Pro writes to this file on
+        // first launch. The key never goes over the socket: every connection opens with a
+        // bridge.hello nonce, and the request carries HMAC-SHA256(key, nonce) as "auth".
+        // Read on every connect, so a key made after the plugin loaded works.
+        private static String ReadBridgeKey()
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support", "SpliceKit", "bridge-key");
+            try
+            {
+                return File.ReadAllText(path).Trim();
+            }
+            catch (IOException)
+            {
+                return String.Empty;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return String.Empty;
+            }
+        }
+
+        // The "auth" SpliceKit accepts on the connection that sent this nonce.
+        private static String BridgeAnswer(String nonce)
+        {
+            var key = ReadBridgeKey();
+            if (String.IsNullOrEmpty(nonce) || String.IsNullOrEmpty(key))
+            {
+                return String.Empty;
+            }
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(key));
+            var mac = hmac.ComputeHash(Encoding.UTF8.GetBytes(nonce));
+            return Convert.ToHexString(mac).ToLowerInvariant();
+        }
+
+        // The nonce from the bridge.hello line every SpliceKit connection opens with.
+        private static String ReadHelloNonce(String line)
+        {
+            if (String.IsNullOrWhiteSpace(line))
+            {
+                return String.Empty;
+            }
+            try
+            {
+                using var hello = JsonDocument.Parse(line);
+                var root = hello.RootElement;
+                if (root.TryGetProperty("method", out var method) && method.GetString() == "bridge.hello" &&
+                    root.TryGetProperty("params", out var helloParams) &&
+                    helloParams.TryGetProperty("nonce", out var nonce))
+                {
+                    return nonce.GetString() ?? String.Empty;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+            return String.Empty;
+        }
 
         private CancellationTokenSource _cts;
         private Thread _bridgeThread;
@@ -164,6 +226,9 @@ namespace Loupedeck.FCPHapticsPlugin
             using var stream = client.GetStream();
             using var reader = new StreamReader(stream, new UTF8Encoding(false));
 
+            // The challenge comes first; answer it in the subscribe request.
+            var nonce = ReadHelloNonce(reader.ReadLine());
+
             // Subscribe to the haptic event stream. SpliceKit's events.subscribe
             // installs a per-connection allowlist; without it we'd receive zero
             // notifications even though they're being broadcast.
@@ -172,7 +237,8 @@ namespace Loupedeck.FCPHapticsPlugin
                 jsonrpc = "2.0",
                 id = 1,
                 method = "events.subscribe",
-                @params = new { patterns = new[] { "haptic" } }
+                @params = new { patterns = new[] { "haptic" } },
+                auth = BridgeAnswer(nonce)
             });
             var subscribeBytes = Encoding.UTF8.GetBytes(subscribeRequest + "\n");
             stream.Write(subscribeBytes, 0, subscribeBytes.Length);

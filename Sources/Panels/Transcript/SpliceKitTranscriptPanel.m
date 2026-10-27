@@ -378,9 +378,9 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     }
 
     if (sequence) {
-        NSDictionary *state = SpliceKit_loadSequenceState(sequence);
-        NSString *currentKey = [state[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]]
-            ? state[@"sequenceIdentity"][@"cacheKey"] : nil;
+        // The open project's own key, not the one a saved file recorded: a project
+        // with nothing saved yet must still read as a different project.
+        NSString *currentKey = SpliceKit_sequenceIdentity(sequence)[@"cacheKey"];
 
         // If we have words in memory, check they belong to the current sequence.
         // After restart lastRestoredSequenceKey is nil — always validate in that case.
@@ -499,8 +499,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         ? [transcript[@"formatVersion"] integerValue] : 0;
 
     // Check if the sequence changed — if so, clear stale transcript from previous project
-    NSString *sequenceKey = [state[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]]
-        ? state[@"sequenceIdentity"][@"cacheKey"] : nil;
+    NSString *sequenceKey = SpliceKit_sequenceIdentity(sequence)[@"cacheKey"];
     if (sequenceKey.length > 0 &&
         self.lastRestoredSequenceKey.length > 0 &&
         ![self.lastRestoredSequenceKey isEqualToString:sequenceKey]) {

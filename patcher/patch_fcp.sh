@@ -273,9 +273,7 @@ if ! $NO_COPY && ! $REBUILD_ONLY; then
             read -p "Overwrite? [y/N] " -n 1 -r
             echo
         fi
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$MODDED_APP"
-        else
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             NO_COPY=true
             log "Using existing copy"
         fi
@@ -283,20 +281,43 @@ if ! $NO_COPY && ! $REBUILD_ONLY; then
 
     if ! $NO_COPY; then
         mkdir -p "$DEST_DIR"
+        # Copy first, swap second, delete last. Removing the old copy before a ~7 GB copy
+        # left no patched app at all when the copy failed (a full disk, an interrupted
+        # run). The new copy is made beside it, on the same volume, and only a finished
+        # one replaces it.
+        STAGED_APP="$DEST_DIR/.${APP_NAME%.app}.new.app"
+        RETIRED_APP="$DEST_DIR/.${APP_NAME%.app}.old.app"
+        rm -rf "$STAGED_APP" "$RETIRED_APP"
+        trap 'rm -rf "$STAGED_APP"' EXIT
         info "Copying $(du -sh "$SOURCE_APP" | cut -f1) ... (this takes a minute)"
-        cp -R "$SOURCE_APP" "$MODDED_APP"
-        log "Copied to $MODDED_APP"
+        if ! cp -R "$SOURCE_APP" "$STAGED_APP"; then
+            err "Copying Final Cut Pro failed (disk space: $(df -h "$DEST_DIR" | tail -1 | awk '{print $4}') free)"
+            [[ -d "$MODDED_APP" ]] && err "The existing $APP_DISPLAY_NAME is unchanged."
+            exit 1
+        fi
 
         # Copy MAS receipt
         if [[ -f "$SOURCE_APP/Contents/_MASReceipt/receipt" ]]; then
-            mkdir -p "$MODDED_APP/Contents/_MASReceipt"
-            cp "$SOURCE_APP/Contents/_MASReceipt/receipt" "$MODDED_APP/Contents/_MASReceipt/"
+            mkdir -p "$STAGED_APP/Contents/_MASReceipt"
+            cp "$SOURCE_APP/Contents/_MASReceipt/receipt" "$STAGED_APP/Contents/_MASReceipt/"
             log "MAS receipt copied"
         fi
 
         # Remove quarantine
-        xattr -cr "$MODDED_APP" 2>/dev/null || true
+        xattr -cr "$STAGED_APP" 2>/dev/null || true
         log "Quarantine attributes removed"
+
+        if [[ -d "$MODDED_APP" ]]; then
+            mv "$MODDED_APP" "$RETIRED_APP"
+        fi
+        if ! mv "$STAGED_APP" "$MODDED_APP"; then
+            [[ -d "$RETIRED_APP" ]] && mv "$RETIRED_APP" "$MODDED_APP"
+            err "Could not put the new copy in place; the previous one is back at $MODDED_APP"
+            exit 1
+        fi
+        trap - EXIT
+        rm -rf "$RETIRED_APP"
+        log "Copied to $MODDED_APP"
     fi
 else
     if [[ ! -d "$MODDED_APP" ]]; then
@@ -568,7 +589,7 @@ ${BOLD}MCP server:${NC}
   $MCP_STATUS_LINE
 
 ${BOLD}Quick test:${NC}
-  echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc 127.0.0.1 $BRIDGE_PORT
+  python3 $REPO_DIR/scripts/splicekit_client.py system.version
 
 ${BOLD}Uninstall:${NC}
   $0 --uninstall

@@ -5,7 +5,11 @@ capabilities without requiring Xcode or lldb to be attached. These tools run ins
 FCP's process via the injected dylib, giving direct access to runtime state, method
 tracing, crash handling, and live code injection.
 
-All debug tools are accessed via JSON-RPC on `127.0.0.1:9876`.
+All debug tools are accessed via JSON-RPC on `127.0.0.1:9876`. Every connection opens
+with a `bridge.hello` nonce and the bridge runs nothing until a request carries
+`"auth"`: HMAC-SHA256 of that nonce keyed with `~/Library/Application Support/SpliceKit/bridge-key`
+(the key itself is never sent). The MCP tools and `scripts/splicekit_client.py` do this
+for you; anything else gets "Unauthorized" and is hung up on.
 
 ## Quick Reference
 

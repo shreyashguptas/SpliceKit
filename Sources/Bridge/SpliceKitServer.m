@@ -19,6 +19,7 @@
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitServerInternal.h"
 #import "SpliceKitPlugins.h"
+#import <CommonCrypto/CommonHMAC.h>
 
 #define SPLICEKIT_TCP_PORT 9876
 
@@ -517,15 +518,152 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     return @{@"result": result};
 }
 
+#pragma mark - Bridge Key
+//
+// Loopback alone did not keep strangers out. A web page can POST to
+// http://127.0.0.1:9876, and this loop used to answer each HTTP header line with a
+// parse error and then run the JSON body, lua.execute included. So a line that is not
+// a JSON object now closes the connection, and nothing runs until the client proves it
+// holds the bridge key: 256 random bits in a file only this user can read, made on
+// first launch and kept, so clients survive restarts.
+//
+// The proof is a challenge, so the key itself never crosses the socket. Every
+// connection opens with a notification from the bridge,
+//     {"jsonrpc":"2.0","method":"bridge.hello","params":{"nonce":"<64 hex>","auth":"hmac-sha256"}}
+// and the client's requests carry "auth": HMAC-SHA256(key, nonce) in lowercase hex,
+// with the key file's 64 characters as the HMAC key and the nonce's 64 as the message.
+// A program that grabbed the port while Final Cut Pro was closed would only ever see
+// an answer to its own nonce, worthless against the real bridge's fresh one. One good
+// answer authenticates the rest of the connection.
+//
+
+NSString *SpliceKit_bridgeKeyPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/Application Support/SpliceKit/bridge-key"];
+}
+
+static NSString *sBridgeKey = nil;
+
+static BOOL SpliceKit_isBridgeKey(NSString *key) {
+    if (key.length != 64) return NO;
+    NSCharacterSet *notHex = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
+    return [key rangeOfCharacterFromSet:notHex].location == NSNotFound;
+}
+
+static NSString *SpliceKit_loadOrCreateBridgeKey(void) {
+    NSString *path = SpliceKit_bridgeKeyPath();
+    // Only a regular file of ours counts: a symlink planted at the path is replaced
+    // (rename swaps the link itself), never followed for reading or chmod.
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+        NSString *existing = [[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (SpliceKit_isBridgeKey(existing)) {
+            if ((st.st_mode & 0777) != 0600) chmod(path.fileSystemRepresentation, 0600);
+            return existing;
+        }
+    }
+
+    uint8_t bytes[32];
+    arc4random_buf(bytes, sizeof(bytes));
+    NSMutableString *key = [NSMutableString stringWithCapacity:64];
+    for (size_t i = 0; i < sizeof(bytes); i++) [key appendFormat:@"%02x", bytes[i]];
+
+    [[NSFileManager defaultManager] createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    // Written with 0600 from the start: never readable by others, not even briefly.
+    NSString *tmp = [path stringByAppendingFormat:@".%d.tmp", getpid()];
+    unlink(tmp.fileSystemRepresentation);
+    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    NSData *data = [[key stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    BOOL ok = fd >= 0 && write(fd, data.bytes, data.length) == (ssize_t)data.length;
+    if (fd >= 0) close(fd);
+    if (!ok || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation) != 0) {
+        unlink(tmp.fileSystemRepresentation);
+        SpliceKit_log(@"ERROR: could not write the bridge key to %@: %s", path, strerror(errno));
+        return nil;  // no key on disk: every request is refused, nothing runs unauthenticated
+    }
+    SpliceKit_log(@"Bridge key created: %@", path);
+    return key;
+}
+
+static NSString *SpliceKit_newNonce(void) {
+    uint8_t bytes[32];
+    arc4random_buf(bytes, sizeof(bytes));
+    NSMutableString *nonce = [NSMutableString stringWithCapacity:64];
+    for (size_t i = 0; i < sizeof(bytes); i++) [nonce appendFormat:@"%02x", bytes[i]];
+    return nonce;
+}
+
+// The answer a client holding the key gives to `nonce`.
+static NSString *SpliceKit_bridgeAnswer(NSString *nonce) {
+    NSData *key = [sBridgeKey dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *message = [nonce dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t mac[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, key.bytes, key.length, message.bytes, message.length, mac);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (size_t i = 0; i < sizeof(mac); i++) [hex appendFormat:@"%02x", mac[i]];
+    return hex;
+}
+
+// Constant time, so the comparison does not tell a guesser how much of an answer was right.
+static BOOL SpliceKit_bridgeAnswerMatches(NSString *nonce, id candidate) {
+    if (!sBridgeKey || nonce.length == 0 || ![candidate isKindOfClass:[NSString class]]) return NO;
+    NSData *a = [SpliceKit_bridgeAnswer(nonce) dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *b = [(NSString *)candidate dataUsingEncoding:NSUTF8StringEncoding];
+    if (a.length != b.length) return NO;
+    const uint8_t *pa = a.bytes, *pb = b.bytes;
+    uint8_t diff = 0;
+    for (NSUInteger i = 0; i < a.length; i++) diff |= pa[i] ^ pb[i];
+    return diff == 0;
+}
+
 #pragma mark - Client Handler
 //
 // Each client gets its own thread (via GCD). The protocol is dead simple:
 // one JSON-RPC request per line, one JSON response per line. No framing,
 // no content-length headers — just newline-delimited JSON over TCP.
 //
-// The 64KB buffer is generous — most requests are well under 1KB.
-// The only large ones are FCPXML imports, and even those rarely hit 64KB.
+// Lines are read whole once the connection has sent the key, however long: an FCPXML
+// import sent inline can pass the 64KB a fixed buffer used to cut it at.
 //
+
+// Until a connection has sent the key, a line may be at most this long: anyone on the
+// Mac can connect, and an endless line would otherwise grow FCP's memory until macOS
+// kills it. After the key, lines are read whole (an inline FCPXML can be megabytes).
+static const size_t kSpliceKitMaxUnauthenticatedLine = 64 * 1024;
+
+// Reads one line (through its newline, or to end of file) into *buffer, growing it.
+// Returns the length, 0 at end of file, or -1 when the line passes maxLength.
+static ssize_t SpliceKit_readLine(FILE *stream, char **buffer, size_t *capacity, size_t maxLength) {
+    size_t length = 0;
+    int c;
+    while ((c = getc(stream)) != EOF) {
+        if (length + 2 > *capacity) {
+            size_t grown = *capacity ? *capacity * 2 : 4096;
+            char *next = realloc(*buffer, grown);
+            if (!next) return -1;
+            *buffer = next;
+            *capacity = grown;
+        }
+        (*buffer)[length++] = (char)c;
+        if (c == '\n') break;
+        if (maxLength && length > maxLength) return -1;
+    }
+    if (length == 0) return 0;
+    (*buffer)[length] = '\0';
+    return (ssize_t)length;
+}
+
+static void SpliceKit_writeResponse(int clientFd, NSDictionary *response) {
+    NSData *responseJson = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+    if (!responseJson) return;
+    // Route through the per-fd write lock so async event broadcasts can't slice into
+    // the middle of this reply. Matches the broadcast path — same raw write(), same lock.
+    NSMutableData *line = [responseJson mutableCopy];
+    [line appendBytes:"\n" length:1];
+    SpliceKit_writeLineToClientFd(clientFd, line);
+}
 
 static void SpliceKit_handleClient(int clientFd) {
     SpliceKit_addConnectedClientFd(clientFd);
@@ -546,20 +684,68 @@ static void SpliceKit_handleClient(int clientFd) {
     char firstMethod[128] = {0};
     char lastMethod[128] = {0};
 
-    char buffer[65536];
-    while (fgets(buffer, sizeof(buffer), stream)) {
+    // The challenge: this connection's nonce, sent before anything is read.
+    NSString *nonce = SpliceKit_newNonce();
+    SpliceKit_writeResponse(clientFd, @{
+        @"jsonrpc": @"2.0",
+        @"method": @"bridge.hello",
+        @"params": @{@"nonce": nonce, @"auth": @"hmac-sha256"},
+    });
+
+    BOOL authenticated = NO;
+    char *buffer = NULL;
+    size_t bufferSize = 0;
+    ssize_t lineLength;
+    while ((lineLength = SpliceKit_readLine(stream, &buffer, &bufferSize,
+                authenticated ? 0 : kSpliceKitMaxUnauthenticatedLine)) != 0) {
+        if (lineLength < 0) {
+            SpliceKit_log(@"Closed connection fd=%d: a line over %zu KB before the bridge key",
+                          clientFd, kSpliceKitMaxUnauthenticatedLine / 1024);
+            break;
+        }
         @autoreleasepool {
-            NSData *data = [NSData dataWithBytes:buffer length:strlen(buffer)];
+            const char *start = buffer;
+            while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
+            if (*start == '\0') continue;
+            // Every request is a JSON object. Anything else (an HTTP request line from a
+            // browser, a WebSocket handshake) ends the connection before its body is read.
+            if (*start != '{') {
+                SpliceKit_log(@"Closed connection fd=%d: not JSON-RPC (it began \"%.24s\"), "
+                              @"e.g. a web page reaching 127.0.0.1:%d", clientFd, start, SPLICEKIT_TCP_PORT);
+                break;
+            }
+
+            NSData *data = [NSData dataWithBytesNoCopy:(void *)start
+                                                length:(NSUInteger)(lineLength - (start - buffer))
+                                          freeWhenDone:NO];
             NSError *jsonError = nil;
-            NSDictionary *request = [NSJSONSerialization JSONObjectWithData:data
-                                                                   options:0
-                                                                     error:&jsonError];
+            id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+            NSDictionary *request = [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
 
             NSMutableDictionary *response = [NSMutableDictionary dictionary];
             response[@"jsonrpc"] = @"2.0";
 
             if (request[@"id"]) {
                 response[@"id"] = request[@"id"];
+            }
+
+            if (!authenticated) {
+                if (request && SpliceKit_bridgeAnswerMatches(nonce, request[@"auth"])) {
+                    authenticated = YES;
+                } else {
+                    response[@"error"] = @{
+                        @"code": @(-32003),
+                        @"message": [NSString stringWithFormat:
+                            @"Unauthorized: answer this connection's bridge.hello nonce. Send \"auth\": "
+                            @"HMAC-SHA256 of the nonce keyed with the contents of %@ (the patched "
+                            @"Final Cut Pro writes it on first launch), in lowercase hex.",
+                            SpliceKit_bridgeKeyPath()],
+                    };
+                    SpliceKit_writeResponse(clientFd, response);
+                    SpliceKit_log(@"Closed connection fd=%d: %@", clientFd,
+                                  request[@"auth"] ? @"wrong answer to the bridge challenge" : @"no answer to the bridge challenge");
+                    break;
+                }
             }
 
             if (jsonError || !request) {
@@ -575,6 +761,12 @@ static void SpliceKit_handleClient(int clientFd) {
                         strlcpy(firstMethod, methodName, sizeof(firstMethod));
                     }
                     strlcpy(lastMethod, methodName, sizeof(lastMethod));
+                }
+                // The key stays here: handlers and their logs never see it.
+                if (request[@"auth"]) {
+                    NSMutableDictionary *withoutKey = [request mutableCopy];
+                    [withoutKey removeObjectForKey:@"auth"];
+                    request = withoutKey;
                 }
                 @try {
                     NSDictionary *result = SpliceKit_handleRequest(request);
@@ -593,19 +785,10 @@ static void SpliceKit_handleClient(int clientFd) {
                 }
             }
 
-            NSData *responseJson = [NSJSONSerialization dataWithJSONObject:response
-                                                                  options:0
-                                                                    error:nil];
-            if (responseJson) {
-                // Route through the per-fd write lock so async event broadcasts
-                // can't slice into the middle of this reply. Matches the
-                // broadcast path — same raw write(), same lock.
-                NSMutableData *line = [responseJson mutableCopy];
-                [line appendBytes:"\n" length:1];
-                SpliceKit_writeLineToClientFd(clientFd, line);
-            }
+            SpliceKit_writeResponse(clientFd, response);
         }
     }
+    free(buffer);
 
     if (requestCount > 0) {
         NSTimeInterval duration = CFAbsoluteTimeGetCurrent() - connectedAt;
@@ -674,6 +857,9 @@ void SpliceKit_startControlServer(void) {
     }
 
     sServerFd = serverFd;
+    // Read or made only by the process that holds the port: two first launches at once
+    // cannot leave the listening one with a key the file no longer holds.
+    sBridgeKey = SpliceKit_loadOrCreateBridgeKey();
 
     SpliceKit_log(@"================================================");
     SpliceKit_log(@"Control server listening on 127.0.0.1:%d", SPLICEKIT_TCP_PORT);

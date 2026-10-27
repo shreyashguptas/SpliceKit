@@ -9,7 +9,10 @@
 #   1. Homebrew, if it is needed to install anything else
 #   2. Xcode Command Line Tools (clang, codesign, otool)
 #   3. a Python 3.10+ interpreter (the mcp package needs it; macOS ships 3.9)
-#   4. a patched, renamed copy of Final Cut Pro with the SpliceKit dylib injected
+#   4. a patched, renamed copy of Final Cut Pro with the SpliceKit dylib injected,
+#      after checking its version against FCP_TESTED_VERSION (the release this
+#      checkout was last checked against) and rebuilding a patched copy that the
+#      App Store copy has moved past
 #   5. the MCP server (official MCP Python SDK 2.x) in its own virtualenv, proven
 #      over the real MCP wire: every tool, resource and prompt, before it is
 #      wired into Claude Desktop and Claude Code
@@ -240,6 +243,75 @@ stock_fcp_running() {
     pgrep -fl 'Contents/MacOS/Final Cut Pro$' 2>/dev/null | grep -v -F "$MODDED_APP" | grep -q .
 }
 
+# "12.4 454072" for an app bundle, or nothing when it has no readable Info.plist.
+fcp_version_of() {
+    local plist="$1/Contents/Info.plist" v b
+    v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null)" || return 1
+    b="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null)" || return 1
+    printf '%s %s\n' "$v" "$b"
+}
+
+# The release FCP_TESTED_VERSION names: "12.3 450152".
+fcp_tested_version() {
+    local file="$REPO_DIR/FCP_TESTED_VERSION" v b
+    [[ -f "$file" ]] || return 1
+    v="$(sed -n 's/^version=//p' "$file" | head -1)"
+    b="$(sed -n 's/^build=//p' "$file" | head -1)"
+    [[ -n "$v" && -n "$b" ]] || return 1
+    printf '%s %s\n' "$v" "$b"
+}
+
+# ============================================================
+# Final Cut Pro version: the App Store copy vs the release this checkout was
+# last checked against (FCP_TESTED_VERSION), and the patched copy vs the App
+# Store copy. The patched copy is a frozen snapshot: the App Store updates the
+# original only, so after an FCP update the two drift apart and nothing says so.
+# Sets REFRESH_PATCHED=true when the patched copy should be rebuilt from the
+# App Store copy (the checkout has been checked against that release). Returns 1
+# when something needs attention; the install carries on either way.
+# ============================================================
+REFRESH_PATCHED=false
+check_fcp_version() {
+    step "Final Cut Pro version"
+    local src stock tested patched
+    src="$(find_source_fcp)" || { warn "Final Cut Pro not found in /Applications."; return 1; }
+    stock="$(fcp_version_of "$src")" || { warn "Cannot read the version of $src"; return 1; }
+    tested="$(fcp_tested_version)" || { warn "FCP_TESTED_VERSION is missing or unreadable."; return 1; }
+    patched=""
+    is_patched && patched="$(fcp_version_of "$MODDED_APP" || true)"
+
+    if [[ "$stock" != "$tested" ]]; then
+        warn "This Mac has Final Cut Pro ${stock% *} (build ${stock#* })."
+        warn "This repository was last checked against Final Cut Pro ${tested% *} (build ${tested#* })."
+        printf '\n'
+        printf '    %sAsk Claude, in this repository:%s\n' "$BOLD" "$NC"
+        printf '    %s"Can you please update this repository with the latest Final Cut Pro?"%s\n' "$BOLD" "$NC"
+        printf '\n'
+        info "Claude compares the two releases (make fcp-compat), fixes what changed, tests it"
+        info "live, and updates FCP_TESTED_VERSION. Then run make install again."
+        if [[ -n "$patched" ]]; then
+            info "Until then \"$APP_NAME\" stays on Final Cut Pro ${patched% *}, the copy it was built from."
+        else
+            info "Until then SpliceKit may not work fully on Final Cut Pro ${stock% *}."
+        fi
+        return 1
+    fi
+
+    log "Final Cut Pro ${stock% *} (build ${stock#* }): the release this repository was checked against"
+    if [[ -n "$patched" && "$patched" != "$stock" ]]; then
+        warn "\"$APP_NAME\" is still Final Cut Pro ${patched% *} (build ${patched#* }); it does not update itself."
+        REFRESH_PATCHED=true
+        if $CHECK_ONLY; then
+            info "make install would rebuild it from Final Cut Pro ${stock% *}"
+        else
+            info "The next step rebuilds it from Final Cut Pro ${stock% *}."
+        fi
+        return 1
+    fi
+    [[ -n "$patched" ]] && log "\"$APP_NAME\" matches it"
+    return 0
+}
+
 # ============================================================
 # Step 0: macOS + Xcode Command Line Tools
 # ============================================================
@@ -357,11 +429,41 @@ ensure_patched_app() {
     # current source, reinstalls the framework, re-injects, retitles and
     # re-signs, replacing the existing app in place. No second copy, no
     # versioned duplicates, same path and same name.
+    if is_patched && $REFRESH_PATCHED && ! $CHECK_ONLY; then
+        # The App Store copy moved to a release this checkout has been checked
+        # against (check_fcp_version): copy it afresh. --rebuild alone would put
+        # new SpliceKit code into the old Final Cut Pro.
+        local fresh_src fresh_ver pick
+        fresh_src="$(find_source_fcp)"
+        fresh_ver="$(fcp_version_of "$fresh_src")"
+        if pgrep -f "$MODDED_APP/Contents/MacOS/Final Cut Pro" >/dev/null 2>&1; then
+            err "$APP_NAME is running, and rebuilding it replaces the whole app."
+            err "Quit it (Cmd+Q) and re-run: make install"
+            exit 1
+        fi
+        pick=1
+        if ! $ASSUME_YES && $INTERACTIVE; then
+            pick="$(choose "Rebuild \"$APP_NAME\" from Final Cut Pro ${fresh_ver% *}? It replaces the app with a fresh ~7GB copy; your libraries are not touched." \
+                "Yes — rebuild it from Final Cut Pro ${fresh_ver% *}" \
+                "No — keep the old copy, just update SpliceKit in it")" || { err "Cancelled."; exit 1; }
+        fi
+        if [[ "$pick" == "1" ]]; then
+            log "Rebuilding $MODDED_APP from $fresh_src (${fresh_ver% *})"
+            SPLICEKIT_SKIP_MCP_CONFIG=1 "$REPO_DIR/patcher/patch_fcp.sh" --dest "$DEST_DIR" --app-name "$APP_NAME" --source "$fresh_src" --yes
+            return 0
+        fi
+        warn "Keeping the old copy."
+    fi
+
     if is_patched; then
         log "Already patched: $MODDED_APP"
 
         if $CHECK_ONLY; then
-            info "Re-running would rebuild the dylib into it from current source"
+            if $REFRESH_PATCHED; then
+                info "Re-running would replace it with a fresh copy of the App Store Final Cut Pro"
+            else
+                info "Re-running would rebuild the dylib into it from current source"
+            fi
             return 0
         fi
 
@@ -525,6 +627,7 @@ if $CHECK_ONLY; then
     CHECK_OK=true
     ensure_toolchain   || CHECK_OK=false
     ensure_python      || CHECK_OK=false
+    check_fcp_version  || CHECK_OK=false
     ensure_patched_app || CHECK_OK=false
     if is_patched; then
         missing="$(missing_audio_helpers | tr '\n' ' ')"
@@ -564,6 +667,7 @@ if $ASSUME_YES || ! $INTERACTIVE; then PATCHER_YES=(--yes); fi
 
 ensure_toolchain
 ensure_python
+check_fcp_version || true
 ensure_patched_app
 ensure_mcp
 verify_live || true

@@ -1,0 +1,8 @@
+# The Final Cut Pro release this checkout was last checked against.
+#
+# make install and make install-check compare it with the Final Cut Pro on this
+# Mac and say so when they differ. After checking a new release (make fcp-compat,
+# then the live checks, as in .claude/CLAUDE.md "When Final Cut Pro updates"),
+# set both lines to it and refresh the baseline: make fcp-baseline
+version=12.4
+build=454072

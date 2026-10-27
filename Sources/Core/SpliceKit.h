@@ -157,6 +157,9 @@ BOOL SpliceKit_asyncFdWantsEvent(int fd, NSString *eventType);
 // Starts the TCP listener on port 9876.
 // Called once from the app-launch notification handler.
 void SpliceKit_startControlServer(void);
+// ~/Library/Application Support/SpliceKit/bridge-key: every connection sends its
+// contents as "auth" before the bridge runs anything (see SpliceKitServer.m).
+NSString *SpliceKit_bridgeKeyPath(void);
 
 // Push a JSON-RPC notification to every connected client.
 // Used for things like playhead-moved events.

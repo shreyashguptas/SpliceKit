@@ -13,6 +13,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -42,8 +43,11 @@ class FakeSocket:
     def gettimeout(self):
         return self.timeout
 
+    NONCE = "ef" * 32
+
     def connect(self, address):
-        pass
+        # The real bridge opens every connection with its challenge.
+        self._hello = True
 
     def close(self):
         self.closed = True
@@ -56,6 +60,11 @@ class FakeSocket:
 
     def recv(self, _size):
         import time
+        if getattr(self, "_hello", False):
+            self._hello = False
+            hello = {"jsonrpc": "2.0", "method": "bridge.hello",
+                     "params": {"nonce": self.NONCE, "auth": "hmac-sha256"}}
+            return (json.dumps(hello) + "\n").encode()
         time.sleep(self.delay)
         with self.lock:
             req = self._pending.pop(0)
@@ -165,6 +174,38 @@ class ServerV2Tests(unittest.TestCase):
         for i, r in results.items():
             self.assertEqual(r["echo"], f"method.{i}", r)
         self.assertEqual(sorted(req["id"] for req in fake.sent), list(range(1, 9)))
+
+    def test_every_request_answers_the_challenge_and_the_key_never_leaves(self):
+        # The bridge opens each connection with a nonce and runs nothing until a request
+        # carries HMAC-SHA256(key, nonce); the key itself must never be sent.
+        import hashlib
+        import hmac
+        fake = FakeSocket()
+        b = self._patched_bridge(fake)
+        key = "ab" * 32
+        os.environ["SPLICEKIT_BRIDGE_KEY"] = key
+        self.addCleanup(os.environ.pop, "SPLICEKIT_BRIDGE_KEY", None)
+        b.call("one")
+        b.call("two")
+        answer = hmac.new(key.encode(), FakeSocket.NONCE.encode(), hashlib.sha256).hexdigest()
+        self.assertEqual([req["auth"] for req in fake.sent], [answer] * 2)
+        self.assertNotIn(key, json.dumps(fake.sent))
+
+    def test_bridge_key_is_read_from_the_key_file(self):
+        m = self.module
+        os.environ.pop("SPLICEKIT_BRIDGE_KEY", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bridge-key")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("cd" * 32 + "\n")
+            old = m.BRIDGE_KEY_PATH
+            set_package_global(m, "BRIDGE_KEY_PATH", path)
+            try:
+                self.assertEqual(m.bridge_key(), "cd" * 32)
+                os.remove(path)
+                self.assertEqual(m.bridge_key(), "", "no key file: send none and let the bridge say why")
+            finally:
+                set_package_global(m, "BRIDGE_KEY_PATH", old)
 
     def test_connect_timeout_then_read_timeout_and_per_call_override(self):
         fake = FakeSocket()

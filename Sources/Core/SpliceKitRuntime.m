@@ -191,11 +191,22 @@ NSDictionary *SpliceKit_sequenceIdentity(id sequence) {
         if (libraryName.length > 0) [parts addObject:[NSString stringWithFormat:@"lib=%@", libraryName]];
         if (eventName.length > 0) [parts addObject:[NSString stringWithFormat:@"event=%@", eventName]];
         [parts addObject:[NSString stringWithFormat:@"sequence=%@", sequenceName]];
-        NSString *rawKey = [parts componentsJoinedByString:@"|"];
+        NSString *legacyRawKey = [parts componentsJoinedByString:@"|"];
+        // The library and event names often read empty, which left the project
+        // name as the whole key: a new project named like an old one (every test
+        // library's "QA Timeline") opened the old one's transcript and captions.
+        // FCP's own identifier for the sequence tells them apart, and it alone is
+        // the key when there is one, so renaming the project (or its event, or a
+        // different library being selected) keeps its transcript.
+        NSString *rawKey = mediaIdentifier.length > 0
+            ? [NSString stringWithFormat:@"media=%@", mediaIdentifier]
+            : legacyRawKey;
         NSString *cacheKey = [NSString stringWithFormat:@"%016llx", SpliceKit_fnv1aHash(rawKey)];
+        NSString *legacyCacheKey = [NSString stringWithFormat:@"%016llx", SpliceKit_fnv1aHash(legacyRawKey)];
 
         identity = @{
             @"cacheKey": cacheKey,
+            @"legacyCacheKey": legacyCacheKey,
             @"rawKey": rawKey,
             @"libraryName": libraryName ?: @"",
             @"eventName": eventName ?: @"",
@@ -207,18 +218,18 @@ NSDictionary *SpliceKit_sequenceIdentity(id sequence) {
     return identity;
 }
 
-static NSString *SpliceKit_sequenceStatePath(id sequence) {
-    NSDictionary *identity = SpliceKit_sequenceIdentity(sequence);
-    NSString *cacheKey = identity[@"cacheKey"];
+static NSString *SpliceKit_sequenceStatePathForKey(NSString *cacheKey) {
     if (cacheKey.length == 0) return nil;
     return [[SpliceKit_sequenceStateDirectory() stringByAppendingPathComponent:cacheKey]
         stringByAppendingPathExtension:@"json"];
 }
 
-NSDictionary *SpliceKit_loadSequenceState(id sequence) {
-    NSString *path = SpliceKit_sequenceStatePath(sequence);
-    if (path.length == 0) return nil;
+static NSString *SpliceKit_sequenceStatePath(id sequence) {
+    return SpliceKit_sequenceStatePathForKey(SpliceKit_sequenceIdentity(sequence)[@"cacheKey"]);
+}
 
+static NSDictionary *SpliceKit_readSequenceStateFile(NSString *path) {
+    if (path.length == 0) return nil;
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data) return nil;
 
@@ -231,6 +242,26 @@ NSDictionary *SpliceKit_loadSequenceState(id sequence) {
         return nil;
     }
     return json;
+}
+
+NSDictionary *SpliceKit_loadSequenceState(id sequence) {
+    NSDictionary *identity = SpliceKit_sequenceIdentity(sequence);
+    NSDictionary *state = SpliceKit_readSequenceStateFile(SpliceKit_sequenceStatePathForKey(identity[@"cacheKey"]));
+    if (state) return state;
+
+    // Saved before the key named the sequence's identifier: the file is keyed by
+    // name alone, so use it only when the identifier it recorded is this one's.
+    NSString *legacyKey = identity[@"legacyCacheKey"];
+    NSString *mediaIdentifier = identity[@"mediaIdentifier"];
+    if (legacyKey.length == 0 || [legacyKey isEqualToString:identity[@"cacheKey"]] ||
+        mediaIdentifier.length == 0) return nil;
+    NSDictionary *legacy = SpliceKit_readSequenceStateFile(SpliceKit_sequenceStatePathForKey(legacyKey));
+    NSDictionary *saved = [legacy[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]] ? legacy[@"sequenceIdentity"] : nil;
+    if (![saved[@"mediaIdentifier"] isKindOfClass:[NSString class]] ||
+        ![saved[@"mediaIdentifier"] isEqualToString:mediaIdentifier]) return nil;
+    NSMutableDictionary *migrated = [legacy mutableCopy];
+    migrated[@"sequenceIdentity"] = identity;
+    return migrated;
 }
 
 BOOL SpliceKit_saveSequenceState(id sequence, NSDictionary *state, NSError **error) {

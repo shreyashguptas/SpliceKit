@@ -281,6 +281,11 @@ batch_export(folder="/path/to/output")           # every clip as its own file; f
 - "Handle not found" -> Released or stale. Re-read with `get_timeline_clips()`.
 - "No responder handled X" -> Action not available (wrong state or no selection).
 - Broken pipe -> Stale connection. Next call auto-reconnects.
+- "Unauthorized: answer this connection's bridge.hello nonce" -> the client sent no or a
+  wrong `auth`. Each connection opens with a nonce; `auth` is HMAC-SHA256(key, nonce) with
+  the key from `~/Library/Application Support/SpliceKit/bridge-key` (written by the patched
+  FCP on first launch). The MCP server, `scripts/splicekit_client.py` and
+  `tests/live/live_rpc.py` do it; for a raw call use `python3 scripts/splicekit_client.py <method>`.
 - A modal dialog is blocking -> `detect_dialog()`, then `click_dialog_button` / `dismiss_dialog`.
 
 ## Where to look
@@ -325,6 +330,21 @@ make mcp-check-live    # read from the running patched FCP through the MCP serve
 make deploy            # build and copy into the patched app (restart FCP to load it)
 make install           # the full one-command install; make install-check to inspect
 ```
+
+### When Final Cut Pro updates
+`FCP_TESTED_VERSION` names the FCP release this checkout was last checked against.
+`make install` / `make install-check` compare it with the App Store copy and, when they
+differ, tell the user to ask: "Can you please update this repository with the latest Final
+Cut Pro?" The patched copy never updates itself. To do that update:
+1. `make fcp-compat` -- the FCP classes, methods, ivars and keys SpliceKit uses that the
+   new release no longer has (against `patcher/fcp-names-baseline.txt`), with the lines
+   that use each. Read the release notes too (support.apple.com/en-us/102825).
+2. Rebuild the patched copy from the new release (ask first: it replaces the app):
+   `patcher/patch_fcp.sh --app-name "Final Cut Pro Modified" --source "<App Store app>" --yes`.
+3. Find each replacement live (`explore_class`, `search_methods`), fix the code, `make test`,
+   then the live checks (`make mcp-check-live`, `tests/live/`, the live sweep).
+4. Set `FCP_TESTED_VERSION` to the new version and build, then `make fcp-baseline`; note
+   the release in docs/CHANGELOG.md and the README's "developed against" line.
 
 ### Add an RPC
 Write the handler (`NSDictionary *handler(NSDictionary *params)`, declared in

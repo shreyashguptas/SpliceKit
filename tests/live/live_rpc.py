@@ -7,13 +7,51 @@ inside Final Cut Pro (newline-delimited JSON-RPC 2.0), the parsed response back.
 Lines that are not the reply to this request (event notifications, which carry a
 "method" and no "id") are skipped rather than returned as the answer.
 """
+import hashlib
+import hmac
 import itertools
 import json
+import os
 import socket
 
 HOST = "127.0.0.1"
 PORT = 9876
 _ids = itertools.count(1)
+KEY_PATH = os.path.expanduser("~/Library/Application Support/SpliceKit/bridge-key")
+
+
+def bridge_key():
+    """The key the bridge wants as "auth" (SPLICEKIT_BRIDGE_KEY, else the key file)."""
+    if os.environ.get("SPLICEKIT_BRIDGE_KEY"):
+        return os.environ["SPLICEKIT_BRIDGE_KEY"].strip()
+    try:
+        with open(KEY_PATH, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def bridge_answer(nonce, key=None):
+    """HMAC-SHA256(key, nonce) hex: what the bridge accepts as "auth" on the connection
+    that sent `nonce` in its bridge.hello. The key itself never goes over the socket."""
+    key = bridge_key() if key is None else key
+    if not nonce or not key:
+        return ""
+    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+
+
+def read_hello(sock, data=b""):
+    """(nonce, leftover bytes): the challenge the bridge opens every connection with."""
+    while b"\n" not in data:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return "", data
+        data += chunk
+    line, rest = data.split(b"\n", 1)
+    frame = json.loads(line.decode())
+    if frame.get("method") == "bridge.hello":
+        return str(frame.get("params", {}).get("nonce", "")), rest
+    return "", data
 
 
 def rpc(method, params=None, timeout=10, *, host=None, port=None):
@@ -26,8 +64,9 @@ def rpc(method, params=None, timeout=10, *, host=None, port=None):
     s.settimeout(timeout)
     try:
         s.connect((host or HOST, port or PORT))
+        nonce, data = read_hello(s)
+        req["auth"] = bridge_answer(nonce)
         s.sendall((json.dumps(req) + "\n").encode())
-        data = b""
         while True:
             while b"\n" not in data:
                 chunk = s.recv(1 << 20)
