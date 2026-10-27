@@ -543,11 +543,16 @@ static BOOL SpliceKit_isBridgeKey(NSString *key) {
 
 static NSString *SpliceKit_loadOrCreateBridgeKey(void) {
     NSString *path = SpliceKit_bridgeKeyPath();
-    NSString *existing = [[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
-        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (SpliceKit_isBridgeKey(existing)) {
-        chmod(path.fileSystemRepresentation, 0600);
-        return existing;
+    // Only a regular file of ours counts: a symlink planted at the path is replaced
+    // (rename swaps the link itself), never followed for reading or chmod.
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+        NSString *existing = [[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (SpliceKit_isBridgeKey(existing)) {
+            if ((st.st_mode & 0777) != 0600) chmod(path.fileSystemRepresentation, 0600);
+            return existing;
+        }
     }
 
     uint8_t bytes[32];
@@ -559,7 +564,8 @@ static NSString *SpliceKit_loadOrCreateBridgeKey(void) {
                               withIntermediateDirectories:YES attributes:nil error:nil];
     // Written with 0600 from the start: never readable by others, not even briefly.
     NSString *tmp = [path stringByAppendingFormat:@".%d.tmp", getpid()];
-    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    unlink(tmp.fileSystemRepresentation);
+    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     NSData *data = [[key stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
     BOOL ok = fd >= 0 && write(fd, data.bytes, data.length) == (ssize_t)data.length;
     if (fd >= 0) close(fd);
@@ -590,9 +596,36 @@ static BOOL SpliceKit_bridgeKeyMatches(id candidate) {
 // one JSON-RPC request per line, one JSON response per line. No framing,
 // no content-length headers — just newline-delimited JSON over TCP.
 //
-// Lines are read whole (getline), however long: an FCPXML import sent inline can
-// pass the 64KB a fixed buffer used to cut it at.
+// Lines are read whole once the connection has sent the key, however long: an FCPXML
+// import sent inline can pass the 64KB a fixed buffer used to cut it at.
 //
+
+// Until a connection has sent the key, a line may be at most this long: anyone on the
+// Mac can connect, and an endless line would otherwise grow FCP's memory until macOS
+// kills it. After the key, lines are read whole (an inline FCPXML can be megabytes).
+static const size_t kSpliceKitMaxUnauthenticatedLine = 64 * 1024;
+
+// Reads one line (through its newline, or to end of file) into *buffer, growing it.
+// Returns the length, 0 at end of file, or -1 when the line passes maxLength.
+static ssize_t SpliceKit_readLine(FILE *stream, char **buffer, size_t *capacity, size_t maxLength) {
+    size_t length = 0;
+    int c;
+    while ((c = getc(stream)) != EOF) {
+        if (length + 2 > *capacity) {
+            size_t grown = *capacity ? *capacity * 2 : 4096;
+            char *next = realloc(*buffer, grown);
+            if (!next) return -1;
+            *buffer = next;
+            *capacity = grown;
+        }
+        (*buffer)[length++] = (char)c;
+        if (c == '\n') break;
+        if (maxLength && length > maxLength) return -1;
+    }
+    if (length == 0) return 0;
+    (*buffer)[length] = '\0';
+    return (ssize_t)length;
+}
 
 static void SpliceKit_writeResponse(int clientFd, NSDictionary *response) {
     NSData *responseJson = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
@@ -627,7 +660,13 @@ static void SpliceKit_handleClient(int clientFd) {
     char *buffer = NULL;
     size_t bufferSize = 0;
     ssize_t lineLength;
-    while ((lineLength = getline(&buffer, &bufferSize, stream)) > 0) {
+    while ((lineLength = SpliceKit_readLine(stream, &buffer, &bufferSize,
+                authenticated ? 0 : kSpliceKitMaxUnauthenticatedLine)) != 0) {
+        if (lineLength < 0) {
+            SpliceKit_log(@"Closed connection fd=%d: a line over %zu KB before the bridge key",
+                          clientFd, kSpliceKitMaxUnauthenticatedLine / 1024);
+            break;
+        }
         @autoreleasepool {
             const char *start = buffer;
             while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
@@ -751,8 +790,6 @@ void SpliceKit_startControlServer(void) {
     sConnectedClients = [NSMutableArray array];
     sClientWriteQueues = [NSMutableDictionary dictionary];
 
-    sBridgeKey = SpliceKit_loadOrCreateBridgeKey();
-
     int serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
         SpliceKit_log(@"ERROR: Failed to create TCP socket: %s", strerror(errno));
@@ -783,6 +820,9 @@ void SpliceKit_startControlServer(void) {
     }
 
     sServerFd = serverFd;
+    // Read or made only by the process that holds the port: two first launches at once
+    // cannot leave the listening one with a key the file no longer holds.
+    sBridgeKey = SpliceKit_loadOrCreateBridgeKey();
 
     SpliceKit_log(@"================================================");
     SpliceKit_log(@"Control server listening on 127.0.0.1:%d", SPLICEKIT_TCP_PORT);

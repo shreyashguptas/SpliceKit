@@ -195,9 +195,12 @@ NSDictionary *SpliceKit_sequenceIdentity(id sequence) {
         // The library and event names often read empty, which left the project
         // name as the whole key: a new project named like an old one (every test
         // library's "QA Timeline") opened the old one's transcript and captions.
-        // FCP's own identifier for the sequence tells them apart.
-        if (mediaIdentifier.length > 0) [parts addObject:[NSString stringWithFormat:@"media=%@", mediaIdentifier]];
-        NSString *rawKey = [parts componentsJoinedByString:@"|"];
+        // FCP's own identifier for the sequence tells them apart, and it alone is
+        // the key when there is one, so renaming the project (or its event, or a
+        // different library being selected) keeps its transcript.
+        NSString *rawKey = mediaIdentifier.length > 0
+            ? [NSString stringWithFormat:@"media=%@", mediaIdentifier]
+            : legacyRawKey;
         NSString *cacheKey = [NSString stringWithFormat:@"%016llx", SpliceKit_fnv1aHash(rawKey)];
         NSString *legacyCacheKey = [NSString stringWithFormat:@"%016llx", SpliceKit_fnv1aHash(legacyRawKey)];
 

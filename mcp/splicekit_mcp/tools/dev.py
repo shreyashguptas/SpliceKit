@@ -53,9 +53,11 @@ def deploy_and_restart(skip_build: bool = False) -> str:
         )
 
     def _fcp_is_running() -> bool:
+        # The patched copy only: `pgrep -x "Final Cut Pro"` also matched the App Store app,
+        # so a running original read as "quit failed" or as the relaunch having worked.
         try:
             proc = subprocess.run(
-                ["pgrep", "-x", "Final Cut Pro"],
+                ["pgrep", "-f", os.path.join(modded_app, "Contents", "MacOS", "Final Cut Pro")],
                 capture_output=True,
                 timeout=5,
             )

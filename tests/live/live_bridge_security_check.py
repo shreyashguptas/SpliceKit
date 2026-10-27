@@ -14,7 +14,8 @@ Read-only: every request it lets through is system.version. It checks that
     code -32003) and the connection closed, so the next request on it gets nothing;
   - the right key authenticates the connection: later requests on it need no key;
   - a JSON array (not an object) closes the connection instead of reaching the dispatcher;
-  - a request line over 64 KB is read whole;
+  - before the key, a line may be at most 64 KB (an endless one is cut off); after the
+    key, a request line over 64 KB is read whole;
   - the key file exists, holds 64 hex characters and is readable by this user only.
 """
 
@@ -42,9 +43,9 @@ def exchange(payload: bytes, timeout=5.0):
     """Send raw bytes on a fresh connection; return (reply lines, closed_by_server)."""
     s = socket.create_connection((HOST, PORT), timeout=timeout)
     try:
-        s.sendall(payload)
         data, closed = b"", False
         try:
+            s.sendall(payload)
             while True:
                 chunk = s.recv(1 << 20)
                 if not chunk:
@@ -53,6 +54,9 @@ def exchange(payload: bytes, timeout=5.0):
                 data += chunk
         except socket.timeout:
             pass
+        except (ConnectionResetError, BrokenPipeError):
+            # Closed with our bytes still unread (the bridge stopped reading mid-line).
+            closed = True
         lines = [json.loads(line) for line in data.split(b"\n") if line.strip()]
         return lines, closed
     finally:
@@ -112,9 +116,14 @@ def main():
     lines, closed = exchange(request(auth=key) + b"[1, 2]\n" + request(auth=key, rid=3), timeout=3)
     check("a JSON array (not an object) closes the connection, nothing after it runs",
           len(lines) == 1 and "result" in lines[0] and closed, str(lines)[:200])
-    big = request(auth=key, params={"padding": "x" * 200_000})
+    flood = b'{"padding": "' + b"x" * 300_000
+    lines, closed = exchange(flood, timeout=5)
+    check("before the key, a line past 64 KB is cut off and the connection closed",
+          lines == [] and closed, str(lines)[:160])
+    big = request(auth=key) + request(auth=key, rid=2, params={"padding": "x" * 200_000})
     lines, _ = exchange(big, timeout=10)
-    check(f"a {len(big) // 1024} KB request line is read whole", lines and "result" in lines[0], str(lines)[:160])
+    check(f"after the key, a {len(big) // 1024} KB request line is read whole",
+          len(lines) == 2 and "result" in lines[1], str(lines)[:160])
     check("the bridge still answers through live_rpc", "result" in live_rpc.rpc("system.version"))
 
     print()

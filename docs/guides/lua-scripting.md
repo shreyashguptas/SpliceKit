@@ -70,8 +70,11 @@ Frame rate: 24.0 fps
 Or use the JSON-RPC method:
 
 ```json
-{"method": "lua.executeFile", "params": {"path": "my_first_script.lua"}}
+{"jsonrpc": "2.0", "id": 1, "method": "lua.executeFile", "params": {"path": "my_first_script.lua"},
+ "auth": "<the contents of ~/Library/Application Support/SpliceKit/bridge-key>"}
 ```
+
+(The MCP tools `lua_execute` / `lua_execute_file` send the key for you.)
 
 ### Live Coding
 

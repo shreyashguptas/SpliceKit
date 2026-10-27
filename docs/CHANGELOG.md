@@ -75,23 +75,27 @@ that this fork has removed.
   as `"auth"`: 256 random bits the patched app writes on first launch to
   `~/Library/Application Support/SpliceKit/bridge-key`, readable by you only. One good key
   authenticates the rest of the connection; a missing or wrong one is refused
-  ("Unauthorized", -32003) and the connection closed. The MCP server, `scripts/splicekit_client.py`,
+  ("Unauthorized", -32003) and the connection closed. Before the key, a line may be at most
+  64 KB, so nobody on the Mac can grow FCP's memory with an endless one; the key file is never
+  read or chmod-ed through a symlink, and only the process that holds the port reads or makes
+  it. The MCP server, `scripts/splicekit_client.py`,
   `tests/live/live_rpc.py` and the Logitech haptics plugin send it. Requests are also read whole
-  now, however long (a fixed 64 KB buffer cut longer ones in two), and a JSON array no longer
+  once authenticated, however long (a fixed 64 KB buffer cut longer ones in two), and a JSON array no longer
   reaches the dispatcher. Live check: `tests/live/live_bridge_security_check.py`
   (`Sources/Bridge/SpliceKitServer.m`).
 - **`deploy_and_restart` makes sure Final Cut Pro really started.** It ran `open` the moment
   the old process exited and never checked the result; macOS, still finishing the quit, could
   treat that as a no-op, so twice on 12.4 the tool reported "Launched" with nothing running and
   the bridge never came back. It now waits for the new process and asks once more when none
-  appears (`mcp/splicekit_mcp/tools/dev.py`).
+  appears. It also looks for the patched app only: it used to count the App Store Final Cut
+  Pro as the one it had quit or launched (`mcp/splicekit_mcp/tools/dev.py`).
 - **A new project no longer opens an old project's transcript or captions.** Saved transcripts
   and captions were filed under the project's name alone (the library and event names read
   empty), so a project named like an earlier one, such as a fresh test library's
   "QA Timeline", restored the earlier project's words; deleting or moving those words would
   have cut the wrong parts of the timeline. They are now filed under Final Cut Pro's own
-  identifier for the project too, and a transcript saved the old way is still restored for the
-  project it came from. Switching to a project with nothing saved now clears the panel instead
+  identifier for the project alone, so renaming a project keeps its transcript too, and a
+  transcript saved the old way is still restored for the project it came from. Switching to a project with nothing saved now clears the panel instead
   of keeping the last project's words (`Sources/Core/SpliceKitRuntime.m`).
 - **Titles and generators, fully: list, add exactly, read and change every setting.**
   `list_titles` lists every installed title and generator (Apple's and your own Motion

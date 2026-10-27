@@ -1324,11 +1324,16 @@ class SpliceKitClient {
                       completion: @escaping ([String: Any]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             requestID += 1
+            // The bridge runs nothing until a request carries its key (see SpliceKitServer.m).
+            let keyPath = NSHomeDirectory() + "/Library/Application Support/SpliceKit/bridge-key"
+            let key = (try? String(contentsOfFile: keyPath, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let request: [String: Any] = [
                 "jsonrpc": "2.0",
                 "method": method,
                 "params": params,
-                "id": requestID
+                "id": requestID,
+                "auth": key
             ]
             
             guard let data = try? JSONSerialization.data(withJSONObject: request),
