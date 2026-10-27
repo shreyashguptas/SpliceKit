@@ -141,12 +141,33 @@ def deploy_and_restart(skip_build: bool = False) -> str:
         except Exception as e:
             return f"Error running make deploy: {e}"
 
-    # Step 4: Relaunch
+    # Step 4: Relaunch. An `open` sent right after the old process exits can do nothing:
+    # LaunchServices may still be finishing the quit and treat it as "activate the app
+    # that is running" (seen twice on FCP 12.4: quit OK, no new process, the bridge never
+    # came up). So wait for a process to appear, and ask once more if none does.
+    def _launch() -> bool:
+        subprocess.run(["open", modded_app], capture_output=True, timeout=30)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if _fcp_is_running():
+                return True
+            time.sleep(0.5)
+        return False
+
     try:
-        subprocess.Popen(["open", modded_app])
-        results.append(f"Launched: {os.path.basename(modded_app)}")
+        launched = _launch()
+        if not launched:
+            time.sleep(2)
+            launched = _launch()
     except Exception as e:
         return f"Error launching FCP: {e}"
+    if not launched:
+        return (
+            "\n".join(results)
+            + f"\nError: {os.path.basename(modded_app)} did not start after two `open` calls; "
+            "open it by hand and check ~/Library/Logs/SpliceKit/splicekit.log"
+        )
+    results.append(f"Launched: {os.path.basename(modded_app)}")
 
     # Step 5: Wait for bridge
     # Drop the existing connection so we don't use a stale socket
