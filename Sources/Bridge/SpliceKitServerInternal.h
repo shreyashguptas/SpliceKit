@@ -110,9 +110,8 @@ NSDictionary *SpliceKit_handleViewerSetZoom(NSDictionary *params);
 
 #pragma mark - Defined in SpliceKitFeatureFreezeExtend.m
 
-extern BOOL sFreezeExtendPendingAutoAccept;
 extern BOOL sFreezeExtendDidApply;
-void SpliceKit_armTransitionAlertAutoAccept(void);
+void SpliceKit_withTransitionAlertAutoAccept(void (^block)(void));
 double SpliceKit_transitionFrameDurationSeconds(id timeline);
 double SpliceKit_transitionCurrentTimeSeconds(id timeline);
 BOOL SpliceKit_transitionSeekToSeconds(id timeline, double seconds);
@@ -303,7 +302,7 @@ NSDictionary *SpliceKit_handleTitlesSetParameters(NSDictionary *params);
 NSDictionary *SpliceKit_handleBackgroundRenderStatus(__unused NSDictionary *params);
 NSDictionary *SpliceKit_handleBackgroundRenderControl(NSDictionary *params);
 
-#pragma mark - Defined in SpliceKitServerPalette.m
+#pragma mark - Defined in SpliceKitServerDualTimeline.m
 
 NSDictionary *SpliceKit_handleCommandShow(NSDictionary *params);
 NSDictionary *SpliceKit_handleCommandHide(NSDictionary *params);

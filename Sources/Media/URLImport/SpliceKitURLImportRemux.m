@@ -48,10 +48,13 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
         ? clipName
         : [[sourcePath lastPathComponent] stringByDeletingPathExtension]);
     NSString *outputExtension = SpliceKitURLImportOutputExtensionForNormalizationMode(normalizationMode);
-    NSString *outputName = [NSString stringWithFormat:@"%@.%@", safeName, outputExtension];
-    NSString *outputPath = SpliceKitURLImportUniquePathForFilename(outputName,
-                                                                   SpliceKitURLImportSharedNormalizedDirectory());
-    [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+    // A name no other call can pick: Final Cut asks for the same file several times at
+    // once during an import, and two remuxes writing (and deleting) one shared
+    // "<name>.mp4" could hand Final Cut a file another call then removed.
+    NSString *outputName = [NSString stringWithFormat:@"%@-%@.%@", safeName,
+                            [NSUUID UUID].UUIDString, outputExtension];
+    NSString *outputPath = [SpliceKitURLImportSharedNormalizedDirectory()
+                            stringByAppendingPathComponent:outputName];
 
     // Explicit per-stream mapping keeps subtitle/attachment streams out of the
     // MP4 mux. MKV files regularly ship with subrip subtitles and font
@@ -123,11 +126,17 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
     };
 }
 
-// Deterministic shadow path: same source file → same .mp4 filename. The hash
+// Deterministic shadow path: same source file → same .mp4 path. The hash
 // folds in size + mtime, so any change to the source invalidates the shadow
 // automatically. Restarts don't produce duplicates (Fix.mp4, Fix-1.mp4,
 // Fix-2.mp4, …) because the shadow path is a pure function of the source;
 // before remuxing we just check whether the destination already exists.
+//
+// The hash names a folder and the file keeps the source's own name
+// (normalized/6e70a541/Interview.mp4): Final Cut names an imported clip after
+// its file, so a hash in the filename showed up as the clip name
+// ("Interview.6e70a541") on every import path, and in Original Media when the
+// import copies files into the library.
 //
 // Using the filesystem as the cache has a nice side-effect: a single FCP
 // session that triggers the hook 5× per Media Import row (thumbnail →
@@ -135,7 +144,7 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
 // and then reuses the on-disk shadow instantly.
 static const int kSpliceKitURLImportShadowFormatVersion = 2;
 
-static NSString *SpliceKitURLImportShadowFilenameForSource(NSString *sourcePath, NSString *extension) {
+static NSString *SpliceKitURLImportShadowRelativePathForSource(NSString *sourcePath, NSString *extension) {
     if (sourcePath.length == 0) return nil;
     NSError *attrError = nil;
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:sourcePath
@@ -160,7 +169,7 @@ static NSString *SpliceKitURLImportShadowFilenameForSource(NSString *sourcePath,
     for (NSUInteger i = 0; cStr && cStr[i]; i++) {
         hash = ((hash << 5) + hash) ^ (unsigned char)cStr[i];
     }
-    return [NSString stringWithFormat:@"%@.%08lx.%@", base, (unsigned long)(hash & 0xffffffff),
+    return [NSString stringWithFormat:@"%08lx/%@.%@", (unsigned long)(hash & 0xffffffff), base,
             extension.length > 0 ? extension : @"mp4"];
 }
 
@@ -323,20 +332,20 @@ NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
     // If the shadow exists already (from a previous hook call in this session
     // or even a previous FCP launch), reuse it instead of re-running ffmpeg.
     NSString *shadowDir = SpliceKitURLImportSharedNormalizedDirectory();
-    NSString *shadowName = SpliceKitURLImportShadowFilenameForSource(sourcePath, @"mp4");
-    NSString *shadowPath = shadowName.length > 0
-        ? [shadowDir stringByAppendingPathComponent:shadowName]
+    NSString *shadowRelativePath = SpliceKitURLImportShadowRelativePathForSource(sourcePath, @"mp4");
+    NSString *shadowPath = shadowRelativePath.length > 0
+        ? [shadowDir stringByAppendingPathComponent:shadowRelativePath]
         : nil;
 
     if (shadowPath.length > 0 &&
         [[NSFileManager defaultManager] fileExistsAtPath:shadowPath]) {
         SpliceKit_log(@"[VP9Import] shadow HIT: %@ -> %@",
-                      sourcePath.lastPathComponent, shadowName);
+                      sourcePath.lastPathComponent, shadowRelativePath);
         return [NSURL fileURLWithPath:shadowPath];
     }
 
     SpliceKit_log(@"[VP9Import] shadow MISS, remuxing: %@ -> %@",
-                  sourcePath.lastPathComponent, shadowName ?: @"<nil>");
+                  sourcePath.lastPathComponent, shadowRelativePath ?: @"<nil>");
 
     NSDictionary *mediaInfo = [[SpliceKitURLImportService sharedService] inspectMediaAtPath:sourcePath];
     NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
@@ -358,7 +367,7 @@ NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
         NSString *retagError = nil;
         if (SpliceKitURLImportRetagMP4HEVCInPlace(sourcePath, shadowPath, &retagError)) {
             SpliceKit_log(@"[VP9Import] retag fast-path: %@ -> %@",
-                          sourcePath.lastPathComponent, shadowName);
+                          sourcePath.lastPathComponent, shadowRelativePath);
             return [NSURL fileURLWithPath:shadowPath];
         }
         SpliceKit_log(@"[VP9Import] retag fast-path failed (%@), falling back to ffmpeg", retagError);
@@ -372,16 +381,21 @@ NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
     NSString *rewrittenPath = SpliceKitURLImportTrimmedString(rewriteResult[@"path"]);
     if (rewrittenPath.length == 0) return fileURL;
 
-    // The synchronous remuxer picks a unique filename via
-    // `SpliceKitURLImportUniquePathForFilename`, so its output may not match
-    // our deterministic shadowPath. Rename into place so future calls hit the
-    // shadow HIT branch above. Fall back to the remuxer's path if the rename
-    // fails (e.g. cross-device move) so the import still works.
+    // The synchronous remuxer writes a uniquely named file, so its output never
+    // matches our deterministic shadowPath. Rename into place so future calls hit
+    // the shadow HIT branch above. When another call for the same source got there
+    // first, its shadow is kept (Final Cut may already hold it) and this copy is
+    // dropped. Fall back to the remuxer's path if the rename fails otherwise (e.g.
+    // cross-device move) so the import still works.
     if (shadowPath.length > 0 && ![rewrittenPath isEqualToString:shadowPath]) {
         NSFileManager *fm = [NSFileManager defaultManager];
-        [fm removeItemAtPath:shadowPath error:nil];
+        [fm createDirectoryAtPath:[shadowPath stringByDeletingLastPathComponent]
+            withIntermediateDirectories:YES attributes:nil error:nil];
         NSError *moveError = nil;
         if ([fm moveItemAtPath:rewrittenPath toPath:shadowPath error:&moveError]) {
+            rewrittenPath = shadowPath;
+        } else if ([fm fileExistsAtPath:shadowPath]) {
+            [fm removeItemAtPath:rewrittenPath error:nil];
             rewrittenPath = shadowPath;
         } else {
             SpliceKit_log(@"[VP9Import] could not rename %@ -> %@: %@",

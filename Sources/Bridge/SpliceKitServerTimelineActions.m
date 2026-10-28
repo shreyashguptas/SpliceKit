@@ -106,7 +106,7 @@ static BOOL SpliceKit_actionMayOpenDialog(NSString *action) {
 // its Compound Clip Name sheet). Reported as dialogPending + dialog, never as an error;
 // a dialog that was already open before the action is reported the same way. Applied
 // by the RPC dispatcher to timeline.action only: the handler itself stays free of the
-// run-loop turn, so batch actions, blade_at_times, the command palette and Lua, which
+// run-loop turn, so batch actions, blade_at_times and Lua, which
 // call it in loops on the main thread, neither pay for it nor yield between steps.
 NSDictionary *SpliceKit_makeFilePanelDialogPendingDictionary(NSString *action, NSDictionary *base) {
     NSMutableDictionary *out = base ? [base mutableCopy] : [NSMutableDictionary dictionary];
@@ -635,7 +635,7 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
         @"collapseToSpine":            @"actionCollapseToSpine",
     };
 
-    // Names kept for compatibility (docs, Lua, the command palette) whose Final Cut Pro
+    // Names kept for compatibility (docs, Lua) whose Final Cut Pro
     // command is gone: no 12.3 menu item sends it and nothing in the responder chain
     // implements it. The action* ones are FFAnchoredSequence methods that take model
     // objects rather than a sender, so they cannot be fired as a responder-chain action.
@@ -765,19 +765,19 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
                 // unanswered, blocked the main thread, and the 20s dispatch timeout
                 // turned into a bare "Failed to add transitions to all clips" while the
                 // alert was still on screen and the action still open.
-                SpliceKit_armTransitionAlertAutoAccept();
+                SpliceKit_withTransitionAlertAutoAccept(^{
+                    // Add transition — FCP adds to all edit points when all clips selected
+                    SEL addSel = @selector(addTransition:);
+                    if ([timelineModule respondsToSelector:addSel]) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, addSel, nil);
+                    } else {
+                        [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
+                    }
 
-                // Add transition — FCP adds to all edit points when all clips selected
-                SEL addSel = @selector(addTransition:);
-                if ([timelineModule respondsToSelector:addSel]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, addSel, nil);
-                } else {
-                    [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
-                }
-
-                // Wait for transitions to appear
-                [[NSRunLoop currentRunLoop] runUntilDate:
-                    [NSDate dateWithTimeIntervalSinceNow:0.5]];
+                    // Wait for transitions to appear
+                    [[NSRunLoop currentRunLoop] runUntilDate:
+                        [NSDate dateWithTimeIntervalSinceNow:0.5]];
+                });
 
                 NSUInteger after = SpliceKit_transitionCount(timelineModule);
                 NSUInteger added = (after > before) ? (after - before) : 0;

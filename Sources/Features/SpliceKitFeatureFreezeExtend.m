@@ -19,15 +19,28 @@
 // unpredictable return value mapping. By owning the dialog entirely, we control the
 // output parameter (*a3): 1 = accept (create with overlap), 0 = cancel.
 
-BOOL sFreezeExtendPendingAutoAccept = NO;
+static BOOL sFreezeExtendPendingAutoAccept = NO;
 BOOL sFreezeExtendDidApply = NO;
+static BOOL sFreezeExtendUseFreezeFramesForCurrentAlert = NO;
 
-void SpliceKit_armTransitionAlertAutoAccept(void) {
+// Run `block` (which adds transitions) with FCP's "not enough extra media" alert
+// answered automatically, and switch that off again when it returns or throws.
+// The answer is armed only for the block: armed on its own, it outlived the call
+// that wanted it whenever no alert came (add_transition to all clips, the direct
+// addTransitionsDirect action), and every later NSAlert in Final Cut Pro was then
+// answered 0 without being shown -- a timeline delete was cancelled that way.
+void SpliceKit_withTransitionAlertAutoAccept(void (^block)(void)) {
+    BOOL wasArmed = sFreezeExtendPendingAutoAccept;
     sFreezeExtendPendingAutoAccept = YES;
     sFreezeExtendDidApply = NO;
+    @try {
+        block();
+    } @finally {
+        sFreezeExtendPendingAutoAccept = wasArmed;
+        if (!wasArmed) sFreezeExtendUseFreezeFramesForCurrentAlert = NO;
+    }
 }
 
-static BOOL sFreezeExtendUseFreezeFramesForCurrentAlert = NO;
 static IMP sOrigNSAlertRunModal = NULL;
 static IMP sOrigActionAddTransitions = NULL;
 static IMP sOrigOperationAddTransitions = NULL;
@@ -788,15 +801,14 @@ static char SpliceKit_swizzled_displayTransitionAlert(id self, SEL _cmd, char *r
             SpliceKit_log(@"[FreezeExtend] Async: set transition duration to %.4f (2 x %.4f)", fitDuration, minClipDur);
 
             // Auto-accept if the dialog still appears
-            sFreezeExtendPendingAutoAccept = YES;
-
-            SEL addSel = @selector(addTransition:);
-            if ([tl respondsToSelector:addSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(tl, addSel, nil);
-            } else {
-                [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
-            }
-            sFreezeExtendPendingAutoAccept = NO;
+            SpliceKit_withTransitionAlertAutoAccept(^{
+                SEL addSel = @selector(addTransition:);
+                if ([tl respondsToSelector:addSel]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(tl, addSel, nil);
+                } else {
+                    [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
+                }
+            });
 
             // Restore original transition duration
             if (origDurSetting > 0.0f) {

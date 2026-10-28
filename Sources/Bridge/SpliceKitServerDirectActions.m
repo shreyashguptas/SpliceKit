@@ -1367,11 +1367,15 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
                 if (!videoID) { result = @{@"error": @"No default video transition is set in Final Cut Pro."}; return; }
                 NSDictionary *effects = @{@"video": videoID, @"audio": @"FFAudioTransition"};
                 // Not enough media on an edge puts up an alert; accept it like apply_transition does.
-                SpliceKit_armTransitionAlertAutoAccept();
-                id created = nil;
-                NSError *error = nil;
-                BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, BOOL, id, int, id *, id, BOOL, NSError **))objc_msgSend)(
-                    sequence, sel, items, YES, YES, effects, 1, &created, rootItem, YES, &error);
+                __block NSError *error = nil;
+                __block BOOL ok = NO;
+                SpliceKit_withTransitionAlertAutoAccept(^{
+                    id created = nil;
+                    NSError *addError = nil;
+                    ok = ((BOOL (*)(id, SEL, id, BOOL, BOOL, id, int, id *, id, BOOL, NSError **))objc_msgSend)(
+                        sequence, sel, items, YES, YES, effects, 1, &created, rootItem, YES, &addError);
+                    error = addError;
+                });
                 result = SpliceKit_directActionResult(action, ok, error, @{@"videoTransition": videoID});
                 return;
             }

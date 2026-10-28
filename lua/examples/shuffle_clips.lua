@@ -9,8 +9,6 @@
   on the primary storyline (FFAnchoredCollection). No cut/paste, no
   FCPXML roundtrip, no clip loss. Undoable with Cmd+Z.
 
-  Also available from the command palette: search "Shuffle" or "Reverse".
-
   HOW TO USE:
     dofile("examples/shuffle_clips.lua")
 

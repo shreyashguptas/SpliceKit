@@ -146,15 +146,18 @@ NSArray<NSString *> *SpliceKitURLImportTimestampRewriteArguments(int timescale, 
     ];
 }
 
-// A stream-copy remux keeps every frame, so its output runs as long as the source.
+// A stream-copy remux keeps every frame, so its output runs no longer than the source.
 // nil when it does; otherwise why not, so a remux with broken timestamps (like the
 // ffmpeg 9 one above, 30x too long) fails loudly instead of reaching Final Cut.
+// Only too long counts: the source's duration is the whole file's (Matroska's segment
+// duration), and the remux keeps just the first video and audio track, so an MKV whose
+// subtitle or second audio track runs on past the picture remuxes shorter, correctly.
 NSString *SpliceKitURLImportRemuxDurationMismatch(NSDictionary *sourceInfo, NSDictionary *outputInfo) {
     double source = SpliceKitURLImportParseFractionString(sourceInfo[@"duration"]);
     double output = SpliceKitURLImportParseFractionString(outputInfo[@"duration"]);
     if (!(source > 0.0) || !(output > 0.0)) return nil;
     double tolerance = MAX(0.5, source * 0.05);
-    if (fabs(output - source) <= tolerance) return nil;
+    if (output <= source + tolerance) return nil;
     return [NSString stringWithFormat:
         @"The remuxed file runs %.3f s but the source runs %.3f s; its timestamps are wrong.",
         output, source];
