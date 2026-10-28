@@ -2,7 +2,7 @@
 
 Shared by the test files (and kept here so one change to a payload shape is made once):
 CMTime dicts, timeline.getDetailedState, timeline.getMarkers, timeline.getClipInfo,
-timeline.captureClipFrame, timeline.selectClips, timeline.trimClip, browser.placeClip,
+timeline.captureClipFrame, timeline.selectItems, timeline.trimClip, browser.placeClip,
 timeline.getBeatGrid and the clip / cut entries of timeline.getAudioLevels.
 """
 import base64

@@ -280,7 +280,13 @@ batch_export(folder="/path/to/output")           # every clip as its own file; f
 - "Cannot connect" -> the patched FCP is not running. Launch it.
 - "Handle not found" -> Released or stale. Re-read with `get_timeline_clips()`.
 - "No responder handled X" -> Action not available (wrong state or no selection).
-- Broken pipe -> Stale connection. Next call auto-reconnects.
+- "Connection closed by SpliceKit before it answered X" -> FCP quit or crashed mid-call; the
+  call may have run. `bridge_status()` first. (A restart between calls reconnects by itself.)
+- "Method not found: X ... older than this MCP server" -> FCP runs an older SpliceKit build:
+  `make deploy`, then `deploy_and_restart(skip_build=True)`.
+- An error ending "NOTE: SpliceKit's MCP server code changed on disk" (or `bridge_status`
+  showing `mcpServerCodeChanged`) -> the MCP client is still running the server it started
+  before a pull or merge: reconnect it (`/mcp`, splicekit, Reconnect).
 - "Unauthorized: answer this connection's bridge.hello nonce" -> the client sent no or a
   wrong `auth`. Each connection opens with a nonce; `auth` is HMAC-SHA256(key, nonce) with
   the key from `~/Library/Application Support/SpliceKit/bridge-key` (written by the patched
@@ -373,7 +379,7 @@ image content. Then: add the tool to [docs/reference/mcp-tools.md](../docs/refer
 (`tests/test_docs_tool_names.py` fails otherwise), keep the server's `instructions` in step
 when it changes which tool to pick, and run `make test`.
 
-The server runs on the official MCP Python SDK 2.x (`mcp>=2.2,<3` in `mcp/requirements.txt`;
+The server runs on the official MCP Python SDK 2.x (`mcp>=2.3,<3` in `mcp/requirements.txt`;
 `MCPServer` from `mcp.server.mcpserver`, protocol revision 2026-07-28, legacy `initialize`
 handshake still accepted). The SDK runs sync tools in worker threads, so
 `BridgeConnection.call` holds a lock for each round trip.

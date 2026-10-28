@@ -220,7 +220,7 @@ class FakeBridge(threading.Thread):
                                          "width": 1, "height": 1})
             return r
         # viewer.capture / timeline.capture / inspector.capture write a PNG where asked.
-        if method.endswith(".capture") or method.startswith("capture."):
+        if method.endswith(".capture"):
             path = p.get("path") or str(self.workdir / f"{method.replace('.', '_')}.png")
             try:
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -237,8 +237,7 @@ class FakeBridge(threading.Thread):
                     "classMethods": {}, "count": 1}
         if method == "system.getClasses":
             return {"classes": ["FFAnchoredTimelineModule"], "count": 1}
-        if method in ("system.getProperties", "system.getIvars", "system.getProtocols", "system.getSuperchain",
-                      "system.exploreClass", "system.searchMethods"):
+        if method in ("system.getProperties", "system.getIvars", "system.getProtocols", "system.getSuperchain"):
             return {"className": p.get("className"), "properties": [], "ivars": [], "protocols": [],
                     "superchain": [], "methods": [], "instanceMethods": {}, "classMethods": {}, "count": 0}
         if method == "plugin.listMethods":
@@ -258,10 +257,6 @@ class FakeBridge(threading.Thread):
         if method.startswith("debug."):
             return {"status": "ok", "config": {}, "threads": [], "log": [], "entries": [], "count": 0,
                     "result": None, "images": [], "symbols": [], "sections": {}, "classes": {}, "notifications": []}
-        if method == "timeline.getSelectedClips" or method == "timeline.getSelection":
-            return {"clips": [], "items": [], "count": 0, "selectedItems": []}
-        if method.startswith("handles.") or method == "system.listHandles":
-            return {"handles": [], "count": 0, "released": 0}
         if method.startswith("effects.") or method.startswith("transitions."):
             return {"status": "ok", "effects": [], "transitions": [], "count": 0, "applied": [], "names": []}
         if method.startswith("menu."):
@@ -302,18 +297,14 @@ class FakeBridge(threading.Thread):
             return res
         if method.startswith("browser."):
             return {"status": "ok", "clips": [], "count": 0, "handle": "obj_1"}
-        if method.startswith("library."):
-            return {"status": "ok", "libraries": [], "events": [], "projects": [], "count": 0, "updating": False}
-        if method.startswith("montage.") or method.startswith("flexmusic.") or method.startswith("songcut."):
+        if method.startswith("montage.") or method.startswith("flexmusic."):
             return {"status": "ok", "songs": [], "clips": [], "plan": [], "segments": [], "beats": [],
                     "bars": [], "sections": [], "count": 0, "timing": {}, "song": {}}
         if method.startswith("lua."):
             return {"status": "ok", "output": "", "result": None, "state": {}}
         if method.startswith("inspector."):
             return {"status": "ok", "properties": {}, "value": 0.0, "category": p.get("category")}
-        if method == "timeline.getClipEffects" or method == "clip.getEffects":
-            return {"effects": [], "count": 0, "clip": "check"}
-        if method == "system.getOptions" or method == "options.get":
+        if method == "options.get":
             return {"options": {}, "status": "ok"}
         return {"status": "ok", "method": method, "params": p}
 

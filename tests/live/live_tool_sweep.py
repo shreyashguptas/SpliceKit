@@ -1501,7 +1501,23 @@ class Sweep:
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+        self.remove_url_download()
         return 1 if counts[FAIL] else 0
+
+    def remove_url_download(self) -> None:
+        """Delete the file import_url downloaded. Its browser clip is gone by now (the
+        case's cleanup removes it), but the download stayed in SpliceKit's downloads
+        folder, one more "SpliceKit Sweep URL <n>.mov" for every run."""
+        name = self.placeholders.get("$URL_PROBE_NAME")
+        if not name:
+            return
+        downloads = (Path.home() / "Library" / "Application Support" / "SpliceKit"
+                     / "URLImports" / "downloads")
+        for path in downloads.glob(f"{name}.*"):
+            try:
+                path.unlink()
+            except OSError as exc:
+                print(f"  ! could not remove {path.name}: {exc}", flush=True)
 
 
 async def main_async(args) -> int:
