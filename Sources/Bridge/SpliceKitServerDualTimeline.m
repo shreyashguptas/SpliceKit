@@ -1,5 +1,5 @@
 //
-//  SpliceKitServerPalette.m
+//  SpliceKitServerDualTimeline.m
 //  SpliceKit - The dual timeline handlers (dualTimeline.*).
 //
 

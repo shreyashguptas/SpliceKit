@@ -44,7 +44,7 @@ Bridge/SpliceKitServerTitles.m
 Bridge/SpliceKitServerStabilize.m
 Bridge/SpliceKitServerRender.m
 Bridge/SpliceKitServerTransitions.m
-Bridge/SpliceKitServerPalette.m
+Bridge/SpliceKitServerDualTimeline.m
 Bridge/SpliceKitServerBrowser.m
 Bridge/SpliceKitServerUI.m
 Bridge/SpliceKitServerInspector.m

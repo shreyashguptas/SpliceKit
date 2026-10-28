@@ -245,6 +245,179 @@ class ServerV2Tests(unittest.TestCase):
             set_package_global(m, "SPLICEKIT_PORT", old[1])
         self.assertIn("Cannot connect to SpliceKit", r["error"])
 
+    def _serve(self, handler):
+        """A loopback bridge stand-in on a free port, running `handler(listener)` in a
+        thread; the package's bridge address points at it for this test."""
+        m = self.module
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        old = (m.SPLICEKIT_HOST, m.SPLICEKIT_PORT)
+        set_package_global(m, "SPLICEKIT_HOST", "127.0.0.1")
+        set_package_global(m, "SPLICEKIT_PORT", listener.getsockname()[1])
+        self.addCleanup(set_package_global, m, "SPLICEKIT_PORT", old[1])
+        self.addCleanup(set_package_global, m, "SPLICEKIT_HOST", old[0])
+        self.addCleanup(listener.close)
+        thread = threading.Thread(target=handler, args=(listener,), daemon=True)
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _wait_for_close(b, seconds=5.0):
+        """Wait until the bridge's close has reached this end of the socket."""
+        import select
+        import time
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if select.select([b.sock], [], [], 0.05)[0]:
+                return
+        raise AssertionError("the stand-in bridge never closed the connection")
+
+    def test_close_behind_unread_event_frames_is_still_seen(self):
+        # An events_subscribe client has event frames waiting when Final Cut Pro quits;
+        # the close sits behind them and must not be mistaken for a live socket.
+        def bridge_that_sends_events_then_restarts(listener):
+            conn, _ = listener.accept()
+            self._answer_one(conn, {"answer": "first"})
+            event = {"jsonrpc": "2.0", "method": "event", "params": {"type": "playhead"}}
+            conn.sendall(((json.dumps(event) + "\n") * 3).encode())
+            conn.close()
+            conn, _ = listener.accept()
+            self._answer_one(conn, {"answer": "second"})
+            conn.close()
+
+        thread = self._serve(bridge_that_sends_events_then_restarts)
+        b = self.module.BridgeConnection()
+        self.assertEqual(b.call("one"), {"answer": "first"})
+        self._wait_for_close(b)
+        import time
+        time.sleep(0.05)  # the events and the close arrive together on loopback
+        self.assertEqual(b.call("two"), {"answer": "second"})
+        thread.join(timeout=5)
+        b.reset()
+
+    @staticmethod
+    def _answer_one(conn, result):
+        hello = {"jsonrpc": "2.0", "method": "bridge.hello", "params": {"nonce": "n1"}}
+        conn.sendall((json.dumps(hello) + "\n").encode())
+        req = json.loads(conn.makefile().readline())
+        conn.sendall((json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}) + "\n").encode())
+        return req
+
+    def test_first_call_after_final_cut_restarts_reconnects(self):
+        # Final Cut Pro quitting closes the bridge socket between two calls. The next
+        # call used to be sent on the dead socket and fail with "Connection closed".
+        seen = []
+
+        def bridge_that_restarts(listener):
+            for answer in ("first", "second"):
+                conn, _ = listener.accept()
+                seen.append(self._answer_one(conn, {"answer": answer})["method"])
+                conn.close()
+
+        thread = self._serve(bridge_that_restarts)
+        b = self.module.BridgeConnection()
+        self.assertEqual(b.call("one"), {"answer": "first"})
+        self._wait_for_close(b)
+        self.assertEqual(b.call("two"), {"answer": "second"})
+        thread.join(timeout=5)
+        self.assertEqual(seen, ["one", "two"])
+        b.reset()
+
+    def test_close_mid_call_is_reported_and_the_next_call_reconnects(self):
+        def bridge_that_dies_then_comes_back(listener):
+            conn, _ = listener.accept()
+            hello = {"jsonrpc": "2.0", "method": "bridge.hello", "params": {"nonce": "n1"}}
+            conn.sendall((json.dumps(hello) + "\n").encode())
+            conn.makefile().readline()
+            conn.close()  # crashed before answering
+            conn, _ = listener.accept()
+            self._answer_one(conn, {"ok": True})
+            conn.close()
+
+        thread = self._serve(bridge_that_dies_then_comes_back)
+        b = self.module.BridgeConnection()
+        r = b.call("timeline.blade")
+        self.assertIn("Connection closed by SpliceKit before it answered timeline.blade", r["error"])
+        self.assertIsNone(b.sock)
+        self.assertEqual(b._buf, b"")
+        self.assertEqual(b.call("system.version"), {"ok": True})
+        thread.join(timeout=5)
+        b.reset()
+
+    def test_mismatch_errors_say_how_to_fix_them(self):
+        explain = self.module._package_modules["splicekit_mcp.bridge"]._explain_bridge_error
+        old_dylib = explain("timeline.newThing", {"code": -32601, "message": "Method not found: timeline.newThing"})
+        self.assertTrue(old_dylib["message"].startswith("Method not found: timeline.newThing"))
+        self.assertIn("make deploy", old_dylib["message"])
+        self.assertEqual(old_dylib["code"], -32601)
+        unauthorized = explain("x", {"code": -32003, "message": "Unauthorized: answer this connection's nonce"})
+        self.assertIn("bridge-key", unauthorized["message"])
+        other = {"code": -32000, "message": "No active timeline module"}
+        self.assertEqual(explain("x", other), other)
+        self.assertEqual(explain("x", "plain text"), "plain text")
+
+    def test_errors_say_when_the_server_code_changed_on_disk(self):
+        m = self.module
+        freshness = m._package_modules["splicekit_mcp.freshness"]
+
+        @m._guard_tool_errors
+        def tool() -> str:
+            return '{"result": 1}'
+
+        @m._guard_tool_errors
+        def soft_error() -> str:
+            return "Error: Unauthorized"
+
+        @m._guard_tool_errors
+        def failing():
+            raise FakeToolError("no clip")
+
+        saved = (freshness._started, freshness._stale, freshness._last_check)
+        self.addCleanup(lambda: (setattr(freshness, "_started", saved[0]),
+                                 setattr(freshness, "_stale", saved[1]),
+                                 setattr(freshness, "_last_check", saved[2])))
+        freshness._stale = False
+        freshness._last_check = -1e9
+        self.assertEqual(soft_error(), "Error: Unauthorized", "unchanged code: no notice")
+
+        freshness._started = (0, 0)  # as if every file changed since startup
+        freshness._last_check = -1e9
+        self.assertTrue(soft_error().endswith(freshness.STALE_NOTICE))
+        self.assertEqual(json.loads(tool()), {"result": 1},
+                         "a successful result stays parseable: no notice on it")
+        with self.assertRaises(FakeToolError) as ctx:
+            failing()
+        self.assertTrue(str(ctx.exception).startswith("no clip"))
+        self.assertIn("Reconnect the splicekit MCP server", str(ctx.exception))
+
+    def test_bridge_status_reports_changed_server_code_in_its_json(self):
+        m = self.module
+        freshness = m._package_modules["splicekit_mcp.freshness"]
+        saved = (freshness._started, freshness._stale, freshness._last_check)
+        self.addCleanup(lambda: (setattr(freshness, "_started", saved[0]),
+                                 setattr(freshness, "_stale", saved[1]),
+                                 setattr(freshness, "_last_check", saved[2])))
+        self.addCleanup(FakeBridge(m, {"fcp_version": "12.4"}).install().restore)
+        freshness._stale, freshness._last_check = False, -1e9
+        self.assertNotIn("mcpServerCodeChanged", json.loads(m.bridge_status()))
+        freshness._started, freshness._last_check = (0, 0), -1e9
+        status = json.loads(m.bridge_status())
+        self.assertTrue(status["mcpServerCodeChanged"])
+        self.assertEqual(status["fcp_version"], "12.4")
+
+    def test_server_code_fingerprint_sees_an_edited_file(self):
+        freshness = self.module._package_modules["splicekit_mcp.freshness"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.py")
+            Path(path).write_text("x = 1\n")
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+            before = freshness._fingerprint(tmp)
+            os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+            self.assertNotEqual(freshness._fingerprint(tmp), before)
+            Path(tmp, "b.py").write_text("")
+            self.assertEqual(freshness._fingerprint(tmp)[0], 2)
+
     # -- batch color / effect: one pass per spine clip -------------------------------
     def _batch_bridge(self, detailed_state, *, fail_select_handle=None):
         def respond(method, params):

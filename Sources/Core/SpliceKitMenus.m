@@ -30,7 +30,7 @@
 #pragma mark - SpliceKit Menu
 //
 // We add our own top-level "SpliceKit" menu to FCP's menu bar, right before Help.
-// It has entries for the transcript editor, command palette, and a submenu of
+// It has entries for the transcript editor and SpliceKit's panels, and a submenu of
 // toggleable options (effect drag, pinch zoom, etc).
 //
 

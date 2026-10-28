@@ -5,7 +5,7 @@ Covers get_clip_info (param forwarding, rendering of every Info-inspector sectio
 inline image vs text-only), capture_clip_frame (forwarding, playhead restore
 rendering), the inline image returned by capture_viewer / capture_timeline /
 capture_inspector, the annotations of the new tools, and the absence of a return
-annotation on every tool that may return [text, Image] (FastMCP only emits mixed
+annotation on every tool that may return [text, Image] (the SDK only emits mixed
 content for unannotated tools).
 """
 import inspect
@@ -22,7 +22,7 @@ from support.payloads import capture_clip_frame_response, clip_info_response, TI
 
 
 class _StubImage:
-    """Stands in for mcp.server.fastmcp.utilities.types.Image (records what it was given)."""
+    """Stands in for mcp.server.mcpserver.Image (records what it was given)."""
 
     def __init__(self, path=None, data=None, format=None):
         if path is None and data is None:
@@ -39,7 +39,7 @@ class ClipInfoToolTests(FakeBridgeMixin, unittest.TestCase):
         cls.tools = {tool["name"]: tool for tool in cls.module.mcp.tools}
 
     def setUp(self):
-        # Under the fake FastMCP the real Image class is unavailable; each test picks.
+        # Under the fake MCPServer the real Image class is unavailable; each test picks.
         # Image is a global of the package modules that use it, so rebind it there.
         set_package_global(self.module, "Image", _StubImage)
 

@@ -202,22 +202,24 @@ NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params) {
             // internal range calculations can succeed, and pre-force overlapType=2
             // so FCP uses freeze-frame paths on the very first pass (avoiding the
             // "not enough extra media" dialog entirely when possible).
+            __block BOOL inserted = NO;
+            void (^addTransition)(void) = ^{
+                SEL addSel = @selector(addTransition:);
+                if ([timelineModule respondsToSelector:addSel]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, addSel, nil);
+                } else {
+                    [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
+                }
+                inserted = SpliceKit_waitForTransitionInsertion(
+                    timelineModule, transitionsBefore, freezeExtend ? 2.0 : 0.5);
+            };
             if (freezeExtend) {
                 // Freeze-extend auto-hold is disabled pending further development.
-                // Just set the fallback auto-accept flag for the API path.
-                sFreezeExtendPendingAutoAccept = YES;
-                sFreezeExtendDidApply = NO;
-            }
-
-            SEL addSel = @selector(addTransition:);
-            if ([timelineModule respondsToSelector:addSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, addSel, nil);
+                // Just answer the "not enough extra media" alert for the API path.
+                SpliceKit_withTransitionAlertAutoAccept(addTransition);
             } else {
-                [[NSApplication sharedApplication] sendAction:addSel to:nil from:nil];
+                addTransition();
             }
-
-            BOOL inserted = SpliceKit_waitForTransitionInsertion(
-                timelineModule, transitionsBefore, freezeExtend ? 2.0 : 0.5);
             BOOL freezeExtended = sFreezeExtendDidApply;
             sFreezeExtendDidApply = NO;
             SpliceKit_clearFreezeExtendTransientState();

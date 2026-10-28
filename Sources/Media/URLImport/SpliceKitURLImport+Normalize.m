@@ -119,30 +119,8 @@
             ]];
         }
         if (needsTimestampRewrite) {
-            // B-frame-safe CFR timestamp rewrite.
-            //   DTS = N * frameTicks — packets arrive in decode (DTS) order
-            //     so the packet index N is already the decode index.
-            //   PTS = DTS + round((src_pts - src_dts) in source frames) * frameTicks
-            //     preserves h264/hevc/av1 B-frame display order. The round()
-            //     snaps the offset to a whole frame-duration, cancelling the
-            //     millisecond quantization in the source MKV — without it the
-            //     output timestamps inherit the 42/41ms source jitter. The
-            //     conversion chain: `(PTS-DTS)*TB` is the offset in seconds,
-            //     times `canonicalTimescale/canonicalFrameTicks` (= fps) yields
-            //     the offset in source frames, round() snaps to whole frames,
-            //     times `canonicalFrameTicks` converts back to output ticks.
-            //   For VP9/VP8 the source PTS always equals DTS, so the offset
-            //     term collapses to 0 and this reduces to `pts=N*frameTicks`.
-            NSString *settsArg = [NSString stringWithFormat:
-                @"setts=time_base=1/%d:dts=N*%d:pts=N*%d+round((PTS-DTS)*TB*%d/%d)*%d:duration=%d",
-                canonicalTimescale,
-                canonicalFrameTicks,
-                canonicalFrameTicks,
-                canonicalTimescale,
-                canonicalFrameTicks,
-                canonicalFrameTicks,
-                canonicalFrameTicks];
-            [arguments addObjectsFromArray:@[@"-bsf:v", settsArg]];
+            [arguments addObjectsFromArray:SpliceKitURLImportTimestampRewriteArguments(canonicalTimescale,
+                                                                                       canonicalFrameTicks)];
         }
         [arguments addObjectsFromArray:@[@"-movflags", @"+faststart", outputPath]];
         task.arguments = arguments;
@@ -208,6 +186,16 @@
                           state:SpliceKitURLImportStateFailed
                         message:@"Normalized media could not be inspected."
                           error:rewrittenInfo[@"error"]];
+                return;
+            }
+            NSString *mismatch = SpliceKitURLImportRemuxDurationMismatch(mediaInfo, rewrittenInfo);
+            if (mismatch) {
+                [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+                [self finishJob:job
+                        success:NO
+                          state:SpliceKitURLImportStateFailed
+                        message:@"Media normalization produced a file with the wrong length."
+                          error:mismatch];
                 return;
             }
 

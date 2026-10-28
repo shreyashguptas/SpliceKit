@@ -612,6 +612,44 @@ static void SpliceKitCaption_notifyEffectChannelChanged(id effect,
     }
 }
 
+// YES while the effect is on a clip inside the sequence open in the timeline: its effect
+// stack's clip, walked up through -parentItem, ends at that sequence's primary storyline.
+// A caption title that was undone or removed, or whose primary-storyline clip was deleted,
+// is still alive (the undo stack holds it) but detached, and posting a channel change on
+// it walks the detached clip's torn-down render sources: FFSynchronizable::Lock() on NULL
+// under -[FFSourceVideoEffect _invalidateCachedMD5:], a segfault, not an exception.
+static BOOL SpliceKitCaption_effectIsInOpenSequence(id effect) {
+    SEL stackSel = NSSelectorFromString(@"effectStack");
+    SEL anchoredSel = NSSelectorFromString(@"anchoredObject");
+    SEL parentSel = NSSelectorFromString(@"parentItem");
+    SEL sequenceSel = NSSelectorFromString(@"sequence");
+    @try {
+        if (![effect respondsToSelector:stackSel]) return NO;
+        id stack = ((id (*)(id, SEL))objc_msgSend)(effect, stackSel);
+        if (![stack respondsToSelector:anchoredSel]) return NO;
+        id item = ((id (*)(id, SEL))objc_msgSend)(stack, anchoredSel);
+        if (!item) return NO;
+
+        id tm = SpliceKit_getActiveTimelineModule();
+        if (![tm respondsToSelector:sequenceSel]) return NO;
+        id primary = SpliceKitCaption_primaryObjectForSequence(
+            ((id (*)(id, SEL))objc_msgSend)(tm, sequenceSel));
+        if (!primary) return NO;
+
+        for (NSUInteger depth = 0; item && depth < 64; depth++) {
+            if (item == primary) return YES;
+            if (![item respondsToSelector:parentSel]) return NO;
+            id parent = ((id (*)(id, SEL))objc_msgSend)(item, parentSel);
+            if (parent == item) return NO;
+            item = parent;
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[Captions][RuntimeTitle] effect ownership check failed on %@: %@",
+                      SpliceKitCaption_describeObject(effect), e.reason);
+    }
+    return NO;
+}
+
 static void SpliceKitCaption_scheduleEffectTextRefreshPulses(id effect,
                                                              BOOL rebuildAllTextFromCurrentStringState) {
     if (!effect) return;
@@ -619,6 +657,8 @@ static void SpliceKitCaption_scheduleEffectTextRefreshPulses(id effect,
     for (NSNumber *delay in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            // The captions can be undone or removed before a pulse fires.
+            if (!SpliceKitCaption_effectIsInOpenSequence(effect)) return;
             SpliceKitCaption_notifyEffectChannelChanged(effect, nil, rebuildAllTextFromCurrentStringState);
         });
     }

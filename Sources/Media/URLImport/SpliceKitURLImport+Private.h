@@ -129,6 +129,8 @@ BOOL SpliceKitURLImportCanonicalFrameTimingForTrack(AVAssetTrack *videoTrack,
 BOOL SpliceKitURLImportCMTimeMatchesRational(CMTime time, int value, int timescale);
 BOOL SpliceKitURLImportNormalizationModeUsesStreamCopy(NSString *mode);
 BOOL SpliceKitURLImportNormalizationModeNeedsTimestampRewrite(NSString *mode);
+NSArray<NSString *> *SpliceKitURLImportTimestampRewriteArguments(int timescale, int frameTicks);
+NSString *SpliceKitURLImportRemuxDurationMismatch(NSDictionary *sourceInfo, NSDictionary *outputInfo);
 NSString *SpliceKitURLImportOutputExtensionForNormalizationMode(NSString *mode);
 BOOL SpliceKitURLImportVideoCodecCanStreamCopyToMP4(NSString *codecName);
 BOOL SpliceKitURLImportAudioCodecCanStreamCopyToMP4(NSString *codecName);

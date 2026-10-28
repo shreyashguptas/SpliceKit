@@ -20,6 +20,10 @@ that this fork has removed.
   one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
 
 ### Changed
+- **The MCP server runs on the official MCP Python SDK 2.3** (`mcp>=2.3,<3`; 2.2 before).
+  The protocol is unchanged: 2026-07-28, the newest revision, with the `initialize`
+  handshake of earlier revisions still accepted. Run `make mcp-setup` to upgrade the
+  virtualenv.
 - **`make install` and `make deploy` are quiet and warning-free.** The build prints one short
   line per file (`  CC  Sources/...`; `make V=1` shows the full compiler commands), so a
   routine install no longer scrolls past hundreds of lines. A clean build has no warnings:
@@ -94,6 +98,54 @@ that this fork has removed.
   Final Cut Pro's own main window (a `PEWindow`), and never a panel or child window. The live
   tool sweep also hides the Sections bar after `song_structure_sections`, which it used to
   leave up.
+- **WebM and MKV (VP9/VP8) clips play at the right speed again.** Final Cut plays these
+  through a stream-copied MP4 ("shadow") that SpliceKit writes with ffmpeg, rewriting the
+  timestamps to a constant frame rate. ffmpeg 9 changed how that rewrite (`setts`) reads its
+  expressions, so frames meant to be 1/30 s apart came out one second apart: the Viewer showed
+  about one source frame per second. The rewrite now sets the stream's time base first
+  (`-time_base:v`), which reads the same on old and new ffmpeg, and a remux whose length does
+  not match the source is rejected instead of used. A true 30 fps or 24 fps file was also taken
+  for 29.97 / 23.976 (the nearest standard rate now wins), which played 0.1% slow against
+  its audio. Shadows made by older builds are not reused. Checked live on 12.4: 30, 24 and
+  60 fps clips show the right frame at every time tried, and a clip with a flash and a beep on
+  every second stays in sync in Final Cut's own export. A clip imported before this fix
+  keeps its broken copy: Final Cut will not relink it to a shorter, repaired file ("must be
+  long enough to cover all the clips"), so import the WebM again. `tests/test_urlimport_media.py`
+  builds the helpers and runs the remux on real 24, 30, 60 and 29.97 fps WebMs with the
+  installed ffmpeg.
+- **Final Cut Pro's own dialogs are no longer answered behind your back after adding
+  transitions.** SpliceKit answers the "not enough extra media" alert itself while it adds
+  a transition. Adding transitions to all clips (and the direct `addTransitionsDirect`
+  action) switched that on and never off when no alert came, so from then on every alert in
+  Final Cut Pro was answered without being shown: a timeline delete was quietly cancelled
+  and reported as done. It is now on only while the transitions are being added
+  (`tests/test_transition_alert_scope.py`).
+- **WebM and MKV clips are named after their file.** The stream-copied MP4 was called
+  `<name>.<hash>.mp4`, so every import showed up as "Interview.6e70a541" (and was copied into
+  Original Media under that name). The hash is now the folder
+  (`URLImports/normalized/6e70a541/Interview.mp4`) and the clip is "Interview". Older
+  `<name>.<hash>.mp4` files in that folder are no longer used, but are left where they are:
+  a clip imported with "leave files in place" may still point at one. Two imports of the
+  same file at once no longer share a temporary file (one could delete the other's), and a
+  remux that comes out shorter than the source (a subtitle track that runs on past the
+  picture) is accepted.
+- **Final Cut Pro no longer crashes when captions are undone or removed right after they
+  are made.** The caption panel refreshes each title 0.2, 0.75 and 1.5 s after setting its
+  text; if the captions, or the clip they hang on, were gone by then, the refresh reached a
+  detached title's torn-down render sources and FCP segfaulted (it crashed one live tool
+  sweep). Each refresh now checks that the title still belongs to the open project first.
+- **The MCP server survives Final Cut Pro restarts and says when it is out of date.** The
+  first tool call after Final Cut Pro quit or restarted failed with "Connection closed"; it
+  now reconnects first. A connection that drops mid-call says so and is not retried (the
+  edit may have run). "Method not found" from the bridge now says that Final Cut Pro runs an
+  older SpliceKit build and how to deploy the new one, and "Unauthorized" says where the key
+  lives. And when the server's own code changes on disk after it started (a pull or a merge
+  while the MCP client keeps the old process), every error ends with a note to reconnect the
+  server and `bridge_status` reports `mcpServerCodeChanged`: a server started before bridge
+  authentication existed failed every call with "Unauthorized" while the code on disk was
+  fine. Successful results are left as they are, so anything parsing them keeps working.
+- **The live tool sweep no longer leaves a download behind.** Each run left one
+  "SpliceKit Sweep URL <n>.mov" in `URLImports/downloads`; it is deleted once its clip is.
 - **Security: a web page can no longer drive Final Cut Pro through the bridge.** The bridge on
   127.0.0.1:9876 answered each line of a browser's HTTP request with a parse error and then
   ran the JSON body, so any page could POST a request (`lua.execute` included) and have it
@@ -575,6 +627,10 @@ that this fork has removed.
   refused unless `SPLICEKIT_ALLOW_REMOTE=1`.
 
 ### Removed
+- `tests/livecam_mask_history_soak.m`, a soak test for LiveCam, which was removed earlier,
+  and fake-bridge answers in `tests/mcp_server_check.py` for RPC names that do not exist.
+  `SpliceKitServerPalette.m` is now `SpliceKitServerDualTimeline.m`: the command palette is
+  gone and the file only holds the dual timeline handlers.
 - **LiveCam and the Command Palette.** Both features are gone: their panels, toolbar buttons,
   Splices menu items, the Cmd+Shift+P shortcut, the palette's voice dictation, the
   `liveCam.*` and `command.*` bridge RPCs and the MCP tools `livecam_open`, `livecam_close`,

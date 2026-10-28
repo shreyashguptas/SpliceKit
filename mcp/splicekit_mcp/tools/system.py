@@ -2,6 +2,7 @@
 
 from ..registry import LOCAL, READ, splicekit_tool
 from ..bridge import _call_or_error, _err, _fmt, bridge
+from ..freshness import STALE_NOTICE, server_code_changed
 
 
 # ============================================================
@@ -12,10 +13,14 @@ from ..bridge import _call_or_error, _err, _fmt, bridge
 
 @splicekit_tool("bridge_status", READ)
 def bridge_status() -> str:
-    """Check if SpliceKit is running and get FCP version info."""
+    """Check if SpliceKit is running and get FCP version info. Says so too
+    (mcpServerCodeChanged) when this MCP server's code changed on disk after it started,
+    which means the client should reconnect the server to run the current code."""
     r = bridge.call("system.version")
     if _err(r):
         return f"Error: SpliceKit not connected: {r.get('error', r)}"
+    if isinstance(r, dict) and server_code_changed():
+        r = {**r, "mcpServerCodeChanged": True, "mcpServerNotice": STALE_NOTICE}
     return _fmt(r)
 
 
