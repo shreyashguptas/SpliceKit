@@ -6,6 +6,7 @@ import functools
 from .sdk import ToolAnnotations, ToolError
 from .config import _LOG
 from .app import mcp
+from .freshness import STALE_NOTICE, server_code_changed, with_stale_notice
 
 
 # Tool annotation hint sets (MCP ToolAnnotations, snake_case as the v2 SDK spells them;
@@ -85,7 +86,9 @@ def _guard_tool_errors(fn):
     text, so the client (and the AI reading it) sees "KeyError: 'items'" instead of the
     SDK's bare "Error executing tool ...". The SDK logs a ToolError without its traceback
     (only unexpected exceptions get one), so the traceback is logged here first; the
-    SDK's logging goes to stderr, never to the protocol stream."""
+    SDK's logging goes to stderr, never to the protocol stream. An error ("Error: ..." text
+    or ToolError) also gets freshness.STALE_NOTICE when this server's code changed on disk
+    after it started."""
     if inspect.iscoroutinefunction(fn):
         # A sync wrapper would hide an async tool from the SDK and return a coroutine.
         raise TypeError(f"{fn.__name__}: SpliceKit tools are synchronous functions")
@@ -93,12 +96,14 @@ def _guard_tool_errors(fn):
     @functools.wraps(fn)
     def guarded(*args, **kwargs):
         try:
-            return fn(*args, **kwargs)
-        except ToolError:
+            return with_stale_notice(fn(*args, **kwargs))
+        except ToolError as exc:
+            if server_code_changed():
+                raise ToolError(f"{exc}\n\n{STALE_NOTICE}") from exc
             raise
         except Exception as exc:
             _LOG.exception("tool %s crashed", fn.__name__)
-            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+            raise ToolError(with_stale_notice(f"{type(exc).__name__}: {exc}")) from exc
     return guarded
 
 

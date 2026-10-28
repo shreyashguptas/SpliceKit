@@ -1,6 +1,7 @@
 """The JSON-RPC connection to the bridge inside Final Cut Pro, and call helpers."""
 
 import socket
+import select
 import json
 import atexit
 import threading
@@ -31,7 +32,29 @@ class BridgeConnection:
     HELLO_TIMEOUT = 2      # the bridge sends its challenge as soon as it accepts
     READ_TIMEOUT = 30      # some bridge calls wait on FCP's main thread (20 s watchdog inside)
 
+    def _peer_closed(self) -> bool:
+        """True when the bridge has closed this socket (Final Cut Pro quit or restarted
+        since the last call). Checked before each request so that the first call after a
+        restart reconnects instead of failing with "Connection closed". Event frames that
+        arrived in the meantime are moved into the read buffer (the reply loop skips
+        them), so a close queued behind them is still seen."""
+        try:
+            while True:
+                readable, _, _ = select.select([self.sock], [], [], 0)
+                if not readable:
+                    return False
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    return True
+                self._buf += chunk
+        except (OSError, ValueError):
+            return True   # a socket that cannot even be polled is dead
+        except TypeError:
+            return False  # not a real socket (the offline tests' stand-in)
+
     def ensure_connected(self):
+        if self.sock is not None and self._peer_closed():
+            self._drop_socket()
         if self.sock is None:
             # Assign only after connect() succeeds: a refused connect must not leave
             # a dead socket behind, or the next call fails once before reconnecting.
@@ -141,8 +164,13 @@ class BridgeConnection:
                 while b"\n" not in self._buf:
                     chunk = self.sock.recv(16777216)  # 16MB — FCPXML responses can be large
                     if not chunk:
-                        self.sock = None  # server closed the connection, force reconnect next call
-                        return {"error": "Connection closed by SpliceKit"}
+                        # The bridge closed the connection mid-call (Final Cut Pro quit or
+                        # crashed). The request may have run, so it is not resent; the
+                        # next call reconnects.
+                        self._drop_socket()
+                        return {"error": "Connection closed by SpliceKit before it answered "
+                                         f"{method}. Final Cut Pro may have quit or crashed; "
+                                         "check bridge_status before retrying."}
                     self._buf += chunk
                 line, self._buf = self._buf.split(b"\n", 1)
                 if not line.strip():
@@ -160,7 +188,7 @@ class BridgeConnection:
                 if resp.get("id") != expected_id:
                     continue
                 if "error" in resp:
-                    return {"error": resp["error"]}
+                    return {"error": _explain_bridge_error(method, resp["error"])}
                 return resp.get("result", {})
         except Exception as e:
             self._drop_socket()  # toss the broken socket so the next call reconnects
@@ -168,6 +196,26 @@ class BridgeConnection:
         finally:
             if timeout is not None and self.sock is not None:
                 self.sock.settimeout(self.READ_TIMEOUT)
+
+
+def _explain_bridge_error(method: str, error):
+    """The bridge's error, with the fix spelled out for the two that mean this MCP server
+    and the SpliceKit inside Final Cut Pro do not match."""
+    if not isinstance(error, dict):
+        return error
+    message = str(error.get("message") or "")
+    if message.startswith("Method not found"):
+        return {**error, "message": (
+            f"{message}. The SpliceKit build running in Final Cut Pro has no '{method}': it is "
+            "older than this MCP server. Run `make deploy` in the SpliceKit checkout, then "
+            "restart Final Cut Pro (deploy_and_restart(skip_build=True)).")}
+    if message.startswith("Unauthorized"):
+        return {**error, "message": (
+            f"{message}. This MCP server could not answer the bridge's challenge: check that "
+            "~/Library/Application Support/SpliceKit/bridge-key exists, and reconnect the "
+            "splicekit MCP server if it was started before that key or before SpliceKit "
+            "added bridge authentication.")}
+    return error
 
 
 bridge = BridgeConnection()  # singleton -- shared by all tool functions below

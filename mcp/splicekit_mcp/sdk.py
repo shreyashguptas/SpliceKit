@@ -3,7 +3,7 @@
 import sys
 
 
-# The official MCP Python SDK, major version 2 (mcp>=2.2,<3 in mcp/requirements.txt).
+# The official MCP Python SDK, major version 2 (mcp>=2.3,<3 in mcp/requirements.txt).
 # v2 renamed FastMCP to MCPServer and moved it to mcp.server.mcpserver; the old
 # mcp.server.fastmcp path no longer exists. The messages below tell apart "mcp is
 # not installed" from "an mcp 1.x is installed", because both raise the same
@@ -22,7 +22,7 @@ except ModuleNotFoundError as exc:
         else:
             problem = (
                 f"This interpreter ({sys.executable}) has mcp {installed}; SpliceKit's server "
-                "needs the 2.x line of the official SDK (mcp>=2.2,<3)."
+                "needs the 2.x line of the official SDK (mcp>=2.3,<3)."
             )
         sys.stderr.write(
             f"\n[splicekit-mcp] {problem}\n"
