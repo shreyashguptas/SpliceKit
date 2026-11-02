@@ -211,12 +211,32 @@ debug.breakpoint(action="remove", className="...", selector="...")   # remove + 
 debug.breakpoint(action="removeAll")  # remove all + resume if paused
 ```
 
-### Breakpoint modes
+### Which methods can be hooked
 
-| Args | Mode | Behavior |
-|------|------|----------|
-| 0-1 object args (after self+_cmd) | `swizzle` | Full breakpoint — pauses, inspects, forwards to original |
-| 2+ object args | `trace_only` | Registered but not swizzled (can't safely forward args). Use `debug.traceMethod` instead |
+Breakpoints and traces replace the method with a forwarding hook
+(`Sources/Core/SpliceKitMethodHook.m`): it pauses or logs, then calls the original with the
+caller's own arguments and hands its return value back. It forwards the argument registers
+unchanged, so any signature whose arguments all travel in registers works:
+
+| Arguments (after self and _cmd) | Return value |
+|---|---|
+| Up to 6 objects, integers, BOOLs, pointers or selectors (4 on Intel) | void, object, integer, BOOL, pointer |
+| Up to 8 floats or doubles | float, double |
+| Structs (Apple silicon): CGPoint, CGSize, CGRect, NSRange; larger ones such as CMTime travel as a pointer and work too | Structs returned in registers: up to four floats/doubles, or up to 16 bytes (Apple silicon) |
+
+Anything else is refused with the reason, never hooked: arguments that would spill onto
+the stack, a struct returned through memory (CMTime, CMTimeRange by value), structs and
+`long double` on Intel, methods that take a variable list of arguments (their type encoding
+cannot show it, so any method whose last selector part ends in Format, Objects,
+ObjectsAndKeys, Values or Arguments is refused: `stringWithFormat:`, `arrayWithObjects:`...),
+and the memory-management methods the hook itself calls (`retain`, `release`, `dealloc`...).
+
+Class methods take `classMethod=True` and are listed as `Class.+selector`. A method the
+class only inherits is hooked on that class alone; the hook forwards to the superclass's
+current implementation. Removing a trace or breakpoint puts the method back, or, when
+something has replaced it since, leaves a pass-through that does nothing extra. The debug
+tools keep their own record of what they replaced, so tracing a method one of SpliceKit's
+features has swizzled never costs that feature its saved original.
 
 ### Workflow: Reverse-engineering how FCP implements blade
 
@@ -278,7 +298,6 @@ notifications.
 ### Add a trace
 
 ```python
-# Trace a simple method (0-1 args) - uses swizzle mode
 debug.traceMethod(
     action="add",
     className="FFAnchoredTimelineModule",
@@ -286,23 +305,18 @@ debug.traceMethod(
     logStack=True    # include call stack in trace entries
 )
 
-# Trace a multi-arg method - uses notification_only mode
-# (logs registration but can't intercept args directly via swizzle)
+# Several arguments work the same way; logArgs adds the first argument when it is an object
 debug.traceMethod(
     action="add",
     className="FFAnchoredTimelineModule",
     selector="actionRetimeSetRatePreset:rate:ripple:allowVariableSpeedRetiming:objectsAndNewRanges:error:",
-    logStack=True,
     logArgs=True
 )
 ```
 
-**Swizzle mode** (0-1 object args): Replaces the method implementation with a
-trampoline that logs the call and forwards to the original. Full interception.
-
-**Notification-only mode** (2+ args): Registers the trace but can't safely swizzle
-due to varargs limitations. Use `call_method` with `store_result` for full arg
-inspection of multi-arg methods, or use `debug.eval` to inspect state before/after.
+The trace logs the call, then the method runs as it always does, with its own arguments
+and return value. Which signatures can be traced, and which are refused, is under
+[Which methods can be hooked](#which-methods-can-be-hooked).
 
 ### Read the trace log
 

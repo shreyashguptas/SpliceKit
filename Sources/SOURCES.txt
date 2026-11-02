@@ -9,6 +9,7 @@ Timeline/SpliceKitDualTimeline.m
 Timeline/SpliceKitDualTimelineDrag.m
 Core/SpliceKitRuntime.m
 Core/SpliceKitSwizzle.m
+Core/SpliceKitMethodHook.m
 Core/SpliceKitTime.m
 Core/SpliceKitProcess.m
 Core/SpliceKitStrings.m

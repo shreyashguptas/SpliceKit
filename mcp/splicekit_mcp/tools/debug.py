@@ -251,7 +251,9 @@ def debug_breakpoint(action: str = "list", class_name: str = "", selector: str =
 
     True breakpoints that pause FCP execution, let you inspect state, then continue.
     FCP's UI freezes while paused (same as Xcode). The JSON-RPC server stays alive
-    on a separate thread so you can inspect and continue.
+    on a separate thread so you can inspect and continue. The method then runs with its
+    own arguments and return value. A method whose arguments spill onto the stack, or that
+    returns a struct through memory (CMTime by value), is refused with the reason.
 
     Args:
         action: One of:
@@ -317,7 +319,9 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
 
     Swizzles the target method to log every call with timestamp, self, and
     optionally the call stack. Traces are stored in a circular buffer (500 entries)
-    and broadcast to MCP clients in real-time.
+    and broadcast to MCP clients in real-time. The method still runs with its own
+    arguments and return value; one whose arguments spill onto the stack, or that returns
+    a struct through memory (CMTime by value), is refused with the reason.
 
     Use this when you want to observe call patterns without freezing FCP.
     Use debug_breakpoint() when you need to pause and inspect.
@@ -333,7 +337,7 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
         class_name: ObjC class name
         selector: ObjC selector
         log_stack: Include call stack in trace entries (slower but more info)
-        log_args: Log argument info (default true)
+        log_args: Log the first argument when it is an object (default true)
         limit: For getLog — max entries to return
         class_method: Trace a class method (+) instead of instance (-)
     """

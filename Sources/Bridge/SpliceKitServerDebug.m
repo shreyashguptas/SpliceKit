@@ -8,6 +8,7 @@
 #import "SpliceKit.h"
 #import "SpliceKitServerHandlers.h"
 #import "SpliceKitServerInternal.h"
+#import "SpliceKitMethodHook.h"
 
 #pragma mark - Debug & Diagnostics
 //
@@ -465,6 +466,94 @@ NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
     return result ?: @{@"error": @"debug.enablePreset failed"};
 }
 
+#pragma mark - Debug: Installing hooks
+//
+// debug.traceMethod and debug.breakpoint replace a method with a forwarding hook
+// (SpliceKitMethodHook.h): their block runs, then the original runs with the caller's
+// arguments and its return value goes back to the caller.
+//
+// Each hook keeps its own record of what it replaced, apart from the slots SpliceKit's
+// features use (SpliceKit_swizzleMethod), so tracing a method a feature has swizzled never
+// costs that feature its saved original.
+//
+
+@interface SpliceKitDebugHook : NSObject
+@property (atomic) BOOL active;                     // NO once removed: `before` does nothing
+@property (nonatomic) Class target;                 // the class, or metaclass, hooked
+@property (nonatomic) SEL selector;
+@property (nonatomic) IMP original;                 // what it replaced; NULL when inherited
+@property (nonatomic) IMP hook;
+@end
+
+@implementation SpliceKitDebugHook
+@end
+
+// The key a trace or breakpoint is listed under: "Class.selector", "Class.+selector" for a
+// class method, so the two never share one.
+static NSString *SpliceKit_debugHookKey(NSString *className, NSString *selectorName, BOOL classMethod) {
+    return [NSString stringWithFormat:@"%@.%@%@", className, classMethod ? @"+" : @"", selectorName];
+}
+
+// Hooks `sel` on `cls` (its metaclass for a class method). `before` runs only while the
+// hook is active. A method the class only inherits gets a method of its own that forwards
+// to the superclass's current implementation, so the superclass and its other subclasses
+// are left alone. Returns the hook, or nil with *error set.
+static SpliceKitDebugHook *SpliceKit_debugInstallHook(Class cls, BOOL classMethod, SEL sel,
+                                                      SpliceKitHookBefore before, NSString **error) {
+    Class target = classMethod ? object_getClass(cls) : cls;
+    Method method = class_getInstanceMethod(target, sel);
+    if (!method) { *error = @"Method not found"; return nil; }
+    const char *types = method_getTypeEncoding(method);
+    NSString *problem = SpliceKit_hookSignatureProblem(sel, types);
+    if (problem) { *error = [@"Cannot hook this method: " stringByAppendingString:problem]; return nil; }
+
+    BOOL owned = NO;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(target, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        if (methods[i] == method) { owned = YES; break; }
+    }
+    free(methods);
+
+    SpliceKitDebugHook *record = [SpliceKitDebugHook new];
+    record.target = target;
+    record.selector = sel;
+    record.original = owned ? method_getImplementation(method) : NULL;
+    __weak SpliceKitDebugHook *weakRecord = record;
+    IMP hook = SpliceKit_makeForwardingHook(types, record.original,
+                                            owned ? Nil : class_getSuperclass(target), sel,
+                                            ^(id _self, id firstArgument) {
+        if (weakRecord.active) before(_self, firstArgument);
+    });
+    if (!hook) { *error = @"Could not build the hook"; return nil; }
+    record.hook = hook;
+    record.active = YES;
+
+    if (owned) {
+        method_setImplementation(method, hook);
+    } else if (!class_addMethod(target, sel, hook, types)) {
+        imp_removeBlock(hook);
+        *error = @"Could not add the hook to the class";
+        return nil;
+    }
+    SpliceKit_log(@"[Debug] Hooked %@[%@ %@]", classMethod ? @"+" : @"-",
+                  NSStringFromClass(cls), NSStringFromSelector(sel));
+    return record;
+}
+
+// Turns the hook off. The method gets its original back when nothing has replaced the hook
+// since; otherwise (another hook on top), and for an inherited method, the hook stays as a
+// plain pass-through, which behaves exactly like the method it replaced.
+static void SpliceKit_debugRemoveHook(SpliceKitDebugHook *record) {
+    if (!record.active) return;
+    record.active = NO;
+    if (!record.original) return;
+    Method method = class_getInstanceMethod(record.target, record.selector);
+    if (method && method_getImplementation(method) == record.hook) {
+        method_setImplementation(method, record.original);
+    }
+}
+
 #pragma mark - Debug: Method Tracing
 //
 // Non-blocking alternative to breakpoints. Swizzles target methods to log every
@@ -472,8 +561,10 @@ NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
 // in a circular buffer and broadcast to MCP clients in real-time.
 //
 
-// Storage for active traces: key = "ClassName.selectorName", value = trace config
+// Storage for active traces: key = "ClassName.selectorName" ("ClassName.+selectorName" for a
+// class method), value = trace config; the hook for each key is in sTraceHooks.
 static NSMutableDictionary<NSString *, NSDictionary *> *sActiveTraces = nil;
+static NSMutableDictionary<NSString *, SpliceKitDebugHook *> *sTraceHooks = nil;
 // Circular buffer for trace logs (newest first)
 static NSMutableArray<NSDictionary *> *sTraceLog = nil;
 static const NSUInteger kMaxTraceLogEntries = 500;
@@ -483,20 +574,27 @@ static void SpliceKit_ensureTraceStorage(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         sActiveTraces = [NSMutableDictionary dictionary];
+        sTraceHooks = [NSMutableDictionary dictionary];
         sTraceLog = [NSMutableArray array];
         sTraceQueue = dispatch_queue_create("com.splicekit.trace", DISPATCH_QUEUE_SERIAL);
     });
 }
 
+// Recording a call never sets off a trace itself: tracing a method this uses (an array
+// insert, say) would otherwise log forever.
 static void SpliceKit_addTraceEntry(NSDictionary *entry) {
     dispatch_async(sTraceQueue, ^{
-        [sTraceLog insertObject:entry atIndex:0];
-        while (sTraceLog.count > kMaxTraceLogEntries) {
-            [sTraceLog removeLastObject];
-        }
+        SpliceKit_hookWithoutBefore(^{
+            [sTraceLog insertObject:entry atIndex:0];
+            while (sTraceLog.count > kMaxTraceLogEntries) {
+                [sTraceLog removeLastObject];
+            }
+        });
     });
     // Broadcast to connected clients
-    SpliceKit_broadcastEvent(@{@"type": @"trace", @"data": entry});
+    SpliceKit_hookWithoutBefore(^{
+        SpliceKit_broadcastEvent(@{@"type": @"trace", @"data": entry});
+    });
 }
 
 // debug.traceMethod - Swizzle any method to log args, return value, and call stack
@@ -510,18 +608,16 @@ NSDictionary *SpliceKit_handleDebugTraceMethod(NSDictionary *params) {
 
     NSString *act = params[@"action"] ?: @"add";
 
-    if ([act isEqualToString:@"list"]) {
-        return @{@"traces": [sActiveTraces allKeys], @"count": @(sActiveTraces.count)};
-    }
-
     if ([act isEqualToString:@"getLog"]) {
         __block NSArray *entries;
+        __block NSUInteger total = 0;
         NSUInteger limit = params[@"limit"] ? [params[@"limit"] unsignedIntegerValue] : 50;
         dispatch_sync(sTraceQueue, ^{
             NSUInteger n = MIN(limit, sTraceLog.count);
             entries = [sTraceLog subarrayWithRange:NSMakeRange(0, n)];
+            total = sTraceLog.count;
         });
-        return @{@"log": entries, @"count": @(entries.count), @"total": @(sTraceLog.count)};
+        return @{@"log": entries, @"count": @(entries.count), @"total": @(total)};
     }
 
     if ([act isEqualToString:@"clearLog"]) {
@@ -529,151 +625,109 @@ NSDictionary *SpliceKit_handleDebugTraceMethod(NSDictionary *params) {
         return @{@"status": @"ok", @"message": @"Trace log cleared"};
     }
 
-    if ([act isEqualToString:@"removeAll"]) {
-        __block NSMutableArray *removed = [NSMutableArray array];
-        for (NSString *key in [sActiveTraces allKeys]) {
-            NSDictionary *info = sActiveTraces[key];
-            Class cls = NSClassFromString(info[@"className"]);
-            SEL sel = NSSelectorFromString(info[@"selector"]);
-            if (cls && sel) {
-                SpliceKit_unswizzleMethod(cls, sel);
-                [removed addObject:key];
-            }
-        }
-        [sActiveTraces removeAllObjects];
-        return @{@"status": @"ok", @"removed": removed, @"count": @(removed.count)};
-    }
-
-    NSString *className = params[@"className"];
-    NSString *selectorName = params[@"selector"];
-    if (!className || !selectorName) {
-        return @{@"error": @"className and selector parameters required"};
-    }
-
-    NSString *key = [NSString stringWithFormat:@"%@.%@", className, selectorName];
-
-    if ([act isEqualToString:@"remove"]) {
-        Class cls = NSClassFromString(className);
-        SEL sel = NSSelectorFromString(selectorName);
-        if (!cls || !sel) return @{@"error": @"Class or selector not found"};
-        BOOL ok = SpliceKit_unswizzleMethod(cls, sel);
-        [sActiveTraces removeObjectForKey:key];
-        return ok ? @{@"status": @"ok", @"removed": key}
-                  : @{@"error": [NSString stringWithFormat:@"No trace active for %@", key]};
-    }
-
-    // action == "add"
-    Class cls = NSClassFromString(className);
-    if (!cls) return @{@"error": [NSString stringWithFormat:@"Class not found: %@", className]};
-    SEL sel = NSSelectorFromString(selectorName);
-    BOOL isClassMethod = [params[@"classMethod"] boolValue];
-    Method method = isClassMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
-    if (!method) return @{@"error": [NSString stringWithFormat:@"Method not found: -[%@ %@]", className, selectorName]};
-
-    BOOL logStack = params[@"logStack"] ? [params[@"logStack"] boolValue] : NO;
-    BOOL logArgs = params[@"logArgs"] ? [params[@"logArgs"] boolValue] : YES;
-
-    // Get method signature for argument info
-    const char *typeEncoding = method_getTypeEncoding(method);
-    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:typeEncoding];
-    NSUInteger argCount = [sig numberOfArguments]; // includes self + _cmd
-
-    // Create a trampoline that logs and forwards to original
-    // We use a block-based IMP via imp_implementationWithBlock
-    IMP originalIMP = method_getImplementation(method);
-
-    // Store trace config
-    sActiveTraces[key] = @{
-        @"className": className,
-        @"selector": selectorName,
-        @"logStack": @(logStack),
-        @"logArgs": @(logArgs),
-        @"argCount": @(argCount),
-        @"typeEncoding": [NSString stringWithUTF8String:typeEncoding ?: ""],
-        @"timestamp": [NSDate date].description
-    };
-
-    // For methods with varying arg counts, we use a generic trampoline
-    // that captures the call, logs it, and forwards to original.
-    // We handle up to 8 object args (covers virtually all ObjC methods).
-    IMP trampoline = imp_implementationWithBlock(^(id _self, ...) {
-        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-        entry[@"class"] = className;
-        entry[@"selector"] = selectorName;
-        entry[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
-        entry[@"selfClass"] = NSStringFromClass([_self class]);
-
-        if (logStack) {
-            NSArray *stack = [NSThread callStackSymbols];
-            // Trim to first 15 frames
-            if (stack.count > 15) stack = [stack subarrayWithRange:NSMakeRange(0, 15)];
-            entry[@"callStack"] = stack;
+    // Adding and removing can come from several clients at once
+    @synchronized (sActiveTraces) {
+        if ([act isEqualToString:@"list"]) {
+            return @{@"traces": [sActiveTraces allKeys], @"count": @(sActiveTraces.count)};
         }
 
-        // Log self description (truncated)
-        NSString *selfDesc = [_self description];
-        if (selfDesc.length > 200) selfDesc = [selfDesc substringToIndex:200];
-        entry[@"self"] = selfDesc ?: @"nil";
-
-        SpliceKit_log(@"[Trace] -[%@ %@] called on <%@: %p>",
-                      className, selectorName, NSStringFromClass([_self class]), _self);
-
-        SpliceKit_addTraceEntry(entry);
-
-        // Forward to original - use generic forwarding with the right number of args
-        // For the trampoline to work correctly with varargs, we use NSInvocation
-        NSMethodSignature *origSig = [_self methodSignatureForSelector:sel];
-        if (origSig) {
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:origSig];
-            [inv setTarget:_self];
-            [inv setSelector:sel];
-            // We can't easily forward varargs, so we call original directly
-            // This works for 0-arg methods (self + _cmd only)
+        if ([act isEqualToString:@"removeAll"]) {
+            NSArray *removed = [sActiveTraces allKeys];
+            for (SpliceKitDebugHook *record in sTraceHooks.allValues) SpliceKit_debugRemoveHook(record);
+            [sTraceHooks removeAllObjects];
+            [sActiveTraces removeAllObjects];
+            return @{@"status": @"ok", @"removed": removed, @"count": @(removed.count)};
         }
 
-        // Direct call to original with proper casting based on arg count
-        if (argCount <= 2) {
-            ((void (*)(id, SEL))originalIMP)(_self, sel);
-        } else if (argCount == 3) {
-            // We can't access varargs reliably from a block, so log the trace
-            // and use the original IMP. For full arg capture, callers should
-            // use call_method with store_result instead.
-            ((void (*)(id, SEL, id))originalIMP)(_self, sel, nil);
+        NSString *className = params[@"className"];
+        NSString *selectorName = params[@"selector"];
+        if (!className || !selectorName) {
+            return @{@"error": @"className and selector parameters required"};
         }
-    });
+        BOOL isClassMethod = [params[@"classMethod"] boolValue];
+        NSString *key = SpliceKit_debugHookKey(className, selectorName, isClassMethod);
 
-    // Only swizzle methods with 0-1 object args (self+_cmd+optional sender)
-    // For complex multi-arg methods, use a simpler approach
-    if (argCount <= 3) {
-        IMP orig = SpliceKit_swizzleMethod(cls, sel, trampoline);
-        if (!orig) {
+        if ([act isEqualToString:@"remove"]) {
+            SpliceKitDebugHook *record = sTraceHooks[key];
+            if (!record) return @{@"error": [NSString stringWithFormat:@"No trace active for %@", key]};
+            SpliceKit_debugRemoveHook(record);
+            [sTraceHooks removeObjectForKey:key];
             [sActiveTraces removeObjectForKey:key];
-            return @{@"error": @"Swizzle failed"};
+            return @{@"status": @"ok", @"removed": key};
         }
-    } else {
-        // For multi-arg methods, we can't use block-based IMP safely.
-        // Instead, install a pre/post notification using KVO-style observation.
-        // Store the fact that we're "tracing" it and use a polling approach
-        // or set a symbolic breakpoint hint.
+
+        // action == "add"
+        Class cls = NSClassFromString(className);
+        if (!cls) return @{@"error": [NSString stringWithFormat:@"Class not found: %@", className]};
+        SEL sel = NSSelectorFromString(selectorName);
+        Method method = isClassMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
+        if (!method) return @{@"error": [NSString stringWithFormat:@"Method not found: %@[%@ %@]",
+                              isClassMethod ? @"+" : @"-", className, selectorName]};
+
+        BOOL logStack = params[@"logStack"] ? [params[@"logStack"] boolValue] : NO;
+        BOOL logArgs = params[@"logArgs"] ? [params[@"logArgs"] boolValue] : YES;
+
+        if (sActiveTraces[key]) {
+            return @{@"status": @"ok", @"message": @"Already tracing", @"tracing": key};
+        }
+
+        const char *typeEncoding = method_getTypeEncoding(method);
+        NSUInteger argCount = [[NSMethodSignature signatureWithObjCTypes:typeEncoding] numberOfArguments];
+        NSString *prefix = isClassMethod ? @"+" : @"-";
+
+        // Logs the call, then the hook calls the original with the caller's arguments and
+        // returns its result.
+        SpliceKitHookBefore logCall = ^(id _self, id firstArgument) {
+            NSString *selfClass = NSStringFromClass(object_getClass(_self));
+            NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+            entry[@"class"] = className;
+            entry[@"selector"] = selectorName;
+            entry[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+            entry[@"selfClass"] = selfClass ?: @"nil";
+
+            if (logStack) {
+                NSArray *stack = [NSThread callStackSymbols];
+                // Trim to first 15 frames
+                if (stack.count > 15) stack = [stack subarrayWithRange:NSMakeRange(0, 15)];
+                entry[@"callStack"] = stack;
+            }
+
+            // Log self description (truncated)
+            NSString *selfDesc = [_self description];
+            if (selfDesc.length > 200) selfDesc = [selfDesc substringToIndex:200];
+            entry[@"self"] = selfDesc ?: @"nil";
+
+            // The first argument, when it is an object
+            if (logArgs && firstArgument) {
+                NSString *argDesc = [firstArgument description];
+                if (argDesc.length > 200) argDesc = [argDesc substringToIndex:200];
+                entry[@"firstArg"] = argDesc ?: @"nil";
+            }
+
+            SpliceKit_log(@"[Trace] %@[%@ %@] called on <%@: %p>",
+                          prefix, className, selectorName, selfClass, _self);
+
+            SpliceKit_addTraceEntry(entry);
+        };
+
+        NSString *failure = nil;
+        SpliceKitDebugHook *record = SpliceKit_debugInstallHook(cls, isClassMethod, sel, logCall, &failure);
+        if (!record) return @{@"error": failure ?: @"Could not hook the method"};
+
+        sTraceHooks[key] = record;
         sActiveTraces[key] = @{
             @"className": className,
             @"selector": selectorName,
+            @"classMethod": @(isClassMethod),
             @"logStack": @(logStack),
             @"logArgs": @(logArgs),
             @"argCount": @(argCount),
             @"typeEncoding": [NSString stringWithUTF8String:typeEncoding ?: ""],
-            @"mode": @"notification_only",
-            @"note": @"Multi-arg methods are traced via NSNotification observation. Use call_method with store_result for full arg inspection.",
             @"timestamp": [NSDate date].description
         };
 
-        // Register for NSNotification-based observation of related events
-        SpliceKit_log(@"[Trace] Registered notification trace for -[%@ %@] (%lu args - use call_method for full inspection)",
-                      className, selectorName, (unsigned long)argCount);
+        return @{@"status": @"ok", @"tracing": key, @"argCount": @(argCount), @"mode": @"swizzle"};
     }
-
-    return @{@"status": @"ok", @"tracing": key, @"argCount": @(argCount),
-             @"mode": (argCount <= 3) ? @"swizzle" : @"notification_only"};
 }
 
 #pragma mark - Debug: KVO Property Watching
@@ -1463,7 +1517,11 @@ NSDictionary *SpliceKit_handleDebugObserveNotification(NSDictionary *params) {
 //   - Breakpoints on the JSON-RPC dispatch thread would deadlock (we prevent this)
 
 // Breakpoint state
+// key = "ClassName.selectorName" ("ClassName.+selectorName" for a class method), value =
+// config; the hook for each key is in sBreakpointHooks. Both are read from whatever thread
+// the hooked method runs on, so every access holds @synchronized (sBreakpoints).
 static NSMutableDictionary<NSString *, NSDictionary *> *sBreakpoints = nil;
+static NSMutableDictionary<NSString *, SpliceKitDebugHook *> *sBreakpointHooks = nil;
 static dispatch_semaphore_t sBreakpointSemaphore = nil;
 static NSMutableDictionary *sBreakpointHitState = nil;    // current paused state
 static BOOL sBreakpointPaused = NO;                       // is execution paused?
@@ -1475,6 +1533,7 @@ static void SpliceKit_ensureBreakpointStorage(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         sBreakpoints = [NSMutableDictionary dictionary];
+        sBreakpointHooks = [NSMutableDictionary dictionary];
         sBreakpointSemaphore = dispatch_semaphore_create(0);
         sBreakpointHitState = [NSMutableDictionary dictionary];
         sBreakpointQueue = dispatch_queue_create("com.splicekit.breakpoint", DISPATCH_QUEUE_SERIAL);
@@ -1515,8 +1574,11 @@ static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
         static NSMutableDictionary<NSString *, NSNumber *> *sHitCounts = nil;
         static dispatch_once_t onceToken;
         dispatch_once(&onceToken, ^{ sHitCounts = [NSMutableDictionary dictionary]; });
-        NSInteger current = [sHitCounts[key] integerValue] + 1;
-        sHitCounts[key] = @(current);
+        NSInteger current;
+        @synchronized (sBreakpoints) {
+            current = [sHitCounts[key] integerValue] + 1;
+            sHitCounts[key] = @(current);
+        }
         if (current < [hitCountLimit integerValue]) {
             return; // Haven't reached the hit count threshold yet
         }
@@ -1683,134 +1745,119 @@ NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
         }
     }
 
-    // === List: show all breakpoints ===
-    if ([act isEqualToString:@"list"]) {
-        __block BOOL paused;
-        dispatch_sync(sBreakpointQueue, ^{ paused = sBreakpointPaused; });
+    // The rest reads and changes the breakpoint table, which hooked methods read too
+    @synchronized (sBreakpoints) {
+        // === List: show all breakpoints ===
+        if ([act isEqualToString:@"list"]) {
+            __block BOOL paused;
+            dispatch_sync(sBreakpointQueue, ^{ paused = sBreakpointPaused; });
 
-        NSMutableArray *bps = [NSMutableArray array];
-        for (NSString *key in sBreakpoints) {
+            NSMutableArray *bps = [NSMutableArray array];
+            for (NSString *key in sBreakpoints) {
+                NSMutableDictionary *info = [sBreakpoints[key] mutableCopy];
+                info[@"key"] = key;
+                [bps addObject:info];
+            }
+            return @{@"breakpoints": bps, @"count": @(bps.count), @"paused": @(paused)};
+        }
+
+        // === RemoveAll ===
+        if ([act isEqualToString:@"removeAll"]) {
+            NSArray *removed = [sBreakpoints allKeys];
+            for (SpliceKitDebugHook *record in sBreakpointHooks.allValues) SpliceKit_debugRemoveHook(record);
+            [sBreakpointHooks removeAllObjects];
+            [sBreakpoints removeAllObjects];
+            // If currently paused, resume so we don't leave a thread stuck
+            __block BOOL wasPaused;
+            dispatch_sync(sBreakpointQueue, ^{
+                wasPaused = sBreakpointPaused;
+                sBreakpointStepActive = NO;
+            });
+            if (wasPaused) dispatch_semaphore_signal(sBreakpointSemaphore);
+            return @{@"status": @"ok", @"removed": removed, @"count": @(removed.count)};
+        }
+
+        // === Need className + selector for add/remove/disable/enable ===
+        NSString *className = params[@"className"];
+        NSString *selectorName = params[@"selector"];
+        if (!className || !selectorName) {
+            return @{@"error": @"className and selector parameters required"};
+        }
+        BOOL isClassMethod = [params[@"classMethod"] boolValue];
+        NSString *key = SpliceKit_debugHookKey(className, selectorName, isClassMethod);
+
+        // === Remove ===
+        if ([act isEqualToString:@"remove"]) {
+            if (!sBreakpoints[key]) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
+            SpliceKit_debugRemoveHook(sBreakpointHooks[key]);
+            [sBreakpointHooks removeObjectForKey:key];
+            [sBreakpoints removeObjectForKey:key];
+            return @{@"status": @"ok", @"removed": key};
+        }
+
+        // === Disable (keep registered but don't fire) ===
+        if ([act isEqualToString:@"disable"]) {
             NSMutableDictionary *info = [sBreakpoints[key] mutableCopy];
-            info[@"key"] = key;
-            [bps addObject:info];
+            if (!info) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
+            info[@"enabled"] = @NO;
+            sBreakpoints[key] = info;
+            return @{@"status": @"ok", @"disabled": key};
         }
-        return @{@"breakpoints": bps, @"count": @(bps.count), @"paused": @(paused)};
-    }
 
-    // === RemoveAll ===
-    if ([act isEqualToString:@"removeAll"]) {
-        NSMutableArray *removed = [NSMutableArray array];
-        for (NSString *key in [sBreakpoints allKeys]) {
-            NSDictionary *info = sBreakpoints[key];
-            if ([info[@"installed"] boolValue]) {
-                Class cls = NSClassFromString(info[@"className"]);
-                SEL sel = NSSelectorFromString(info[@"selector"]);
-                if (cls && sel) SpliceKit_unswizzleMethod(cls, sel);
-            }
-            [removed addObject:key];
+        // === Enable ===
+        if ([act isEqualToString:@"enable"]) {
+            NSMutableDictionary *info = [sBreakpoints[key] mutableCopy];
+            if (!info) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
+            info[@"enabled"] = @YES;
+            sBreakpoints[key] = info;
+            return @{@"status": @"ok", @"enabled": key};
         }
-        [sBreakpoints removeAllObjects];
-        // If currently paused, resume so we don't leave a thread stuck
-        __block BOOL wasPaused;
-        dispatch_sync(sBreakpointQueue, ^{
-            wasPaused = sBreakpointPaused;
-            sBreakpointStepActive = NO;
-        });
-        if (wasPaused) dispatch_semaphore_signal(sBreakpointSemaphore);
-        return @{@"status": @"ok", @"removed": removed, @"count": @(removed.count)};
-    }
 
-    // === Need className + selector for add/remove/disable/enable ===
-    NSString *className = params[@"className"];
-    NSString *selectorName = params[@"selector"];
-    if (!className || !selectorName) {
-        return @{@"error": @"className and selector parameters required"};
-    }
-    NSString *key = [NSString stringWithFormat:@"%@.%@", className, selectorName];
+        // === Add ===
+        Class cls = NSClassFromString(className);
+        if (!cls) return @{@"error": [NSString stringWithFormat:@"Class not found: %@", className]};
+        SEL sel = NSSelectorFromString(selectorName);
+        Method method = isClassMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
+        if (!method) return @{@"error": [NSString stringWithFormat:@"Method not found: %@[%@ %@]",
+                              isClassMethod ? @"+" : @"-", className, selectorName]};
 
-    // === Remove ===
-    if ([act isEqualToString:@"remove"]) {
-        NSDictionary *info = sBreakpoints[key];
-        if (!info) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
-        if ([info[@"installed"] boolValue]) {
-            Class cls = NSClassFromString(className);
-            SEL sel = NSSelectorFromString(selectorName);
-            if (cls && sel) SpliceKit_unswizzleMethod(cls, sel);
+        // Check if already set
+        if (sBreakpoints[key]) {
+            return @{@"status": @"ok", @"message": @"Breakpoint already set", @"key": key};
         }
-        [sBreakpoints removeObjectForKey:key];
-        return @{@"status": @"ok", @"removed": key};
-    }
 
-    // === Disable (keep registered but don't fire) ===
-    if ([act isEqualToString:@"disable"]) {
-        NSMutableDictionary *info = [sBreakpoints[key] mutableCopy];
-        if (!info) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
-        info[@"enabled"] = @NO;
-        sBreakpoints[key] = info;
-        return @{@"status": @"ok", @"disabled": key};
-    }
+        const char *typeEncoding = method_getTypeEncoding(method);
+        NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:typeEncoding];
+        NSUInteger argCount = [sig numberOfArguments]; // includes self + _cmd
 
-    // === Enable ===
-    if ([act isEqualToString:@"enable"]) {
-        NSMutableDictionary *info = [sBreakpoints[key] mutableCopy];
-        if (!info) return @{@"error": [NSString stringWithFormat:@"No breakpoint at %@", key]};
-        info[@"enabled"] = @YES;
-        sBreakpoints[key] = info;
-        return @{@"status": @"ok", @"enabled": key};
-    }
+        NSString *condition = params[@"condition"];
+        NSNumber *hitCount = params[@"hitCount"];
+        BOOL oneShot = [params[@"oneShot"] boolValue];
 
-    // === Add ===
-    Class cls = NSClassFromString(className);
-    if (!cls) return @{@"error": [NSString stringWithFormat:@"Class not found: %@", className]};
-    SEL sel = NSSelectorFromString(selectorName);
-    BOOL isClassMethod = [params[@"classMethod"] boolValue];
-    Method method = isClassMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
-    if (!method) return @{@"error": [NSString stringWithFormat:@"Method not found: %@[%@ %@]",
-                          isClassMethod ? @"+" : @"-", className, selectorName]};
+        // Store breakpoint config
+        NSMutableDictionary *bpConfig = [NSMutableDictionary dictionary];
+        bpConfig[@"className"] = className;
+        bpConfig[@"selector"] = selectorName;
+        bpConfig[@"classMethod"] = @(isClassMethod);
+        bpConfig[@"enabled"] = @YES;
+        bpConfig[@"argCount"] = @(argCount);
+        bpConfig[@"typeEncoding"] = [NSString stringWithUTF8String:typeEncoding ?: ""];
+        bpConfig[@"timestamp"] = [NSDate date].description;
+        if (condition) bpConfig[@"condition"] = condition;
+        if (hitCount) bpConfig[@"hitCount"] = hitCount;
+        if (oneShot) bpConfig[@"oneShot"] = @YES;
 
-    // Check if already set
-    if (sBreakpoints[key]) {
-        return @{@"status": @"ok", @"message": @"Breakpoint already set", @"key": key};
-    }
+        // This breakpoint's own hook, so a one-shot never removes one added later under the
+        // same key while it was paused.
+        __block __weak SpliceKitDebugHook *mine = nil;
 
-    const char *typeEncoding = method_getTypeEncoding(method);
-    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:typeEncoding];
-    NSUInteger argCount = [sig numberOfArguments]; // includes self + _cmd
-
-    NSString *condition = params[@"condition"];
-    NSNumber *hitCount = params[@"hitCount"];
-    BOOL oneShot = [params[@"oneShot"] boolValue];
-
-    // Store breakpoint config
-    NSMutableDictionary *bpConfig = [NSMutableDictionary dictionary];
-    bpConfig[@"className"] = className;
-    bpConfig[@"selector"] = selectorName;
-    bpConfig[@"enabled"] = @YES;
-    bpConfig[@"argCount"] = @(argCount);
-    bpConfig[@"typeEncoding"] = [NSString stringWithUTF8String:typeEncoding ?: ""];
-    bpConfig[@"timestamp"] = [NSDate date].description;
-    if (condition) bpConfig[@"condition"] = condition;
-    if (hitCount) bpConfig[@"hitCount"] = hitCount;
-    if (oneShot) bpConfig[@"oneShot"] = @YES;
-
-    // Create the trampoline
-    IMP originalIMP = method_getImplementation(method);
-
-    // We support methods with 0 or 1 object args (after self + _cmd).
-    // This covers most IBAction-style methods (sender:) and no-arg methods.
-    if (argCount <= 3) {
-        IMP trampoline = imp_implementationWithBlock(^(id _self, id firstArg) {
+        // Pauses when the breakpoint is enabled and the step filter allows it; the hook then
+        // calls the original with the caller's arguments and returns its result.
+        SpliceKitHookBefore pause = ^(id _self, id firstArg) {
             // Check if breakpoint is still enabled
-            NSDictionary *currentConfig = sBreakpoints[key];
-            if (!currentConfig || ![currentConfig[@"enabled"] boolValue]) {
-                // Disabled — call original directly
-                if (argCount <= 2) {
-                    ((void (*)(id, SEL))originalIMP)(_self, sel);
-                } else {
-                    ((void (*)(id, SEL, id))originalIMP)(_self, sel, firstArg);
-                }
-                return;
-            }
+            NSDictionary *currentConfig;
+            @synchronized (sBreakpoints) { currentConfig = sBreakpoints[key]; }
+            if (!currentConfig || ![currentConfig[@"enabled"] boolValue]) return;
 
             // Check step mode
             __block BOOL shouldBreak = YES;
@@ -1819,62 +1866,41 @@ NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
                     if (sBreakpointStepActive) {
                         // Only break if same class as the step target
                         if (sBreakpointStepClass &&
-                            ![NSStringFromClass([_self class]) isEqualToString:sBreakpointStepClass]) {
+                            ![NSStringFromClass(object_getClass(_self)) isEqualToString:sBreakpointStepClass]) {
                             shouldBreak = NO;
                         }
                     }
                 });
             }
+            if (!shouldBreak) return;
 
-            if (!shouldBreak) {
-                if (argCount <= 2) {
-                    ((void (*)(id, SEL))originalIMP)(_self, sel);
-                } else {
-                    ((void (*)(id, SEL, id))originalIMP)(_self, sel, firstArg);
-                }
-                return;
-            }
-
-            // HIT — pause execution
+            // HIT — pause execution (holding no lock, so continue and inspect still work)
             NSArray *stack = [NSThread callStackSymbols];
-            SpliceKit_breakpointHit(key, _self, sel, (argCount > 2 ? firstArg : nil),
-                                     stack, currentConfig);
+            SpliceKit_breakpointHit(key, _self, sel, firstArg, stack, currentConfig);
 
             // One-shot: remove after first hit
             if ([currentConfig[@"oneShot"] boolValue]) {
-                SpliceKit_unswizzleMethod(cls, sel);
-                [sBreakpoints removeObjectForKey:key];
+                @synchronized (sBreakpoints) {
+                    SpliceKitDebugHook *record = sBreakpointHooks[key];
+                    if (record && record == mine) {
+                        SpliceKit_debugRemoveHook(record);
+                        [sBreakpointHooks removeObjectForKey:key];
+                        [sBreakpoints removeObjectForKey:key];
+                    }
+                }
             }
+        };
 
-            // Now call the original implementation
-            if (argCount <= 2) {
-                ((void (*)(id, SEL))originalIMP)(_self, sel);
-            } else {
-                ((void (*)(id, SEL, id))originalIMP)(_self, sel, firstArg);
-            }
-        });
-
-        IMP orig = SpliceKit_swizzleMethod(cls, sel, trampoline);
-        if (!orig) {
-            return @{@"error": @"Swizzle failed"};
-        }
+        NSString *failure = nil;
+        SpliceKitDebugHook *record = SpliceKit_debugInstallHook(cls, isClassMethod, sel, pause, &failure);
+        if (!record) return @{@"error": failure ?: @"Could not hook the method"};
+        mine = record;
         bpConfig[@"installed"] = @YES;
         bpConfig[@"mode"] = @"swizzle";
-    } else {
-        // Don't actually swizzle multi-arg methods — it would break them
-        bpConfig[@"installed"] = @NO;
-        bpConfig[@"mode"] = @"trace_only";
-        bpConfig[@"warning"] = @"Multi-arg methods (4+ args including self/_cmd) cannot be "
-                                "safely breakpointed because the original implementation cannot "
-                                "be forwarded without the correct arguments. Use debug.traceMethod "
-                                "for multi-arg methods, or use debug.breakpoint on a simpler method "
-                                "in the same call chain.";
-        SpliceKit_log(@"[Breakpoint] %@ has %lu args — registered as trace_only (not swizzled)",
-                      key, (unsigned long)argCount);
-    }
 
-    sBreakpoints[key] = bpConfig;
-    return @{@"status": @"ok", @"breakpoint": key, @"mode": bpConfig[@"mode"],
-             @"argCount": @(argCount),
-             @"warning": bpConfig[@"warning"] ?: [NSNull null]};
+        sBreakpointHooks[key] = record;
+        sBreakpoints[key] = bpConfig;
+        return @{@"status": @"ok", @"breakpoint": key, @"mode": bpConfig[@"mode"],
+                 @"argCount": @(argCount)};
+    }
 }

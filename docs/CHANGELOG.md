@@ -26,6 +26,14 @@ that this fork has removed.
   progress dial open it, and a second click closes it. Neither is written into FCP's saved
   layouts or workspaces. `open_transcript()` (`transcript.open`) no longer opens the editor;
   pass `show=True` to open it (`Sources/Panels/SpliceKitDockedPanels.m`).
+- **`debug_trace_method` and `debug_breakpoint` no longer crash Final Cut Pro.** They called
+  the hooked method with a nil argument and dropped its return value, so tracing any method
+  that returns something (`-[PEBackgroundTaskModule groupTileForTask:]`, say) aborted FCP.
+  Both now use one forwarding hook (`Sources/Core/SpliceKitMethodHook.m`) that passes the
+  caller's arguments through and returns the original's result, for any signature whose
+  arguments travel in registers, several arguments included (these used to be listed as
+  traced without being hooked). Anything else is refused with the reason. Class methods are
+  hooked on the metaclass, and an inherited method only on the class asked for.
 - **The MCP server runs on the official MCP Python SDK 2.3** (`mcp>=2.3,<3`; 2.2 before).
   The protocol is unchanged: 2026-07-28, the newest revision, with the `initialize`
   handshake of earlier revisions still accepted. Run `make mcp-setup` to upgrade the
