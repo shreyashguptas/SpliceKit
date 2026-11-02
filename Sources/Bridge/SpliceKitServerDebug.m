@@ -1540,9 +1540,10 @@ static void SpliceKit_ensureBreakpointStorage(void) {
     });
 }
 
-// Called by the trampoline when a breakpoint is hit.
-// Pauses the current thread until continue/step is received.
-static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
+// Called by the hook when a breakpoint is hit.
+// Pauses the current thread until continue/step is received. NO when it did not pause
+// (skipped, condition false, hit count not reached).
+static BOOL SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
                                      id firstArg, NSArray *callStack,
                                      NSDictionary *bpConfig) {
     // Never pause when the main thread is executing a block dispatched from our
@@ -1550,7 +1551,7 @@ static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
     // this block to finish, so pausing here would deadlock both threads.
     if ([NSThread isMainThread] && SpliceKit_isMainThreadInRPCDispatch()) {
         SpliceKit_log(@"[Breakpoint] SKIPPED %@ (main thread in RPC dispatch — would deadlock)", key);
-        return;
+        return NO;
     }
 
     // Check condition if set
@@ -1561,7 +1562,7 @@ static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
             id val = [self_obj valueForKeyPath:condition];
             // If result is falsy, skip this breakpoint hit
             if (!val || ([val respondsToSelector:@selector(boolValue)] && ![val boolValue])) {
-                return;
+                return NO;
             }
         } @catch (NSException *e) {
             // Condition eval failed — break anyway
@@ -1580,7 +1581,7 @@ static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
             sHitCounts[key] = @(current);
         }
         if (current < [hitCountLimit integerValue]) {
-            return; // Haven't reached the hit count threshold yet
+            return NO; // Haven't reached the hit count threshold yet
         }
     }
 
@@ -1639,6 +1640,7 @@ static void SpliceKit_breakpointHit(NSString *key, id self_obj, SEL _cmd,
     });
 
     SpliceKit_log(@"[Breakpoint] RESUMED %@", key);
+    return YES;
 }
 
 // debug.breakpoint
@@ -1876,10 +1878,10 @@ NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
 
             // HIT — pause execution (holding no lock, so continue and inspect still work)
             NSArray *stack = [NSThread callStackSymbols];
-            SpliceKit_breakpointHit(key, _self, sel, firstArg, stack, currentConfig);
+            BOOL paused = SpliceKit_breakpointHit(key, _self, sel, firstArg, stack, currentConfig);
 
-            // One-shot: remove after first hit
-            if ([currentConfig[@"oneShot"] boolValue]) {
+            // One-shot: remove after the first hit that paused
+            if (paused && [currentConfig[@"oneShot"] boolValue]) {
                 @synchronized (sBreakpoints) {
                     SpliceKitDebugHook *record = sBreakpointHooks[key];
                     if (record && record == mine) {
