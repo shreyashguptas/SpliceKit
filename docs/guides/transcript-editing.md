@@ -168,7 +168,9 @@ get_transcript()
 
 ### Via FCP UI
 
-1. Open the transcript panel from SpliceKit's menu or via MCP
+1. Click the Transcript button in FCP's toolbar (or SpliceKit's menu). The Transcript Editor opens
+   inside the main window, beside the Viewer; click the button again to close it.
+   `open_transcript()` over MCP transcribes without opening it (`show=True` opens it).
 2. Select a transcription engine from the dropdown
 3. (Optional) Enable speaker diarization checkbox
 4. Transcription starts automatically for all timeline clips
@@ -365,7 +367,7 @@ After searching, you can delete all matching results in one operation using the
 
 | Tool | Description |
 |------|-------------|
-| `open_transcript()` | Open panel, transcribe timeline clips |
+| `open_transcript()` | Transcribe timeline clips (the editor stays closed; `show=True` opens it) |
 | `open_transcript(file_url=...)` | Transcribe a specific file |
 | `get_transcript()` | Get words with timestamps, speakers, silences |
 | `delete_transcript_words(start_index, count)` | Delete words (removes video) |

@@ -50,6 +50,9 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
     }
     __block BOOL forceRetranscribe = [params[@"forceRetranscribe"] boolValue];
     id primaryOnlyParam = params[@"primaryStorylineOnly"];
+    // The editor opens only when the user clicks its toolbar button, or when asked here:
+    // work done over MCP never pops it open in the middle of their edit.
+    BOOL show = [params[@"show"] respondsToSelector:@selector(boolValue)] && [params[@"show"] boolValue];
     __block BOOL startedTranscription = NO;
     __block BOOL restoredTranscript = NO;
     __block BOOL alreadyTranscribing = NO;
@@ -69,7 +72,8 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
             panel.status != SpliceKitTranscriptStatusTranscribing) {
             [panel leaveFileMode];
         }
-        [panel showPanel];
+        if (show) [panel showPanel];
+        else [panel preparePanel];
 
         if (fileURL) {
             NSURL *url = [NSURL fileURLWithPath:fileURL];
@@ -88,24 +92,30 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
         }
     });
 
+    NSString *panelState = show
+        ? @"Transcript Editor opened in FCP's main window."
+        : @"Transcript loaded; the Transcript Editor stays closed (the user opens it from its toolbar button, or pass show).";
     if (startedTranscription) {
         return @{
             @"status": @"ok",
-            @"message": @"Transcript panel opened. Transcription started. Use transcript.getState to check progress.",
+            @"message": [panelState stringByAppendingString:@" Transcription started. Use transcript.getState to check progress."],
             @"transcriptionStarted": @YES,
+            @"editorOpen": @(show),
         };
     }
     if (alreadyTranscribing) {
         return @{
             @"status": @"ok",
-            @"message": @"Transcript panel opened. Transcription already in progress. Use transcript.getState to check progress.",
+            @"message": [panelState stringByAppendingString:@" Transcription already in progress. Use transcript.getState to check progress."],
             @"transcriptionStarted": @NO,
+            @"editorOpen": @(show),
         };
     }
     return @{
         @"status": @"ok",
-        @"message": restoredTranscript ? @"Transcript panel opened. Restored persisted transcript." : @"Transcript panel opened.",
+        @"message": restoredTranscript ? [panelState stringByAppendingString:@" Restored persisted transcript."] : panelState,
         @"transcriptionStarted": @NO,
+        @"editorOpen": @(show),
     };
 }
 

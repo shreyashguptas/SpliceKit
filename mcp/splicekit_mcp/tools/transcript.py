@@ -16,8 +16,12 @@ from ..bridge import _call_or_error, _err, bridge
 
 @splicekit_tool("open_transcript", LOCAL)
 def open_transcript(file_url: str = "", force_retranscribe: bool = False,
-                    primary_storyline_only: bool = None) -> str:
-    """Open the transcript panel and start transcribing.
+                    primary_storyline_only: bool = None, show: bool = False) -> str:
+    """Transcribe the timeline (or a file) for text-based editing.
+
+    The Transcript Editor itself stays closed, so the user's edit is never interrupted:
+    the user opens it from its toolbar button, where it docks inside Final Cut Pro's main
+    window beside the Viewer. Pass show=True only when the user asks to see it.
 
     If no file_url is provided, transcribes all clips on the current timeline.
     If file_url is provided, transcribes that specific audio/video file.
@@ -35,12 +39,13 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False,
             (connected clips such as B-roll and music are left out), False includes them.
             Omit to keep the current setting (default: include). Clips turned down to
             -60 dB or lower (muted, e.g. -96 dB) are always left out.
+        show: also open the Transcript Editor in FCP's main window (default False).
 
     Clips that cannot be transcribed (no audio track, e.g. a screen recording; media on
     an unmounted volume; a file the transcriber cannot decode) are skipped and listed by
     get_transcript() with the reason, instead of failing the whole run.
 
-    The transcript panel allows text-based editing:
+    The Transcript Editor allows text-based editing:
     - Clicking a word jumps the playhead to that time
     - Deleting words removes those segments from the timeline
     - Dragging words reorders clips on the timeline
@@ -54,6 +59,8 @@ def open_transcript(file_url: str = "", force_retranscribe: bool = False,
         params["forceRetranscribe"] = True
     if primary_storyline_only is not None:
         params["primaryStorylineOnly"] = bool(primary_storyline_only)
+    if show:
+        params["show"] = True
     return _call_or_error("transcript.open", **params)
 
 

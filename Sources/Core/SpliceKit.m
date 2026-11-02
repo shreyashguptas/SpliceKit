@@ -14,6 +14,7 @@
 #import "SpliceKitPlugins.h"
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitTranscriptPanel.h"
+#import "SpliceKitDockedPanels.h"
 #import "SpliceKitURLImport.h"
 #import "SpliceKitMKV.h"
 #import "SpliceKitVP9.h"
@@ -612,6 +613,11 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
+
+    // Background Tasks opens inside the main window, not as a floating window
+    SpliceKit_safeInstall("DockedBackgroundTasks", ^{
+        SpliceKit_installDockedBackgroundTasks();
+    });
 
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitTranscriptVisibilityDidChangeNotification
                                                       object:nil

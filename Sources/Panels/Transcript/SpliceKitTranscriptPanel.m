@@ -25,6 +25,7 @@
 #import <objc/message.h>
 #import "SpliceKitTranscriptPanel+Private.h"
 #import "SpliceKitWindows.h"
+#import "SpliceKitDockedPanels.h"
 
 // FCP doesn't link against Speech.framework, so we load it at runtime.
 // This avoids a hard dependency — if the framework isn't available (unlikely
@@ -235,6 +236,35 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
 
 #pragma mark - Panel Visibility
 
+// The Transcript Editor's place in FCP's main window (SpliceKitDockedPanels.h).
+static NSString * const kTranscriptDockID = @"SpliceKitTranscriptEditor";
+
+- (void)preparePanel {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{
+            [self preparePanel];
+        });
+        return;
+    }
+
+    [self setupPanelIfNeeded];
+    [self restorePersistedStateForCurrentSequenceIfNeeded];
+}
+
+// Moves the editor into FCP's main window. NO, with the editor back in its own window,
+// when the main window has nowhere to dock it.
+- (BOOL)showDocked {
+    if (self.panel.contentView == self.editorView) {
+        self.panel.contentView = [[NSView alloc] initWithFrame:self.editorView.frame];
+    }
+    if (SpliceKit_dockShowView(kTranscriptDockID, @"Transcript Editor", self.editorView, NSMakeSize(360, 300))) {
+        [self.panel orderOut:nil];
+        return YES;
+    }
+    self.panel.contentView = self.editorView;
+    return NO;
+}
+
 - (void)showPanel {
     if (![NSThread isMainThread]) {
         SpliceKit_executeOnMainThread(^{
@@ -243,9 +273,8 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
         return;
     }
 
-    [self setupPanelIfNeeded];
-    [self restorePersistedStateForCurrentSequenceIfNeeded];
-    SpliceKit_presentToolWindow(self.panel);
+    [self preparePanel];
+    if (![self showDocked]) SpliceKit_presentToolWindow(self.panel);
     if (self.status == SpliceKitTranscriptStatusReady && self.mutableWords.count > 0) {
         [self startPlayheadTimer];
     }
@@ -260,12 +289,13 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
         return;
     }
 
+    SpliceKit_dockHide(kTranscriptDockID);
     [self.panel orderOut:nil];
     [self postVisibilityChange:NO];
 }
 
 - (BOOL)isVisible {
-    return self.panel.isVisible;
+    return SpliceKit_dockIsShown(kTranscriptDockID) || self.panel.isVisible;
 }
 
 - (void)refreshEngineControls {
@@ -333,8 +363,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 }
 
 - (void)focusSearchField {
-    [self.panel makeKeyAndOrderFront:nil];
-    [self.searchField becomeFirstResponder];
+    if (!SpliceKit_dockIsShown(kTranscriptDockID)) [self.panel makeKeyAndOrderFront:nil];
+    [self.searchField.window makeFirstResponder:self.searchField];
 }
 
 - (id)currentSequence {

@@ -59,10 +59,14 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 + (instancetype)sharedPanel;
 
-// Panel visibility
+// Panel visibility. The Transcript Editor opens inside FCP's main window, beside the
+// Viewer (SpliceKitDockedPanels.h); a separate window only when it cannot dock there.
 - (void)showPanel;
 - (void)hidePanel;
 - (BOOL)isVisible;
+// Builds the editor and loads the current project's saved transcript without opening it,
+// so work done over MCP shows the moment the user opens it.
+- (void)preparePanel;
 
 // Transcription
 - (void)transcribeTimeline;                    // auto-detect clips from current timeline

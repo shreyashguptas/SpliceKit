@@ -36,6 +36,9 @@
 
 @interface SpliceKitTranscriptPanel () <NSTextViewDelegate, NSWindowDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) NSPanel *panel;
+// Every control of the editor. It sits docked in FCP's main window, or in `panel` when
+// the editor cannot dock.
+@property (nonatomic, strong) NSView *editorView;
 @property (nonatomic, strong) SpliceKitTranscriptTextView *textView;
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSTextField *statusLabel;

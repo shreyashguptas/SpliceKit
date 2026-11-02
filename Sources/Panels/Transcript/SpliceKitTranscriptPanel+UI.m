@@ -43,6 +43,7 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 
     NSView *content = self.panel.contentView;
     content.wantsLayer = YES;
+    self.editorView = content;
 
     // ──── Row 1: Search + Filter + Transcribe ────
     NSView *row1 = [[NSView alloc] init];
@@ -1046,7 +1047,7 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 - (void)playheadTimerFired:(NSTimer *)timer {
     if (self.status != SpliceKitTranscriptStatusReady) return;
     if (self.mutableWords.count == 0) return;
-    if (!self.panel.isVisible) return;
+    if (![self isVisible]) return;
 
     __block double playheadTime = -1;
     @try {

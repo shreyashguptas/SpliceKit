@@ -20,6 +20,12 @@ that this fork has removed.
   one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
 
 ### Changed
+- **The Transcript Editor and Background Tasks open inside Final Cut Pro's main window.**
+  Each is a pane in the top row, between the Viewer and the Inspector, instead of a floating
+  window: the Transcript toolbar button, Window > Background Tasks (⌘9) and the toolbar's
+  progress dial open it, and a second click closes it. Neither is written into FCP's saved
+  layouts or workspaces. `open_transcript()` (`transcript.open`) no longer opens the editor;
+  pass `show=True` to open it (`Sources/Panels/SpliceKitDockedPanels.m`).
 - **The MCP server runs on the official MCP Python SDK 2.3** (`mcp>=2.3,<3`; 2.2 before).
   The protocol is unchanged: 2026-07-28, the newest revision, with the `initialize`
   handshake of earlier revisions still accepted. Run `make mcp-setup` to upgrade the

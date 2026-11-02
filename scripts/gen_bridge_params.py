@@ -102,6 +102,7 @@ DESCRIBED: dict[str, dict[str, str]] = {
         "fileURL": "string: transcribe this file instead of the timeline; plain path, ~/path or file:// URL",
         "forceRetranscribe": "bool: discard the cached transcript (and stop a run in progress) and transcribe again",
         "primaryStorylineOnly": "bool: transcribe only the primary storyline (connected clips left out); remembered",
+        "show": "bool: also open the Transcript Editor in FCP's main window (default: it stays closed)",
         "timelineStart": "number: file mode, timeline seconds the file's first word is shifted to",
     },
     "transcript.getState": {

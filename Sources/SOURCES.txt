@@ -59,6 +59,7 @@ Bridge/SpliceKitBridgeMetadata.m
 Bridge/SpliceKitBridgeParams.m
 Bridge/SpliceKitAsync.m
 Panels/SpliceKitLogPanel.m
+Panels/SpliceKitDockedPanels.m
 Panels/Transcript/SpliceKitTranscriptPanel.m
 Panels/Transcript/SpliceKitTranscriptTextView.m
 Panels/Transcript/SpliceKitTranscriptPanel+UI.m

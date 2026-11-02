@@ -565,6 +565,7 @@ open_transcript()                              # transcribe all clips on timelin
 open_transcript(file_url="/path/to/video.mp4") # transcribe a specific file (a path, ~/..., or a file:// URL)
 open_transcript(force_retranscribe=True)       # discard cache and re-transcribe (stops a run in progress)
 open_transcript(primary_storyline_only=True)   # leave connected clips (B-roll, music) out; remembered
+open_transcript(show=True)                     # also open the Transcript Editor (it stays closed otherwise)
 get_transcript()                               # first 1000 words + silences; status, skipped clips, progress
 get_transcript(start_seconds=60, end_seconds=120, fields="text,startTime,endTime", words_only=True)
 get_transcript(offset=1000)                    # next page (the answer says where the next page starts)
@@ -576,7 +577,7 @@ delete_transcript_silences()                   # batch-remove all silences from 
 delete_transcript_silences(min_duration=1.0)   # remove only silences > 1 second
 set_transcript_speaker(start_index=0, count=50, speaker="Host")  # label speakers
 set_silence_threshold(threshold=0.5)           # recompute silences immediately (no re-transcription)
-close_transcript()                             # close the panel
+close_transcript()                             # close the Transcript Editor
 ```
 
 Clips that cannot be transcribed are skipped and listed by `get_transcript` with the reason instead
@@ -588,7 +589,12 @@ words land where they are heard. The raw `transcript.getState` takes `wordsOnly`
 `startSeconds`/`endSeconds`, `offset`/`limit`, `includeSilences`, `includeText`, `includeGapBuckets`;
 with none of them it returns the full state as before (a 40-minute transcript is ~1.8 M characters).
 
-The transcript panel opens inside FCP as a floating window with an **engine selector dropdown**:
+The Transcript Editor opens inside FCP's main window, in the top row between the Viewer and the
+Inspector, from its toolbar button (Transcript) or `open_transcript(show=True)`; clicking the button
+again closes it. `open_transcript()` alone transcribes without opening it, so an agent's work never
+pops it open mid-edit. Background Tasks (Window > Background Tasks, ⌘9, or the toolbar's progress dial)
+opens in the same row instead of as a floating window. Neither is saved into FCP's workspaces. The
+editor has an **engine selector dropdown**:
 - **Parakeet v3** (default) — NVIDIA Parakeet TDT 0.6B multilingual (25 languages), on-device via FluidAudio
 - **Parakeet v2** — English-optimized variant, same speed
 - **Apple Speech** — SFSpeechRecognizer (slower; SpliceKit requests on-device recognition)
