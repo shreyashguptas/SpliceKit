@@ -150,7 +150,9 @@ extern NSString *const FCPAttrSegmentEndIndex;
 - (void)assignSpeakers;
 + (NSString *)audioProblemForFileAtPath:(NSString *)path;
 - (NSDictionary *)deleteTimelineRange:(double)deleteStart end:(double)deleteEnd;
-- (BOOL)selectPrimaryStorylineItemAtTime:(double)seconds timeline:(id)timeline;
+- (NSString *)problemCuttingFrom:(double)start to:(double)end timeline:(id)timeline;
+- (void)clearSelectionAndRangeOfTimeline:(id)timeline;
+- (NSString *)selectPrimaryStorylinePieceFrom:(double)start to:(double)end timeline:(id)timeline;
 - (void)setPlayheadToTime:(double)seconds;
 @end
 

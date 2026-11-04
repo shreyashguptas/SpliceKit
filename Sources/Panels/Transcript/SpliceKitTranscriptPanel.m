@@ -1301,9 +1301,12 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                 return;
             }
 
-            // Blade cuts the selected clips when there are any (a B-roll clip the user
-            // clicked); with none it cuts the primary storyline.
-            SpliceKit_handleSelectionApply(timeline, @[], NULL);
+            NSString *problem = [self problemCuttingFrom:deleteStart to:deleteEnd timeline:timeline];
+            if (problem) {
+                result = @{@"error": problem};
+                return;
+            }
+            [self clearSelectionAndRangeOfTimeline:timeline];
 
             // Blade at start
             [self setPlayheadToTime:deleteStart];
@@ -1328,9 +1331,9 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
             double midPoint = (deleteStart + deleteEnd) / 2.0;
             [self setPlayheadToTime:midPoint];
             [NSThread sleepForTimeInterval:0.02];
-            if (![self selectPrimaryStorylineItemAtTime:midPoint timeline:timeline]) {
-                result = @{@"error": [NSString stringWithFormat:
-                    @"No primary storyline clip at %.2fs to delete", midPoint]};
+            NSString *notSelected = [self selectPrimaryStorylinePieceFrom:deleteStart to:deleteEnd timeline:timeline];
+            if (notSelected) {
+                result = @{@"error": notSelected};
                 return;
             }
             [NSThread sleepForTimeInterval:0.02];
@@ -1365,27 +1368,82 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     return result;
 }
 
-// Selects the primary storyline item playing at `seconds`. FCP's Select Clip at Playhead
-// takes a connected clip above the storyline when there is one, so a word or pause under
-// B-roll deleted (or moved) the B-roll and left the words where they were.
-- (BOOL)selectPrimaryStorylineItemAtTime:(double)seconds timeline:(id)timeline {
+// One frame of the open sequence, in seconds.
+- (double)frameSecondsOfTimeline:(id)timeline {
+    id sequence = [timeline respondsToSelector:@selector(sequence)]
+        ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+    double frame = sequence ? SpliceKit_secondsFromTime(SpliceKit_sequenceFrameDuration(sequence)) : 0;
+    return frame > 0 ? frame : 1.0 / 24.0;
+}
+
+// Why start..end cannot be cut out as its own piece, or nil. Under one frame, both blades
+// land on the same frame, no piece is made between them, and the piece after that edit
+// (up to the next cut) would be the one deleted or moved.
+- (NSString *)problemCuttingFrom:(double)start to:(double)end timeline:(id)timeline {
+    double frame = [self frameSecondsOfTimeline:timeline];
+    if (end - start < frame) {
+        return [NSString stringWithFormat:@"%.3fs - %.3fs is shorter than one frame (%.3fs), so it cannot "
+                                          @"be cut out on its own; include a neighbouring word", start, end, frame];
+    }
+    return nil;
+}
+
+// Blade cuts the selected clips when there are any (a B-roll clip the user clicked), and
+// Delete removes an In/Out range rather than the selected piece when one is set. With
+// neither, blade cuts the primary storyline and Delete removes the selected piece.
+- (void)clearSelectionAndRangeOfTimeline:(id)timeline {
+    SpliceKit_handleSelectionApply(timeline, @[], NULL);
+    SEL clearRangeSel = NSSelectorFromString(@"clearRange:");
+    if ([timeline respondsToSelector:clearRangeSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(timeline, clearRangeSel, nil);
+    }
+}
+
+// Selects the primary storyline pieces that the two blades at start and end cut out (one,
+// or several when the range spans an edit between clips), or says why not. FCP's Select
+// Clip at Playhead takes a connected clip above the storyline when there is one, so a word
+// or pause under B-roll deleted (or moved) the B-roll and left the words where they were.
+// The pieces must run exactly from start to end (within a frame): when a blade did not
+// cut (at a transition, say), the piece there is larger, and deleting it would take more
+// than the words.
+- (NSString *)selectPrimaryStorylinePieceFrom:(double)start to:(double)end timeline:(id)timeline {
     id sequence = [timeline respondsToSelector:@selector(sequence)]
         ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
     id primary = [sequence respondsToSelector:@selector(primaryObject)]
         ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
     NSArray *items = [primary respondsToSelector:@selector(containedItems)]
         ? ((id (*)(id, SEL))objc_msgSend)(primary, @selector(containedItems)) : nil;
+    double tolerance = [self frameSecondsOfTimeline:timeline] + 0.001;
     Class transitionClass = objc_getClass("FFAnchoredTransition");
+
+    NSMutableArray *pieces = [NSMutableArray array];
+    double coveredTo = start;
+    BOOL started = NO;
     for (id item in items) {
         if (transitionClass && [item isKindOfClass:transitionClass]) continue;
-        double start = 0, duration = 0;
-        if (![self effectiveRangeForTimelineObject:item primaryObject:primary start:&start duration:&duration]) continue;
-        if (seconds >= start && seconds < start + duration) {
-            return SpliceKit_handleSelectionApply(timeline, @[item], NULL);
+        double itemStart = 0, duration = 0;
+        if (![self effectiveRangeForTimelineObject:item primaryObject:primary start:&itemStart duration:&duration]) continue;
+        double itemEnd = itemStart + duration;
+        if (itemEnd <= start + tolerance) continue;   // before the range
+        if (itemStart >= end - tolerance) break;      // after it
+        // Overlaps the range: it has to lie inside it and continue where the last one ended.
+        if (fabs(itemStart - coveredTo) > tolerance || itemEnd > end + tolerance) {
+            SpliceKit_log(@"[Transcript] Piece %.3f-%.3fs does not fit the cut %.3f-%.3fs",
+                          itemStart, itemEnd, start, end);
+            return [NSString stringWithFormat:@"The timeline could not be cut at %.2fs - %.2fs (a piece there "
+                                              @"runs %.2fs - %.2fs), so nothing was deleted or moved",
+                                              start, end, itemStart, itemEnd];
         }
+        [pieces addObject:item];
+        coveredTo = itemEnd;
+        started = YES;
     }
-    SpliceKit_log(@"[Transcript] No primary storyline item at %.3fs", seconds);
-    return NO;
+    if (!started || fabs(coveredTo - end) > tolerance) {
+        SpliceKit_log(@"[Transcript] No primary storyline pieces cover %.3f-%.3fs", start, end);
+        return [NSString stringWithFormat:@"No primary storyline clip covers %.2fs - %.2fs", start, end];
+    }
+    return SpliceKit_handleSelectionApply(timeline, pieces, NULL)
+        ? nil : @"Could not select the piece of the primary storyline to edit";
 }
 
 /// Deletes a contiguous range of words from both the timeline and our data model.
@@ -1485,6 +1543,63 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     NSMutableDictionary *fullResult = [result mutableCopy];
     fullResult[@"deletedWords"] = @(count);
     return fullResult;
+}
+
+/// Deletes the words at these indexes: each run of neighbouring words is one cut, latest
+/// first so the earlier ones never move, and the timeline is read back once at the end
+/// (a read after every word made deleting 50 search results take about 20 seconds).
+- (NSDictionary *)deleteWordsAtIndexes:(NSIndexSet *)indexes {
+    NSDictionary *refusal = [self refusalWhileTranscribing];
+    if (refusal) return refusal;
+    [self ensurePersistedStateLoaded];
+
+    NSMutableArray<NSValue *> *runs = [NSMutableArray array];
+    @synchronized (self.mutableWords) {
+        NSIndexSet *valid = [indexes indexesPassingTest:^BOOL(NSUInteger idx, BOOL *stop) {
+            return idx < self.mutableWords.count;
+        }];
+        [valid enumerateRangesWithOptions:NSEnumerationReverse usingBlock:^(NSRange range, BOOL *stop) {
+            [runs addObject:[NSValue valueWithRange:range]];
+        }];
+    }
+    if (runs.count == 0) return @{@"error": @"No words to delete"};
+
+    NSMutableIndexSet *deleted = [NSMutableIndexSet indexSet];
+    NSString *lastError = nil;
+    for (NSValue *value in runs) {
+        NSRange run = value.rangeValue;
+        double start = self.mutableWords[run.location].startTime;
+        double end = self.mutableWords[NSMaxRange(run) - 1].endTime;
+        NSDictionary *result = [self deleteTimelineRange:start end:end];
+        if (result[@"error"]) {
+            lastError = result[@"error"];
+            SpliceKit_log(@"[Transcript] Could not delete words %lu-%lu: %@", (unsigned long)run.location,
+                          (unsigned long)(NSMaxRange(run) - 1), lastError);
+        } else {
+            [deleted addIndexesInRange:run];
+        }
+    }
+
+    if (deleted.count > 0) {
+        @synchronized (self.mutableWords) {
+            [self.mutableWords removeObjectsAtIndexes:deleted];
+            for (NSUInteger i = 0; i < self.mutableWords.count; i++) {
+                self.mutableWords[i].wordIndex = i;
+            }
+        }
+        [self resyncTimestampsFromTimeline];
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self rebuildTextView];
+        self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
+    });
+
+    NSMutableDictionary *response = [NSMutableDictionary dictionary];
+    response[@"status"] = lastError ? (deleted.count ? @"partial" : @"failed") : @"ok";
+    response[@"deletedWords"] = @(deleted.count);
+    if (lastError) response[@"lastError"] = lastError;
+    if (!deleted.count && lastError) response[@"error"] = lastError;
+    return response;
 }
 
 #pragma mark - Delete Silences (Batch)
@@ -1640,9 +1755,12 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                 return;
             }
 
-            // Blade cuts the selected clips when there are any (a B-roll clip the user
-            // clicked); with none it cuts the primary storyline.
-            SpliceKit_handleSelectionApply(timeline, @[], NULL);
+            NSString *problem = [self problemCuttingFrom:sourceStart to:sourceEnd timeline:timeline];
+            if (problem) {
+                result = @{@"error": problem};
+                return;
+            }
+            [self clearSelectionAndRangeOfTimeline:timeline];
 
             // Step 1: Blade at source start
             [self setPlayheadToTime:sourceStart];
@@ -1662,9 +1780,9 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
             [self setPlayheadToTime:midPoint];
             [NSThread sleepForTimeInterval:0.05];
 
-            if (![self selectPrimaryStorylineItemAtTime:midPoint timeline:timeline]) {
-                result = @{@"error": [NSString stringWithFormat:
-                    @"No primary storyline clip at %.2fs to move", midPoint]};
+            NSString *notSelected = [self selectPrimaryStorylinePieceFrom:sourceStart to:sourceEnd timeline:timeline];
+            if (notSelected) {
+                result = @{@"error": notSelected};
                 return;
             }
             [NSThread sleepForTimeInterval:0.05];

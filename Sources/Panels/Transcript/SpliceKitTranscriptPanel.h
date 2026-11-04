@@ -104,6 +104,8 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 // the step in "undoStep". The RPCs and the editor's own Delete key, drag and buttons use it.
 - (NSDictionary *)performEditAsOneUndoStep:(NSString *)name edit:(NSDictionary *(^)(void))edit;
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;
+// Words that need not be next to each other: one cut per run of neighbours, latest first.
+- (NSDictionary *)deleteWordsAtIndexes:(NSIndexSet *)indexes;
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 
 // Engine selection

@@ -434,43 +434,31 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
         return;
     }
 
-    // Delete selected search result words
-    // Collect word indices from search results (reverse order for safe deletion)
-    NSMutableArray<NSNumber *> *wordIndicesToDelete = [NSMutableArray array];
+    // Delete the words the search results touch
+    NSMutableIndexSet *wordIndices = [NSMutableIndexSet indexSet];
     @synchronized (self.mutableWords) {
         for (NSValue *rangeVal in self.searchResultRanges) {
             NSRange range = rangeVal.rangeValue;
             for (SpliceKitTranscriptWord *word in self.mutableWords) {
-                NSRange intersection = NSIntersectionRange(range, word.textRange);
-                if (intersection.length > 0) {
-                    [wordIndicesToDelete addObject:@(word.wordIndex)];
+                if (NSIntersectionRange(range, word.textRange).length > 0) {
+                    [wordIndices addIndex:word.wordIndex];
                 }
             }
         }
     }
-
-    if (wordIndicesToDelete.count == 0) return;
-
-    // Sort descending so we delete from end first
-    [wordIndicesToDelete sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
-        return [b compare:a];
-    }];
+    if (wordIndices.count == 0) return;
 
     [self updateStatusUI:@"Deleting search results..."];
     // One undo step for all of them. Async so the status above shows first.
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self performEditAsOneUndoStep:@"Delete Words" edit:^NSDictionary *{
-            NSNumber *previous = nil;
-            for (NSNumber *idx in wordIndicesToDelete) {
-                // A word two results both touch is listed twice; deleting it again would
-                // take the word that moved into its index.
-                if (previous && [idx isEqualToNumber:previous]) continue;
-                previous = idx;
-                [self deleteWordsFromIndex:idx.unsignedIntegerValue count:1];
-            }
-            return @{@"status": @"ok"};
+        NSDictionary *result = [self performEditAsOneUndoStep:@"Delete Words" edit:^NSDictionary *{
+            return [self deleteWordsAtIndexes:wordIndices];
         }];
-        [self updateStatusUI:@"Deleted search results"];
+        NSString *problem = result[@"error"] ?: result[@"lastError"];
+        [self updateStatusUI:problem
+            ? [NSString stringWithFormat:@"Deleted %@ of %lu words: %@", result[@"deletedWords"] ?: @0,
+                                         (unsigned long)wordIndices.count, problem]
+            : [NSString stringWithFormat:@"Deleted %lu words", (unsigned long)wordIndices.count]];
     });
 }
 

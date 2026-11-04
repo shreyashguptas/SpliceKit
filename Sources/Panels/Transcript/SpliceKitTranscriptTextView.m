@@ -191,15 +191,17 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *SpliceKit_transcriptTran
         return;
     }
 
-    // Spacebar and transport keys (J/K/L) → FCP's own commands via the responder chain
+    // Spacebar and transport keys (J/K/L) → FCP's own commands via the responder chain.
+    // A held key's auto-repeat sends nothing more: each L press doubles the speed in FCP,
+    // and each Space press toggles playback.
     NSString *chars = event.charactersIgnoringModifiers;
     if ([chars isEqualToString:@" "]) {
-        [NSApp sendAction:NSSelectorFromString(@"playPause:") to:nil from:nil];
+        if (!event.isARepeat) [NSApp sendAction:NSSelectorFromString(@"playPause:") to:nil from:nil];
         return;
     }
     NSArray<NSString *> *transport = SpliceKit_transcriptTransportCommands()[chars];
     if (transport && !(event.modifierFlags & SpliceKitTranscriptCommandModifiers)) {
-        [NSApp sendAction:NSSelectorFromString(transport[0]) to:nil from:nil];
+        if (!event.isARepeat) [NSApp sendAction:NSSelectorFromString(transport[0]) to:nil from:nil];
         return;
     }
 
