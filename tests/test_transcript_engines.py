@@ -63,15 +63,25 @@ class TranscriptWhisperEngineTests(unittest.TestCase):
             self.assertIsNotNone(body, method)
             first = body.group("body").strip().splitlines()[0]
             self.assertIn("refusalWhileTranscribing", first, method)
+        # Checked before the undo group opens, so a refused edit adds no undo step.
+        step = re.search(r"- \(NSDictionary \*\)performEditAsOneUndoStep[^{]*\{(?P<body>.*?)\n\}\n", source, re.DOTALL)
+        self.assertIsNotNone(step, "performEditAsOneUndoStep")
+        step = step.group("body")
+        self.assertLess(step.index("refusalWhileTranscribing"), step.index("SpliceKit_internalBeginEditGroupIfNeeded"))
+        # Every edit, from the RPCs and from the editor's own keys and buttons, goes through it.
         server = SERVER.read_text(encoding="utf-8")
         for handler in ("SpliceKit_handleTranscriptDeleteWords", "SpliceKit_handleTranscriptMoveWords",
                         "SpliceKit_handleTranscriptDeleteSilences"):
             body = re.search(r"NSDictionary \*" + handler + r"\(NSDictionary \*params\) \{(?P<body>.*?)\n\}\n",
                              server, re.DOTALL)
             self.assertIsNotNone(body, handler)
-            body = body.group("body")
-            # Checked before the undo group opens, so a refused edit adds no undo step.
-            self.assertLess(body.index("refusalWhileTranscribing"), body.index("SpliceKit_executeOnMainThread"), handler)
+            self.assertIn("performEditAsOneUndoStep:", body.group("body"), handler)
+        ui = (TRANSCRIPT / "SpliceKitTranscriptPanel+UI.m").read_text(encoding="utf-8")
+        for method in ("handleDeleteKeyInTextView", "handleDropOfWordStart", "deleteSilencesClicked",
+                       "deleteResultsClicked"):
+            body = re.search(r"- \(void\)" + method + r"[^{]*\{(?P<body>.*?)\n\}\n", ui, re.DOTALL)
+            self.assertIsNotNone(body, method)
+            self.assertIn("performEditAsOneUndoStep:", body.group("body"), method)
 
     def test_get_transcript_names_the_engine_and_the_fallback(self):
         m = load_server_module()

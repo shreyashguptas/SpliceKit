@@ -36,12 +36,18 @@
 
 @interface SpliceKitTranscriptPanel () <NSTextViewDelegate, NSWindowDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) NSPanel *panel;
+// Every control of the editor. It sits docked in FCP's main window, or in `panel` when
+// the editor cannot dock.
+@property (nonatomic, strong) NSView *editorView;
 @property (nonatomic, strong) SpliceKitTranscriptTextView *textView;
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @property (nonatomic, strong) NSButton *refreshButton;
 @property (nonatomic, strong) NSTimer *playheadTimer;
+
+// Removes these silences from the timeline (latest first) and re-reads the words' positions.
+- (NSDictionary *)deleteSilences:(NSArray<SpliceKitTranscriptSilence *> *)silences;
 
 // Search & Filter UI
 @property (nonatomic, strong) NSSearchField *searchField;
@@ -144,6 +150,9 @@ extern NSString *const FCPAttrSegmentEndIndex;
 - (void)assignSpeakers;
 + (NSString *)audioProblemForFileAtPath:(NSString *)path;
 - (NSDictionary *)deleteTimelineRange:(double)deleteStart end:(double)deleteEnd;
+- (NSString *)problemCuttingFrom:(double)start to:(double)end timeline:(id)timeline;
+- (void)clearSelectionAndRangeOfTimeline:(id)timeline;
+- (NSString *)selectPrimaryStorylinePieceFrom:(double)start to:(double)end timeline:(id)timeline;
 - (void)setPlayheadToTime:(double)seconds;
 @end
 
@@ -163,6 +172,10 @@ extern NSString *const FCPAttrSegmentEndIndex;
 // Implemented in SpliceKitTranscriptPanel+Clips.m, called from another file.
 @interface SpliceKitTranscriptPanel (Clips)
 - (NSArray *)collectClipInfosForSequence:(id)sequence primaryObject:(id)primaryObject errorMessage:(NSString **)errorMessageOut;
+- (BOOL)effectiveRangeForTimelineObject:(id)item
+                          primaryObject:(id)primaryObject
+                                  start:(double *)startOut
+                               duration:(double *)durationOut;
 - (void)performTimelineTranscription;
 - (id)transcriptAssetCandidateForClipInfo:(NSDictionary *)clipInfo assetsSelector:(SEL)assetsSel;
 - (NSString *)mediaPathForTranscriptAsset:(id)asset;

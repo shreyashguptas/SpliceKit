@@ -50,6 +50,9 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
     }
     __block BOOL forceRetranscribe = [params[@"forceRetranscribe"] boolValue];
     id primaryOnlyParam = params[@"primaryStorylineOnly"];
+    // The editor opens only when the user clicks its toolbar button, or when asked here:
+    // work done over MCP never pops it open in the middle of their edit.
+    BOOL show = [params[@"show"] respondsToSelector:@selector(boolValue)] && [params[@"show"] boolValue];
     __block BOOL startedTranscription = NO;
     __block BOOL restoredTranscript = NO;
     __block BOOL alreadyTranscribing = NO;
@@ -69,7 +72,8 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
             panel.status != SpliceKitTranscriptStatusTranscribing) {
             [panel leaveFileMode];
         }
-        [panel showPanel];
+        if (show) [panel showPanel];
+        else [panel preparePanel];
 
         if (fileURL) {
             NSURL *url = [NSURL fileURLWithPath:fileURL];
@@ -88,24 +92,30 @@ NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
         }
     });
 
+    NSString *panelState = show
+        ? @"Transcript Editor opened in FCP's main window."
+        : @"Transcript loaded; the Transcript Editor stays closed (the user opens it from its toolbar button, or pass show).";
     if (startedTranscription) {
         return @{
             @"status": @"ok",
-            @"message": @"Transcript panel opened. Transcription started. Use transcript.getState to check progress.",
+            @"message": [panelState stringByAppendingString:@" Transcription started. Use transcript.getState to check progress."],
             @"transcriptionStarted": @YES,
+            @"editorOpen": @(show),
         };
     }
     if (alreadyTranscribing) {
         return @{
             @"status": @"ok",
-            @"message": @"Transcript panel opened. Transcription already in progress. Use transcript.getState to check progress.",
+            @"message": [panelState stringByAppendingString:@" Transcription already in progress. Use transcript.getState to check progress."],
             @"transcriptionStarted": @NO,
+            @"editorOpen": @(show),
         };
     }
     return @{
         @"status": @"ok",
-        @"message": restoredTranscript ? @"Transcript panel opened. Restored persisted transcript." : @"Transcript panel opened.",
+        @"message": restoredTranscript ? [panelState stringByAppendingString:@" Restored persisted transcript."] : panelState,
         @"transcriptionStarted": @NO,
+        @"editorOpen": @(show),
     };
 }
 
@@ -132,38 +142,10 @@ NSDictionary *SpliceKit_handleTranscriptDeleteWords(NSDictionary *params) {
     NSUInteger startIndex = [params[@"startIndex"] unsignedIntegerValue];
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
-    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
-    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        id timeline = nil;
-        id sequence = nil;
-        NSString *undoGroupName = @"Delete Words";
-        BOOL openedUndoGroup = NO;
-        @try {
-            timeline = SpliceKit_getActiveTimelineModule();
-            if (timeline) {
-                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
-            }
-            @try {
-                result = [[SpliceKitTranscriptPanel sharedPanel] deleteWordsFromIndex:startIndex count:count];
-            } @finally {
-                if (openedUndoGroup) {
-                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
-                }
-            }
-            if (result && !result[@"error"] && openedUndoGroup) {
-                NSMutableDictionary *out = [result mutableCopy];
-                out[@"undoStep"] = undoGroupName;
-                result = out;
-            }
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result ?: @{@"error": @"Operation failed"};
+    SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
+    return [panel performEditAsOneUndoStep:@"Delete Words" edit:^NSDictionary *{
+        return [panel deleteWordsFromIndex:startIndex count:count];
+    }];
 }
 
 NSDictionary *SpliceKit_handleTranscriptMoveWords(NSDictionary *params) {
@@ -171,38 +153,10 @@ NSDictionary *SpliceKit_handleTranscriptMoveWords(NSDictionary *params) {
     NSUInteger count = [params[@"count"] unsignedIntegerValue];
     NSUInteger destIndex = [params[@"destIndex"] unsignedIntegerValue];
     if (count == 0) return @{@"error": @"count must be > 0"};
-    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
-    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        id timeline = nil;
-        id sequence = nil;
-        NSString *undoGroupName = @"Move Words";
-        BOOL openedUndoGroup = NO;
-        @try {
-            timeline = SpliceKit_getActiveTimelineModule();
-            if (timeline) {
-                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
-            }
-            @try {
-                result = [[SpliceKitTranscriptPanel sharedPanel] moveWordsFromIndex:startIndex count:count toIndex:destIndex];
-            } @finally {
-                if (openedUndoGroup) {
-                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
-                }
-            }
-            if (result && !result[@"error"] && openedUndoGroup) {
-                NSMutableDictionary *out = [result mutableCopy];
-                out[@"undoStep"] = undoGroupName;
-                result = out;
-            }
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result ?: @{@"error": @"Operation failed"};
+    SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
+    return [panel performEditAsOneUndoStep:@"Move Words" edit:^NSDictionary *{
+        return [panel moveWordsFromIndex:startIndex count:count toIndex:destIndex];
+    }];
 }
 
 NSDictionary *SpliceKit_handleTranscriptSearch(NSDictionary *params) {
@@ -214,38 +168,10 @@ NSDictionary *SpliceKit_handleTranscriptSearch(NSDictionary *params) {
 
 NSDictionary *SpliceKit_handleTranscriptDeleteSilences(NSDictionary *params) {
     double minDuration = [params[@"minDuration"] doubleValue]; // 0 = delete all
-    NSDictionary *busy = [[SpliceKitTranscriptPanel sharedPanel] refusalWhileTranscribing];
-    if (busy) return busy;  // before the undo group, so a refused edit leaves no empty undo step
-
-    __block NSDictionary *result = nil;
-    SpliceKit_executeOnMainThread(^{
-        id timeline = nil;
-        id sequence = nil;
-        NSString *undoGroupName = @"Delete Silences";
-        BOOL openedUndoGroup = NO;
-        @try {
-            timeline = SpliceKit_getActiveTimelineModule();
-            if (timeline) {
-                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, undoGroupName);
-            }
-            @try {
-                result = [[SpliceKitTranscriptPanel sharedPanel] deleteSilencesLongerThan:minDuration];
-            } @finally {
-                if (openedUndoGroup) {
-                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, undoGroupName, YES);
-                }
-            }
-            if (result && openedUndoGroup) {
-                NSMutableDictionary *out = [result mutableCopy];
-                out[@"undoStep"] = undoGroupName;
-                result = out;
-            }
-        } @catch (NSException *e) {
-            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
-        }
-    });
-    return result ?: @{@"error": @"Operation failed"};
+    SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
+    return [panel performEditAsOneUndoStep:@"Delete Silences" edit:^NSDictionary *{
+        return [panel deleteSilencesLongerThan:minDuration];
+    }];
 }
 
 NSDictionary *SpliceKit_handleTranscriptSetSilenceThreshold(NSDictionary *params) {

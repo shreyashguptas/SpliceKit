@@ -43,6 +43,7 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 
     NSView *content = self.panel.contentView;
     content.wantsLayer = YES;
+    self.editorView = content;
 
     // ──── Row 1: Search + Filter + Transcribe ────
     NSView *row1 = [[NSView alloc] init];
@@ -433,41 +434,38 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
         return;
     }
 
-    // Delete selected search result words
-    // Collect word indices from search results (reverse order for safe deletion)
-    NSMutableArray<NSNumber *> *wordIndicesToDelete = [NSMutableArray array];
+    // Delete the words the search results touch
+    NSMutableIndexSet *wordIndices = [NSMutableIndexSet indexSet];
     @synchronized (self.mutableWords) {
         for (NSValue *rangeVal in self.searchResultRanges) {
             NSRange range = rangeVal.rangeValue;
             for (SpliceKitTranscriptWord *word in self.mutableWords) {
-                NSRange intersection = NSIntersectionRange(range, word.textRange);
-                if (intersection.length > 0) {
-                    [wordIndicesToDelete addObject:@(word.wordIndex)];
+                if (NSIntersectionRange(range, word.textRange).length > 0) {
+                    [wordIndices addIndex:word.wordIndex];
                 }
             }
         }
     }
-
-    if (wordIndicesToDelete.count == 0) return;
-
-    // Sort descending so we delete from end first
-    [wordIndicesToDelete sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
-        return [b compare:a];
-    }];
+    if (wordIndices.count == 0) return;
 
     [self updateStatusUI:@"Deleting search results..."];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        for (NSNumber *idx in wordIndicesToDelete) {
-            [self deleteWordsFromIndex:idx.unsignedIntegerValue count:1];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self updateStatusUI:@"Deleted search results"];
-        });
+    // One undo step for all of them. Async so the status above shows first.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDictionary *result = [self performEditAsOneUndoStep:@"Delete Words" edit:^NSDictionary *{
+            return [self deleteWordsAtIndexes:wordIndices];
+        }];
+        NSString *problem = result[@"error"] ?: result[@"lastError"];
+        [self updateStatusUI:problem
+            ? [NSString stringWithFormat:@"Deleted %@ of %lu words: %@", result[@"deletedWords"] ?: @0,
+                                         (unsigned long)wordIndices.count, problem]
+            : [NSString stringWithFormat:@"Deleted %lu words", (unsigned long)wordIndices.count]];
     });
 }
 
 - (void)deleteSilencesClicked:(id)sender {
-    [self deleteAllSilences];
+    [self performEditAsOneUndoStep:@"Delete Silences" edit:^NSDictionary *{
+        return [self deleteAllSilences];
+    }];
 }
 
 - (void)prevResultClicked:(id)sender {
@@ -905,39 +903,10 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 
     // If only silences selected (no words), delete those silence segments
     if (wordIndices.count == 0 && selectedSilences.count > 0) {
-        [self updateStatusUI:@"Deleting pauses..."];
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            // Delete from end to start to avoid position shifts
-            NSArray *sorted = [selectedSilences sortedArrayUsingComparator:^NSComparisonResult(SpliceKitTranscriptSilence *a, SpliceKitTranscriptSilence *b) {
-                return (a.startTime > b.startTime) ? NSOrderedAscending : NSOrderedDescending;
-            }];
-            double totalRemoved = 0;
-            for (SpliceKitTranscriptSilence *silence in sorted) {
-                // Adjust for already-removed time
-                double adjStart = silence.startTime - totalRemoved;
-                double adjEnd = silence.endTime - totalRemoved;
-                [self deleteTimelineRange:adjStart end:adjEnd];
-                double removed = silence.duration;
-                totalRemoved += removed;
-
-                // Shift all words after this silence earlier
-                @synchronized (self.mutableWords) {
-                    for (SpliceKitTranscriptWord *word in self.mutableWords) {
-                        if (word.startTime > silence.startTime - (totalRemoved - removed)) {
-                            word.startTime -= removed;
-                        }
-                    }
-                }
-            }
-
-            [self detectSilences];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self rebuildTextView];
-                self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
-                [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses",
-                    (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count]];
-            });
-        });
+        NSDictionary *result = [self performEditAsOneUndoStep:@"Delete Silences" edit:^NSDictionary *{
+            return [self deleteSilences:selectedSilences];
+        }];
+        SpliceKit_log(@"[Transcript] Delete pauses result: %@", result);
         return;
     }
 
@@ -947,7 +916,9 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
     SpliceKit_log(@"[Transcript] Deleting %lu words starting at index %lu",
                   (unsigned long)count, (unsigned long)startIdx);
 
-    NSDictionary *result = [self deleteWordsFromIndex:startIdx count:count];
+    NSDictionary *result = [self performEditAsOneUndoStep:@"Delete Words" edit:^NSDictionary *{
+        return [self deleteWordsFromIndex:startIdx count:count];
+    }];
     SpliceKit_log(@"[Transcript] Delete result: %@", result);
 }
 
@@ -1007,17 +978,18 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 
     [self updateStatusUI:@"Moving clips on timeline..."];
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *result = [self moveWordsFromIndex:srcStart count:srcCount toIndex:destWordIdx];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (result[@"error"]) {
-                [self updateStatusUI:[NSString stringWithFormat:@"Move failed: %@", result[@"error"]]];
-                SpliceKit_log(@"[Transcript] Move error: %@", result[@"error"]);
-            } else {
-                [self updateStatusUI:[NSString stringWithFormat:@"Moved %lu word(s)", (unsigned long)srcCount]];
-                SpliceKit_log(@"[Transcript] Move succeeded: %@", result);
-            }
-        });
+    // Async so the drag finishes before the edit (one undo step) starts.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDictionary *result = [self performEditAsOneUndoStep:@"Move Words" edit:^NSDictionary *{
+            return [self moveWordsFromIndex:srcStart count:srcCount toIndex:destWordIdx];
+        }];
+        if (result[@"error"]) {
+            [self updateStatusUI:[NSString stringWithFormat:@"Move failed: %@", result[@"error"]]];
+            SpliceKit_log(@"[Transcript] Move error: %@", result[@"error"]);
+        } else {
+            [self updateStatusUI:[NSString stringWithFormat:@"Moved %lu word(s)", (unsigned long)srcCount]];
+            SpliceKit_log(@"[Transcript] Move succeeded: %@", result);
+        }
     });
 }
 
@@ -1046,7 +1018,7 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 - (void)playheadTimerFired:(NSTimer *)timer {
     if (self.status != SpliceKitTranscriptStatusReady) return;
     if (self.mutableWords.count == 0) return;
-    if (!self.panel.isVisible) return;
+    if (![self isVisible]) return;
 
     __block double playheadTime = -1;
     @try {

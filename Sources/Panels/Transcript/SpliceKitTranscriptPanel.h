@@ -59,10 +59,14 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 + (instancetype)sharedPanel;
 
-// Panel visibility
+// Panel visibility. The Transcript Editor opens inside FCP's main window, beside the
+// Viewer (SpliceKitDockedPanels.h); a separate window only when it cannot dock there.
 - (void)showPanel;
 - (void)hidePanel;
 - (BOOL)isVisible;
+// Builds the editor and loads the current project's saved transcript without opening it,
+// so work done over MCP shows the moment the user opens it.
+- (void)preparePanel;
 
 // Transcription
 - (void)transcribeTimeline;                    // auto-detect clips from current timeline
@@ -92,9 +96,16 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 // Editing operations - return result dictionaries
 // An error result while a transcription runs (its words are about to be replaced), else nil.
-// The edit methods below return it themselves; the RPC handlers check it before opening an undo group.
+// The edit methods below return it themselves; performEditAsOneUndoStep checks it before opening an undo group.
 - (NSDictionary *)refusalWhileTranscribing;
+// Runs `edit` on the main thread as one undo step named `name` (Edit > Undo <name>), however
+// many blades, deletes and pastes it makes. Refused while a transcription runs, before the
+// group opens, so a refused edit leaves no empty undo step. A result without an error names
+// the step in "undoStep". The RPCs and the editor's own Delete key, drag and buttons use it.
+- (NSDictionary *)performEditAsOneUndoStep:(NSString *)name edit:(NSDictionary *(^)(void))edit;
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;
+// Words that need not be next to each other: one cut per run of neighbours, latest first.
+- (NSDictionary *)deleteWordsAtIndexes:(NSIndexSet *)indexes;
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 
 // Engine selection

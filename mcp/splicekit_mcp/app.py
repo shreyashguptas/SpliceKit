@@ -89,7 +89,8 @@ AUDIO: get_audio_levels first (where is it loud, silent, at full scale; which cu
   timeline_edit_action("detachAudio" | "expandAudio").
 SPEECH / TEXT-BASED EDITING (SpliceKit's Text-Based Editor, not FCP's Transcribe to Captions):
   open_transcript (timeline, or file_url = a path or file:// URL; primary_storyline_only;
-  clips with no audio track or muted are skipped and listed), get_transcript (one page of words:
+  clips with no audio track or muted are skipped and listed; the Transcript Editor stays
+  closed unless the user asks to see it: show=True), get_transcript (one page of words:
   start_seconds/end_seconds, offset/limit, fields, words_only), search_transcript, delete_transcript_words,
   move_transcript_words, delete_transcript_silences, set_transcript_speaker,
   set_silence_threshold. Captions: open_captions, set_caption_style, set_caption_grouping,

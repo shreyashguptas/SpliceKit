@@ -46,6 +46,7 @@
 // The menu items and the toolbar button. A tool window is hidden only when the user
 // can see it here (visible, on this Space, not minimized); one that is open on another
 // Space or minimized is shown in front of FCP instead, so one click always brings it.
+// A panel docked in FCP's main window, whose own window stays closed, goes by -isVisible.
 static void SpliceKit_toggleToolPanel(NSString *className) {
     Class panelClass = objc_getClass(className.UTF8String);
     if (!panelClass) {
@@ -58,8 +59,9 @@ static void SpliceKit_toggleToolPanel(NSString *className) {
         id value = [panel valueForKey:@"panel"];
         if ([value isKindOfClass:[NSWindow class]]) window = value;
     } @catch (__unused NSException *e) {}
-    BOOL shownHere = window ? SpliceKit_toolWindowIsShownHere(window)
-                            : ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
+    BOOL shownHere = (window.isVisible || window.isMiniaturized)
+        ? SpliceKit_toolWindowIsShownHere(window)
+        : ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
     if (shownHere) {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
     } else {

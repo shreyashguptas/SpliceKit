@@ -9,6 +9,7 @@ Timeline/SpliceKitDualTimeline.m
 Timeline/SpliceKitDualTimelineDrag.m
 Core/SpliceKitRuntime.m
 Core/SpliceKitSwizzle.m
+Core/SpliceKitMethodHook.m
 Core/SpliceKitTime.m
 Core/SpliceKitProcess.m
 Core/SpliceKitStrings.m
@@ -59,6 +60,7 @@ Bridge/SpliceKitBridgeMetadata.m
 Bridge/SpliceKitBridgeParams.m
 Bridge/SpliceKitAsync.m
 Panels/SpliceKitLogPanel.m
+Panels/SpliceKitDockedPanels.m
 Panels/Transcript/SpliceKitTranscriptPanel.m
 Panels/Transcript/SpliceKitTranscriptTextView.m
 Panels/Transcript/SpliceKitTranscriptPanel+UI.m

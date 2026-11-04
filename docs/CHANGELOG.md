@@ -20,6 +20,26 @@ that this fork has removed.
   one: `supportsBeatDetection` (`scripts/fcp_compat.py`, `tests/test_fcp_compat.py`).
 
 ### Changed
+- **The Transcript Editor and Background Tasks open inside Final Cut Pro's main window.**
+  Each is a pane in the top row, between the Viewer and the Inspector, instead of a floating
+  window: the Transcript toolbar button, Window > Background Tasks (⌘9) and the toolbar's
+  progress dial open it, and a second click closes it. Neither is written into FCP's saved
+  layouts or workspaces. `open_transcript()` (`transcript.open`) no longer opens the editor;
+  pass `show=True` to open it (`Sources/Panels/SpliceKitDockedPanels.m`). When the top row
+  has no room for one more pane (a narrow window or a portrait display), each opens as a
+  window, as before. In the docked editor, J, K, L and Space work as they do in the timeline,
+  and closing the pane gives the keyboard back to the window. Background Tasks stays docked
+  and up to date through full-screen playback. Final Cut's main window is never restyled as a
+  floating HUD panel, which Background Tasks asks of the window it sits in and which took away
+  the main window's minimize and resize buttons.
+- **`debug_trace_method` and `debug_breakpoint` no longer crash Final Cut Pro.** They called
+  the hooked method with a nil argument and dropped its return value, so tracing any method
+  that returns something (`-[PEBackgroundTaskModule groupTileForTask:]`, say) aborted FCP.
+  Both now use one forwarding hook (`Sources/Core/SpliceKitMethodHook.m`) that passes the
+  caller's arguments through and returns the original's result, for any signature whose
+  arguments travel in registers, several arguments included (these used to be listed as
+  traced without being hooked). Anything else is refused with the reason. Class methods are
+  hooked on the metaclass, and an inherited method only on the class asked for.
 - **The MCP server runs on the official MCP Python SDK 2.3** (`mcp>=2.3,<3`; 2.2 before).
   The protocol is unchanged: 2026-07-28, the newest revision, with the `initialize`
   handshake of earlier revisions still accepted. Run `make mcp-setup` to upgrade the
@@ -85,6 +105,26 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Transcript edits no longer delete B-roll.** Deleting words or pauses, and moving words,
+  selected the clip at the playhead, which is the connected clip when one sits above the
+  words: a pause under B-roll deleted the B-roll and left the pause. They now select the
+  primary storyline piece itself, and delete it the way holding ` while pressing Delete does,
+  so clips connected to it stay on the timeline. A selected B-roll clip is no longer bladed
+  either, and an In/Out range no longer takes the place of the words. An edit is refused,
+  with nothing changed, when the cut would not be exactly the words: a word under one frame
+  long, or a blade that did not cut (it used to delete or move the whole piece after it).
+- **Delete Silences cuts the pauses, not the speech next to them.** It works from the last
+  pause back to the first, so the earlier ones never move, but it also shifted each one back
+  by the time already removed: every pause after the first was cut that far too early, into
+  the words before it. Checked by deleting every pause on a test timeline and transcribing
+  the result again: all 52 words were still there.
+- **Each transcript edit is one undo step.** The editor's Delete key, drag to move, Delete
+  Silences and delete-search-results buttons each made one undo step per blade and delete;
+  they are now one named step (Edit > Undo Delete Words / Move Words / Delete Silences), as
+  the MCP transcript tools already were. Deleting search results makes one cut per run of
+  neighbouring words and reads the timeline back once, instead of once per word (about 20
+  seconds of spinning for 50 results). Holding J, L or Space in the editor no longer repeats
+  the command.
 - **Final Cut Pro no longer crashes when a caption transcription finishes.** The caption
   panel's transcriber ends on a background queue, and the code after it (regrouping, saving the
   draft for the open project) looked up the active timeline, a lookup that also loosens the

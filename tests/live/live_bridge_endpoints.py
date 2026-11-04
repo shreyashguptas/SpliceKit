@@ -534,11 +534,11 @@ def test_debug_breakpoint():
     }))
     ok("removeAll", rpc("debug.breakpoint", {"action": "removeAll"}))
 
-    # Multi-arg method
-    ok("add multi-arg (trace_only)", rpc("debug.breakpoint", {
+    # Multi-arg method: forwarded like any other
+    ok("add multi-arg (swizzle)", rpc("debug.breakpoint", {
         "action": "add", "className": "PEAppController",
         "selector": "application:openFile:"
-    }), lambda r: "trace_only" in str(r))
+    }), lambda r: "swizzle" in str(r))
     ok("removeAll cleanup", rpc("debug.breakpoint", {"action": "removeAll"}))
 
     # Error cases

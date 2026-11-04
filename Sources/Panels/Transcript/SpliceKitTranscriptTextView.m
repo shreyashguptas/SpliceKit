@@ -13,6 +13,23 @@
 // video segments. Spacebar and J/K/L get forwarded to FCP for transport control.
 //
 
+// J / K / L as FCP's command set sends them (NSProCommands.plist: JogBackward, Stop,
+// JogForward): one action when the key goes down and one when it comes up, so holding J
+// or L shuttles the way it does in the timeline. They are sent rather than re-posted as a
+// key event: docked, this view is in FCP's main window, so a re-posted key would come
+// straight back to it.
+static const NSEventModifierFlags SpliceKitTranscriptCommandModifiers =
+    NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption |
+    NSEventModifierFlagCommand;
+
+static NSDictionary<NSString *, NSArray<NSString *> *> *SpliceKit_transcriptTransportCommands(void) {
+    return @{
+        @"j": @[@"rewindDown:", @"rewindUp:"],
+        @"k": @[@"stopPlayingDown:", @"stopPlayingUp:"],
+        @"l": @[@"fastForwardDown:", @"fastForwardUp:"],
+    };
+}
+
 @implementation SpliceKitTranscriptTextView
 
 - (void)awakeFromNib {
@@ -174,20 +191,17 @@
         return;
     }
 
-    // Spacebar and transport keys (J/K/L) → forward to FCP via responder chain
+    // Spacebar and transport keys (J/K/L) → FCP's own commands via the responder chain.
+    // A held key's auto-repeat sends nothing more: each L press doubles the speed in FCP,
+    // and each Space press toggles playback.
     NSString *chars = event.charactersIgnoringModifiers;
-    if ([chars isEqualToString:@" "] ||
-        [chars isEqualToString:@"j"] || [chars isEqualToString:@"k"] || [chars isEqualToString:@"l"]) {
-        if ([chars isEqualToString:@" "]) {
-            [[NSApp mainWindow] makeKeyWindow];
-            ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
-                [NSApp class] == nil ? nil : NSApp,
-                @selector(sendAction:to:from:),
-                NSSelectorFromString(@"playPause:"), nil, nil);
-        } else {
-            [[NSApp mainWindow] makeKeyWindow];
-            [NSApp sendEvent:event];
-        }
+    if ([chars isEqualToString:@" "]) {
+        if (!event.isARepeat) [NSApp sendAction:NSSelectorFromString(@"playPause:") to:nil from:nil];
+        return;
+    }
+    NSArray<NSString *> *transport = SpliceKit_transcriptTransportCommands()[chars];
+    if (transport && !(event.modifierFlags & SpliceKitTranscriptCommandModifiers)) {
+        if (!event.isARepeat) [NSApp sendAction:NSSelectorFromString(transport[0]) to:nil from:nil];
         return;
     }
 
@@ -210,6 +224,15 @@
 
     // Block all other typing
     NSBeep();
+}
+
+- (void)keyUp:(NSEvent *)event {
+    NSArray<NSString *> *transport = SpliceKit_transcriptTransportCommands()[event.charactersIgnoringModifiers];
+    if (transport && !(event.modifierFlags & SpliceKitTranscriptCommandModifiers)) {
+        [NSApp sendAction:NSSelectorFromString(transport[1]) to:nil from:nil];
+        return;
+    }
+    [super keyUp:event];
 }
 
 @end
