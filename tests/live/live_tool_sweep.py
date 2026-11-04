@@ -403,16 +403,20 @@ CASES.update({
     "dual_timeline_open": write(cleanup=[("dual_timeline_close", {})]),
     "dual_timeline_close": write(),
     "dual_timeline_focus": write(pane="primary"),
-    "dual_timeline_sync_root": write(),
+    # Opens the second pane when it is closed, so close it again: left open, its window
+    # covers the main one for the rest of the session.
+    "dual_timeline_sync_root": write(cleanup=[("dual_timeline_close", {})]),
     # Only a compound clip, multicam angle or similar can open in the second pane.
     "dual_timeline_open_selected_in_secondary": Case(
         args={}, kind="write", select_before="$SPINE_CLIP",
         cleanup=[("dual_timeline_close", {}),
                  ("select_clips", {"handles": "$CONNECTED_CLIP"})]),
     "dual_timeline_toggle_panel": write(panel="timelineIndex", pane="secondary",
+                                        setup=[("dual_timeline_open", {})],
                                         cleanup=[("dual_timeline_toggle_panel",
                                                   {"panel": "timelineIndex",
-                                                   "pane": "secondary"})]),
+                                                   "pane": "secondary"}),
+                                                 ("dual_timeline_close", {})]),
     # Toggles the visibility of structure blocks that are already on the timeline;
     # with none placed, saying so is the correct answer.
     # The happy path is song_structure_blocks' cleanup step above. What is left to check
