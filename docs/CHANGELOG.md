@@ -110,7 +110,9 @@ that this fork has removed.
   words: a pause under B-roll deleted the B-roll and left the pause. They now select the
   primary storyline piece itself, and delete it the way holding ` while pressing Delete does,
   so clips connected to it stay on the timeline. A selected B-roll clip is no longer bladed
-  either.
+  either, and an In/Out range no longer takes the place of the words. An edit is refused,
+  with nothing changed, when the cut would not be exactly the words: a word under one frame
+  long, or a blade that did not cut (it used to delete or move the whole piece after it).
 - **Delete Silences cuts the pauses, not the speech next to them.** It works from the last
   pause back to the first, so the earlier ones never move, but it also shifted each one back
   by the time already removed: every pause after the first was cut that far too early, into
@@ -119,7 +121,10 @@ that this fork has removed.
 - **Each transcript edit is one undo step.** The editor's Delete key, drag to move, Delete
   Silences and delete-search-results buttons each made one undo step per blade and delete;
   they are now one named step (Edit > Undo Delete Words / Move Words / Delete Silences), as
-  the MCP transcript tools already were.
+  the MCP transcript tools already were. Deleting search results makes one cut per run of
+  neighbouring words and reads the timeline back once, instead of once per word (about 20
+  seconds of spinning for 50 results). Holding J, L or Space in the editor no longer repeats
+  the command.
 - **Final Cut Pro no longer crashes when a caption transcription finishes.** The caption
   panel's transcriber ends on a background queue, and the code after it (regrouping, saving the
   draft for the open project) looked up the active timeline, a lookup that also loosens the
