@@ -221,8 +221,9 @@ the timeline. The operation performs:
 
 1. Blade at the word's start time
 2. Blade at the word's end time
-3. Select the bladed segment
-4. Ripple delete
+3. Select the bladed piece of the primary storyline (never a connected clip above it)
+4. Ripple delete it, keeping clips connected to it (FCP's ` override), so B-roll over the
+   deleted words stays on the timeline
 
 ```python
 # Delete words at indices 5, 6, 7
@@ -230,7 +231,8 @@ delete_transcript_words(start_index=5, count=3)
 ```
 
 This removes the video/audio from the timeline and shifts subsequent clips to
-fill the gap (ripple delete behavior).
+fill the gap (ripple delete behavior). Every transcript edit, from these tools or from the
+editor's Delete key, drag and buttons, is one undo step.
 
 ### Moving Words (Reordering Clips)
 

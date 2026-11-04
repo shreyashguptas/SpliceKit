@@ -96,8 +96,13 @@ typedef NS_ENUM(NSInteger, SpliceKitTranscriptEngine) {
 
 // Editing operations - return result dictionaries
 // An error result while a transcription runs (its words are about to be replaced), else nil.
-// The edit methods below return it themselves; the RPC handlers check it before opening an undo group.
+// The edit methods below return it themselves; performEditAsOneUndoStep checks it before opening an undo group.
 - (NSDictionary *)refusalWhileTranscribing;
+// Runs `edit` on the main thread as one undo step named `name` (Edit > Undo <name>), however
+// many blades, deletes and pastes it makes. Refused while a transcription runs, before the
+// group opens, so a refused edit leaves no empty undo step. A result without an error names
+// the step in "undoStep". The RPCs and the editor's own Delete key, drag and buttons use it.
+- (NSDictionary *)performEditAsOneUndoStep:(NSString *)name edit:(NSDictionary *(^)(void))edit;
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count;
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex;
 

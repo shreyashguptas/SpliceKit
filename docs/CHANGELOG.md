@@ -105,6 +105,21 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Transcript edits no longer delete B-roll.** Deleting words or pauses, and moving words,
+  selected the clip at the playhead, which is the connected clip when one sits above the
+  words: a pause under B-roll deleted the B-roll and left the pause. They now select the
+  primary storyline piece itself, and delete it the way holding ` while pressing Delete does,
+  so clips connected to it stay on the timeline. A selected B-roll clip is no longer bladed
+  either.
+- **Delete Silences cuts the pauses, not the speech next to them.** It works from the last
+  pause back to the first, so the earlier ones never move, but it also shifted each one back
+  by the time already removed: every pause after the first was cut that far too early, into
+  the words before it. Checked by deleting every pause on a test timeline and transcribing
+  the result again: all 52 words were still there.
+- **Each transcript edit is one undo step.** The editor's Delete key, drag to move, Delete
+  Silences and delete-search-results buttons each made one undo step per blade and delete;
+  they are now one named step (Edit > Undo Delete Words / Move Words / Delete Silences), as
+  the MCP transcript tools already were.
 - **Final Cut Pro no longer crashes when a caption transcription finishes.** The caption
   panel's transcriber ends on a background queue, and the code after it (regrouping, saving the
   draft for the open project) looked up the active timeline, a lookup that also loosens the

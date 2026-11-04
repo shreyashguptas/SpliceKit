@@ -26,6 +26,7 @@
 #import "SpliceKitTranscriptPanel+Private.h"
 #import "SpliceKitWindows.h"
 #import "SpliceKitDockedPanels.h"
+#import "SpliceKitServerInternal.h"
 
 // FCP doesn't link against Speech.framework, so we load it at runtime.
 // This avoids a hard dependency — if the framework isn't available (unlikely
@@ -1300,6 +1301,10 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                 return;
             }
 
+            // Blade cuts the selected clips when there are any (a B-roll clip the user
+            // clicked); with none it cuts the primary storyline.
+            SpliceKit_handleSelectionApply(timeline, @[], NULL);
+
             // Blade at start
             [self setPlayheadToTime:deleteStart];
             [NSThread sleepForTimeInterval:0.02];
@@ -1319,21 +1324,34 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
             }
             [NSThread sleepForTimeInterval:0.02];
 
-            // Select clip at midpoint
+            // Select the storyline piece between the two blades
             double midPoint = (deleteStart + deleteEnd) / 2.0;
             [self setPlayheadToTime:midPoint];
             [NSThread sleepForTimeInterval:0.02];
-
-            SEL selectSel = NSSelectorFromString(@"selectClipAtPlayhead:");
-            if ([timeline respondsToSelector:selectSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(timeline, selectSel, nil);
+            if (![self selectPrimaryStorylineItemAtTime:midPoint timeline:timeline]) {
+                result = @{@"error": [NSString stringWithFormat:
+                    @"No primary storyline clip at %.2fs to delete", midPoint]};
+                return;
             }
             [NSThread sleepForTimeInterval:0.02];
 
-            // Delete (ripple delete)
-            SEL deleteSel = NSSelectorFromString(@"delete:");
-            if ([timeline respondsToSelector:deleteSel]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(timeline, deleteSel, nil);
+            // Ripple delete it in FCP's override-connections mode (holding ` while pressing
+            // Delete): clips connected to the removed piece, such as B-roll that starts over
+            // a deleted word, stay on the timeline instead of going with it.
+            SEL overrideOnSel = NSSelectorFromString(@"overrideConnectionsModeOn");
+            SEL setOverrideSel = NSSelectorFromString(@"setOverrideConnections:");
+            BOOL canOverride = [timeline respondsToSelector:overrideOnSel]
+                && [timeline respondsToSelector:setOverrideSel];
+            BOOL overrideWasOn = canOverride
+                && ((BOOL (*)(id, SEL))objc_msgSend)(timeline, overrideOnSel);
+            if (canOverride) ((void (*)(id, SEL, BOOL))objc_msgSend)(timeline, setOverrideSel, YES);
+            @try {
+                SEL deleteSel = NSSelectorFromString(@"delete:");
+                if ([timeline respondsToSelector:deleteSel]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(timeline, deleteSel, nil);
+                }
+            } @finally {
+                if (canOverride) ((void (*)(id, SEL, BOOL))objc_msgSend)(timeline, setOverrideSel, overrideWasOn);
             }
 
             result = @{@"status": @"ok",
@@ -1345,6 +1363,29 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         }
     });
     return result;
+}
+
+// Selects the primary storyline item playing at `seconds`. FCP's Select Clip at Playhead
+// takes a connected clip above the storyline when there is one, so a word or pause under
+// B-roll deleted (or moved) the B-roll and left the words where they were.
+- (BOOL)selectPrimaryStorylineItemAtTime:(double)seconds timeline:(id)timeline {
+    id sequence = [timeline respondsToSelector:@selector(sequence)]
+        ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+    id primary = [sequence respondsToSelector:@selector(primaryObject)]
+        ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+    NSArray *items = [primary respondsToSelector:@selector(containedItems)]
+        ? ((id (*)(id, SEL))objc_msgSend)(primary, @selector(containedItems)) : nil;
+    Class transitionClass = objc_getClass("FFAnchoredTransition");
+    for (id item in items) {
+        if (transitionClass && [item isKindOfClass:transitionClass]) continue;
+        double start = 0, duration = 0;
+        if (![self effectiveRangeForTimelineObject:item primaryObject:primary start:&start duration:&duration]) continue;
+        if (seconds >= start && seconds < start + duration) {
+            return SpliceKit_handleSelectionApply(timeline, @[item], NULL);
+        }
+    }
+    SpliceKit_log(@"[Transcript] No primary storyline item at %.3fs", seconds);
+    return NO;
 }
 
 /// Deletes a contiguous range of words from both the timeline and our data model.
@@ -1359,6 +1400,40 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     return @{@"error": @"A transcription is running, so the transcript's words are about to be replaced. "
                        @"Wait until get_transcript shows Status: ready, then try again.",
              @"transcribing": @YES};
+}
+
+- (NSDictionary *)performEditAsOneUndoStep:(NSString *)name edit:(NSDictionary *(^)(void))edit {
+    NSDictionary *busy = [self refusalWhileTranscribing];
+    if (busy) return busy;
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        id timeline = nil;
+        id sequence = nil;
+        BOOL openedUndoGroup = NO;
+        @try {
+            timeline = SpliceKit_getActiveTimelineModule();
+            if (timeline) {
+                sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+                openedUndoGroup = SpliceKit_internalBeginEditGroupIfNeeded(sequence, name);
+            }
+            @try {
+                result = edit();
+            } @finally {
+                if (openedUndoGroup) {
+                    SpliceKit_internalEndEditGroupIfOpened(sequence, timeline, name, YES);
+                }
+            }
+            if (result && !result[@"error"] && openedUndoGroup) {
+                NSMutableDictionary *out = [result mutableCopy];
+                out[@"undoStep"] = name;
+                result = out;
+            }
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result ?: @{@"error": @"Operation failed"};
 }
 
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count {
@@ -1441,6 +1516,13 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
     SpliceKit_log(@"[Transcript] Batch deleting %lu silences (min duration: %.2fs)",
                   (unsigned long)toDelete.count, minDuration);
+    return [self deleteSilences:toDelete];
+}
+
+// Removes these silences from the timeline, then re-reads every word's position from it.
+// Also what the Delete key does with only pauses selected.
+- (NSDictionary *)deleteSilences:(NSArray<SpliceKitTranscriptSilence *> *)silences {
+    NSMutableArray<SpliceKitTranscriptSilence *> *toDelete = [silences mutableCopy];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateStatusUI:[NSString stringWithFormat:@"Deleting %lu pauses...", (unsigned long)toDelete.count]];
@@ -1462,14 +1544,13 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     // Sleeps are reduced from 50ms to 20ms since these are direct ObjC calls
     // that execute synchronously — the sleep is just for FCP's internal state to settle.
     for (SpliceKitTranscriptSilence *silence in toDelete) {
-        // Adjust times for already-removed content
-        double adjStart = silence.startTime - totalTimeRemoved;
-        double adjEnd = silence.endTime - totalTimeRemoved;
-
-        NSDictionary *result = [self deleteTimelineRange:adjStart end:adjEnd];
+        // Latest first, so the ones already removed come after this one and it has not
+        // moved. (Shifting it back by the time removed so far cut every pause after the
+        // first at the wrong place, into the speech before it.)
+        NSDictionary *result = [self deleteTimelineRange:silence.startTime end:silence.endTime];
         if (result[@"error"]) {
             lastError = result[@"error"];
-            SpliceKit_log(@"[Transcript] Error deleting silence at %.2fs: %@", adjStart, lastError);
+            SpliceKit_log(@"[Transcript] Error deleting silence at %.2fs: %@", silence.startTime, lastError);
         } else {
             deletedCount++;
             totalTimeRemoved += silence.duration;
@@ -1559,6 +1640,10 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                 return;
             }
 
+            // Blade cuts the selected clips when there are any (a B-roll clip the user
+            // clicked); with none it cuts the primary storyline.
+            SpliceKit_handleSelectionApply(timeline, @[], NULL);
+
             // Step 1: Blade at source start
             [self setPlayheadToTime:sourceStart];
             [NSThread sleepForTimeInterval:0.05];
@@ -1577,8 +1662,11 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
             [self setPlayheadToTime:midPoint];
             [NSThread sleepForTimeInterval:0.05];
 
-            SEL selectSel = NSSelectorFromString(@"selectClipAtPlayhead:");
-            ((void (*)(id, SEL, id))objc_msgSend)(timeline, selectSel, nil);
+            if (![self selectPrimaryStorylineItemAtTime:midPoint timeline:timeline]) {
+                result = @{@"error": [NSString stringWithFormat:
+                    @"No primary storyline clip at %.2fs to move", midPoint]};
+                return;
+            }
             [NSThread sleepForTimeInterval:0.05];
 
             // Step 4: Cut
