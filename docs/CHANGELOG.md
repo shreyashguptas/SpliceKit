@@ -25,7 +25,13 @@ that this fork has removed.
   window: the Transcript toolbar button, Window > Background Tasks (⌘9) and the toolbar's
   progress dial open it, and a second click closes it. Neither is written into FCP's saved
   layouts or workspaces. `open_transcript()` (`transcript.open`) no longer opens the editor;
-  pass `show=True` to open it (`Sources/Panels/SpliceKitDockedPanels.m`).
+  pass `show=True` to open it (`Sources/Panels/SpliceKitDockedPanels.m`). When the top row
+  has no room for one more pane (a narrow window or a portrait display), each opens as a
+  window, as before. In the docked editor, J, K, L and Space work as they do in the timeline,
+  and closing the pane gives the keyboard back to the window. Background Tasks stays docked
+  and up to date through full-screen playback. Final Cut's main window is never restyled as a
+  floating HUD panel, which Background Tasks asks of the window it sits in and which took away
+  the main window's minimize and resize buttons.
 - **`debug_trace_method` and `debug_breakpoint` no longer crash Final Cut Pro.** They called
   the hooked method with a nil argument and dropped its return value, so tracing any method
   that returns something (`-[PEBackgroundTaskModule groupTileForTask:]`, say) aborted FCP.

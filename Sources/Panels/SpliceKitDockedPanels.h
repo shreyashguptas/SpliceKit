@@ -9,8 +9,9 @@
 //    the top-row container (PEUpperDeckContainer).
 //  - None of them is ever written into FCP's saved window layout or workspaces, so a
 //    workspace never names a module that does not exist at the next launch.
-//  - When FCP's main window has no top row (a layout FCP has not got yet), the show
-//    functions answer NO and the caller falls back to a separate window.
+//  - When FCP's main window has no top row (a layout FCP has not got yet), or the row is
+//    too narrow for one more pane (a portrait display), the show functions answer NO and
+//    the caller falls back to a separate window.
 //
 //  Everything declared here is hidden: it never shows up in the dylib's exports.
 //
@@ -27,7 +28,13 @@
 // there is nowhere to dock it. Main thread only.
 BOOL SpliceKit_dockShowView(NSString *identifier, NSString *label, NSView *view, NSSize minSize);
 
-// Hides the docked panel; its view stays alive for the next show.
+// YES when the top row has room for this panel next to the panes it already shows, each at
+// its smallest (or the panel is already open). SpliceKit_dockShowView checks it too; call it
+// first when the view must stay where it is if it cannot dock.
+BOOL SpliceKit_dockHasRoom(NSString *identifier, NSSize minSize);
+
+// Hides the docked panel, taking the keyboard focus out of it; its view stays alive for the
+// next show.
 void SpliceKit_dockHide(NSString *identifier);
 
 // YES when the docked panel is open in FCP's main window.
