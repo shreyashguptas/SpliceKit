@@ -79,6 +79,9 @@ def _transcript_header_lines(r: dict) -> list:
     if r.get("engineNotice"):
         lines.append(f"Engine fallback: {r['engineNotice']}")
     lines.append(f"Words: {r.get('wordCount', 0)}")
+    if r.get("wordsNotOnTimeline"):
+        lines.append(f"Transcribed words not on the timeline now (cut, or their clip removed; "
+                     f"back if their media is, e.g. after an undo): {r['wordsNotOnTimeline']}")
     lines.append(f"Silences: {r.get('silenceCount', 0)}")
     lines.append(f"Silence threshold: {r.get('silenceThreshold', 0.3):.1f}s")
     if r.get("frameRate") is None and r.get("frameRateNote"):
@@ -239,7 +242,10 @@ def delete_transcript_words(start_index: int, count: int) -> str:
         count: Number of consecutive words to delete
 
     The timeline gap closes automatically (ripple delete).
-    Use timeline_action("undo") to reverse.
+    Use timeline_action("undo") to reverse. The transcript then lists the words where the
+    timeline plays them. When the timeline changed after the transcript was last read (an
+    undo, an edit in Final Cut Pro), the edit is refused with nothing cut: read
+    get_transcript() again and use the new word numbers.
     """
     return _call_or_error("transcript.deleteWords", startIndex=start_index, count=count)
 
@@ -259,7 +265,10 @@ def move_transcript_words(start_index: int, count: int, dest_index: int) -> str:
         count: Number of consecutive words to move
         dest_index: Target position in the word list (the words will be inserted before this index)
 
-    Use timeline_action("undo") to reverse.
+    Use timeline_action("undo") to reverse. The transcript then lists the words where the
+    timeline plays them. When the timeline changed after the transcript was last read (an
+    undo, an edit in Final Cut Pro), the edit is refused with nothing cut: read
+    get_transcript() again and use the new word numbers.
     """
     return _call_or_error("transcript.moveWords", startIndex=start_index, count=count,
                           destIndex=dest_index)

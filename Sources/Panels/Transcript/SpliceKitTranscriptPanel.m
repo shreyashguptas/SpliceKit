@@ -24,6 +24,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "SpliceKitTranscriptPanel+Private.h"
+#import "SpliceKitTranscriptPlacement.h"
 #import "SpliceKitWindows.h"
 #import "SpliceKitDockedPanels.h"
 #import "SpliceKitServerInternal.h"
@@ -209,6 +210,7 @@ NSString * const SpliceKitTranscriptVisibilityDidChangeNotification =
     if (self) {
         _status = SpliceKitTranscriptStatusIdle;
         _mutableWords = [NSMutableArray array];
+        _sourceWords = [NSMutableArray array];
         _mutableSilences = [NSMutableArray array];
         _pendingTranscriptions = [NSMutableArray array];
         _searchResultRanges = [NSMutableArray array];
@@ -395,6 +397,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     if (!sequence && self.mutableWords.count > 0) {
         @synchronized (self.mutableWords) {
             [self.mutableWords removeAllObjects];
+            [self.sourceWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
         self.fullText = nil;
@@ -445,6 +448,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     self.sourceFilePath = nil;
     @synchronized (self.mutableWords) {
         [self.mutableWords removeAllObjects];
+        [self.sourceWords removeAllObjects];
     }
     [self.mutableSilences removeAllObjects];
     self.fullText = nil;
@@ -464,6 +468,13 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         }
     }
 
+    NSMutableArray *sourceWordDicts = [NSMutableArray array];
+    @synchronized (self.mutableWords) {
+        for (SpliceKitTranscriptWord *word in self.sourceWords) {
+            [sourceWordDicts addObject:SpliceKitTranscript_wordToDictionary(word)];
+        }
+    }
+
     NSMutableArray *silenceDicts = [NSMutableArray array];
     for (SpliceKitTranscriptSilence *silence in self.mutableSilences) {
         [silenceDicts addObject:SpliceKitTranscript_silenceToDictionary(silence)];
@@ -476,6 +487,9 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         @"silenceThreshold": @(self.silenceThreshold),
         @"speakerDetectionEnabled": @(self.speakerDetectionEnabled),
         @"words": wordDicts,
+        // Every transcribed word with its place in its media file; "words" is where they
+        // played on the timeline when this was saved. Older files have only "words".
+        @"sourceWords": sourceWordDicts,
         @"silences": silenceDicts,
     } mutableCopy];
 
@@ -537,6 +551,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         // Sequence changed — clear old transcript data
         @synchronized (self.mutableWords) {
             [self.mutableWords removeAllObjects];
+            [self.sourceWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
         self.fullText = nil;
@@ -560,6 +575,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
         @synchronized (self.mutableWords) {
             [self.mutableWords removeAllObjects];
+            [self.sourceWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
         self.fullText = nil;
@@ -584,6 +600,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     self.suppressPersistenceWrites = YES;
     @synchronized (self.mutableWords) {
         [self.mutableWords removeAllObjects];
+        [self.sourceWords removeAllObjects];
         for (NSDictionary *wordDict in wordDicts) {
             SpliceKitTranscriptWord *word = SpliceKitTranscript_wordFromDictionary(wordDict);
             if (word) [self.mutableWords addObject:word];
@@ -596,6 +613,14 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         for (NSUInteger i = 0; i < self.mutableWords.count; i++) {
             self.mutableWords[i].wordIndex = i;
         }
+        NSArray *sourceDicts = [transcript[@"sourceWords"] isKindOfClass:[NSArray class]] ? transcript[@"sourceWords"] : nil;
+        for (NSDictionary *wordDict in sourceDicts) {
+            SpliceKitTranscriptWord *word = SpliceKitTranscript_wordFromDictionary(wordDict);
+            if (word) [self.sourceWords addObject:word];
+        }
+        // A file saved before sourceWords: its words are the transcribed words (the ones it
+        // had already cut are gone).
+        if (self.sourceWords.count == 0) [self adoptWordsAsSourceWords];
     }
 
     [self.mutableSilences removeAllObjects];
@@ -622,6 +647,12 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     self.errorMessage = nil;
     self.lastRestoredSequenceKey = sequenceKey;
 
+    // The saved times are where the words played when the file was written. The timeline
+    // may have been edited since (an undo, an edit made with the transcript closed, a clip
+    // removed), so the words are placed on the timeline as it is now.
+    self.placedTimelineSignature = nil;
+    [self placeWordsFromTimeline];
+
     if (self.panel) {
         [self updateSpeakerCheckboxState];
         [self selectEnginePopupForCurrentEngine];
@@ -643,6 +674,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
     @synchronized (self.mutableWords) {
         [self.mutableWords removeAllObjects];
+        [self.sourceWords removeAllObjects];
     }
     [self.mutableSilences removeAllObjects];
     self.fullText = nil;
@@ -808,6 +840,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
 - (NSDictionary *)searchTranscript:(NSString *)query {
     [self ensurePersistedStateLoaded];
+    [self refreshWordPositionsIfTimelineChanged];
 
     if (!query || query.length == 0) {
         return @{@"error": @"Query cannot be empty"};
@@ -1113,6 +1146,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         NSUInteger end = MIN(startIndex + count, self.mutableWords.count);
         for (NSUInteger i = startIndex; i < end; i++) {
             self.mutableWords[i].speaker = speaker;
+            self.mutableWords[i].sourceWord.speaker = speaker;   // kept when the words are placed again
         }
     }
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1191,6 +1225,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     self.errorMessage = nil;
     @synchronized (self.mutableWords) {
         [self.mutableWords removeAllObjects];
+        [self.sourceWords removeAllObjects];
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1239,6 +1274,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         }
 
         [self.mutableWords removeAllObjects];
+        [self.sourceWords removeAllObjects];
         [self.mutableSilences removeAllObjects];
 
         [self transcribeAudioFile:audioURL
@@ -1263,6 +1299,10 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                     [self assignSpeakers];
 
                     self.status = SpliceKitTranscriptStatusReady;
+                    // What this run transcribed, placed where the timeline plays it (and the
+                    // timeline it was placed on, which edits check before cutting).
+                    [self adoptWordsAsSourceWords];
+                    [self placeWordsFromTimeline];
                     [self rebuildTextView];
                     [self startPlayheadTimer];
                     self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
@@ -1487,6 +1527,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
                 out[@"undoStep"] = name;
                 result = out;
             }
+            // Closing the group can still change the timeline the words were placed on.
+            if (openedUndoGroup) [self refreshWordPositionsIfTimelineChanged];
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -1494,10 +1536,26 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     return result ?: @{@"error": @"Operation failed"};
 }
 
+// What an edit says about the words it took out of the transcript: the transcript is what
+// the timeline plays after the cut, so a cut that also took most of a neighbouring word
+// takes that word too, and says so.
+static void SpliceKitTranscript_noteRemovedWords(NSMutableDictionary *result, NSUInteger asked,
+                                                 NSUInteger before, NSUInteger after) {
+    NSUInteger removed = before > after ? before - after : 0;
+    result[@"wordsRemovedFromTranscript"] = @(removed);
+    if (removed != asked) {
+        result[@"note"] = [NSString stringWithFormat:
+            @"The transcript now has %lu words fewer, not %lu: it lists the words as the timeline plays "
+            @"them after the cut.", (unsigned long)removed, (unsigned long)asked];
+    }
+}
+
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count {
     NSDictionary *refusal = [self refusalWhileTranscribing];
     if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
+    refusal = [self refusalIfTimelineChanged];
+    if (refusal) return refusal;
 
     @synchronized (self.mutableWords) {
         if (startIndex >= self.mutableWords.count) {
@@ -1522,16 +1580,17 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
     if (result[@"error"]) return result;
 
-    // Remove deleted words from the data model
-    @synchronized (self.mutableWords) {
-        [self.mutableWords removeObjectsInRange:NSMakeRange(startIndex, count)];
-        for (NSUInteger i = startIndex; i < self.mutableWords.count; i++) {
-            self.mutableWords[i].wordIndex = i;
+    // The words are placed again from the timeline, so the ones cut out leave the transcript
+    // because the timeline no longer plays them.
+    NSUInteger before = self.mutableWords.count;
+    if (![self resyncTimestampsFromTimeline]) {
+        @synchronized (self.mutableWords) {
+            [self.mutableWords removeObjectsInRange:NSMakeRange(startIndex, count)];
+            for (NSUInteger i = startIndex; i < self.mutableWords.count; i++) {
+                self.mutableWords[i].wordIndex = i;
+            }
         }
     }
-
-    // Resync timestamps from the actual FCP timeline state
-    [self resyncTimestampsFromTimeline];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self rebuildTextView];
@@ -1542,6 +1601,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
     NSMutableDictionary *fullResult = [result mutableCopy];
     fullResult[@"deletedWords"] = @(count);
+    SpliceKitTranscript_noteRemovedWords(fullResult, count, before, self.mutableWords.count);
     return fullResult;
 }
 
@@ -1552,6 +1612,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     NSDictionary *refusal = [self refusalWhileTranscribing];
     if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
+    refusal = [self refusalIfTimelineChanged];
+    if (refusal) return refusal;
 
     NSMutableArray<NSValue *> *runs = [NSMutableArray array];
     @synchronized (self.mutableWords) {
@@ -1580,14 +1642,14 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
         }
     }
 
-    if (deleted.count > 0) {
+    NSUInteger before = self.mutableWords.count;
+    if (deleted.count > 0 && ![self resyncTimestampsFromTimeline]) {
         @synchronized (self.mutableWords) {
             [self.mutableWords removeObjectsAtIndexes:deleted];
             for (NSUInteger i = 0; i < self.mutableWords.count; i++) {
                 self.mutableWords[i].wordIndex = i;
             }
         }
-        [self resyncTimestampsFromTimeline];
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         [self rebuildTextView];
@@ -1597,6 +1659,7 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     NSMutableDictionary *response = [NSMutableDictionary dictionary];
     response[@"status"] = lastError ? (deleted.count ? @"partial" : @"failed") : @"ok";
     response[@"deletedWords"] = @(deleted.count);
+    if (deleted.count > 0) SpliceKitTranscript_noteRemovedWords(response, deleted.count, before, self.mutableWords.count);
     if (lastError) response[@"lastError"] = lastError;
     if (!deleted.count && lastError) response[@"error"] = lastError;
     return response;
@@ -1637,6 +1700,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 // Removes these silences from the timeline, then re-reads every word's position from it.
 // Also what the Delete key does with only pauses selected.
 - (NSDictionary *)deleteSilences:(NSArray<SpliceKitTranscriptSilence *> *)silences {
+    NSDictionary *refusal = [self refusalIfTimelineChanged];
+    if (refusal) return refusal;
     NSMutableArray<SpliceKitTranscriptSilence *> *toDelete = [silences mutableCopy];
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1713,6 +1778,8 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     NSDictionary *refusal = [self refusalWhileTranscribing];
     if (refusal) return refusal;
     [self ensurePersistedStateLoaded];
+    refusal = [self refusalIfTimelineChanged];
+    if (refusal) return refusal;
 
     @synchronized (self.mutableWords) {
         if (startIndex >= self.mutableWords.count || destIndex > self.mutableWords.count) {
@@ -1816,8 +1883,10 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
 
     if (result[@"error"]) return result;
 
-    // Update data model locally: reorder words in the array
-    @synchronized (self.mutableWords) {
+    // The words are placed again from the timeline, which now plays them in the new order.
+    // Only when that cannot be read, reorder them here.
+    NSUInteger before = self.mutableWords.count;
+    if (![self resyncTimestampsFromTimeline]) @synchronized (self.mutableWords) {
         NSArray *movedWords = [self.mutableWords subarrayWithRange:NSMakeRange(startIndex, count)];
         [self.mutableWords removeObjectsInRange:NSMakeRange(startIndex, count)];
 
@@ -1836,9 +1905,13 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
             self.mutableWords[i].wordIndex = i;
         }
     }
-
-    // Resync timestamps from the actual FCP timeline state
-    [self resyncTimestampsFromTimeline];
+    if (self.mutableWords.count != before) {
+        NSMutableDictionary *out = [result mutableCopy];
+        out[@"note"] = [NSString stringWithFormat:@"The transcript has %lu words after the move, %lu before: "
+                                                  @"it lists the words as the timeline plays them now.",
+                                                  (unsigned long)self.mutableWords.count, (unsigned long)before];
+        result = out;
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self rebuildTextView];
@@ -1851,111 +1924,240 @@ static NSString * const kTranscriptParakeetModelDefaultsKey = @"SpliceKitTranscr
     return result;
 }
 
-#pragma mark - Resync Timestamps from Timeline
+#pragma mark - Placing Words on the Timeline
 //
-// After any edit (move, delete), the word timestamps in our data model may not
-// match FCP's actual timeline anymore. This method re-reads the real clip positions
-// from FCP and re-maps each word using its immutable sourceMediaTime (position in
-// the original source file). This is the most reliable way to stay in sync —
-// trying to track cumulative shifts manually is fragile with compound edits.
-//
+// mutableWords is never patched word by word after an edit. Every word the last run
+// transcribed (sourceWords, each with its place in its media file) is placed again on the
+// clips the timeline plays now: after every transcript edit, and whenever the timeline
+// changed some other way (an undo, an edit made in Final Cut Pro, a saved transcript loaded
+// against a timeline edited since). The old resync matched each word to the first clip whose
+// source range held its start and left a word it could not match at its old time. Words went
+// unmatched ("matched 49 words, 16 unmatched"): a sliver of a deleted word was kept, the start
+// of the next word fell a few milliseconds before its piece after a cut rounded to a frame,
+// and the words of a clip removed outside the transcript stayed. The next edit then cut at
+// those old times, past the end of the timeline, and dropped the words anyway.
+// SpliceKitTranscript_placeWords (SpliceKitTranscriptPlacement.m) has the rules.
 
-- (void)resyncTimestampsFromTimeline {
-    // Each word has an immutable sourceMediaTime (its position in the source file).
-    // We match each word to the clip that contains its source time, then compute:
-    //   word.startTime = clip.timelineStart + (word.sourceMediaTime - clip.trimStart)
-    SpliceKit_log(@"[Transcript] Resyncing timestamps from timeline...");
+static SpliceKitTranscriptWord *SpliceKitTranscript_copyWord(SpliceKitTranscriptWord *word) {
+    SpliceKitTranscriptWord *copy = [[SpliceKitTranscriptWord alloc] init];
+    copy.text = word.text;
+    copy.startTime = word.startTime;
+    copy.duration = word.duration;
+    copy.confidence = word.confidence;
+    copy.speaker = word.speaker;
+    copy.clipHandle = word.clipHandle;
+    copy.clipTimelineStart = word.clipTimelineStart;
+    copy.sourceMediaOffset = word.sourceMediaOffset;
+    copy.sourceMediaTime = word.sourceMediaTime;
+    copy.sourceMediaPath = word.sourceMediaPath;
+    return copy;
+}
 
-    // Give FCP a moment to settle after the edit
-    [NSThread sleepForTimeInterval:0.3];
+// The words of the run that just finished become the transcribed words: one for each place
+// in each media file, so a clip on the timeline twice gives its words once here and they
+// are placed twice.
+- (void)adoptWordsAsSourceWords {
+    @synchronized (self.mutableWords) {
+        NSMutableArray<SpliceKitTranscriptWord *> *sources = [NSMutableArray array];
+        NSMutableDictionary<NSString *, SpliceKitTranscriptWord *> *byPlace = [NSMutableDictionary dictionary];
+        for (SpliceKitTranscriptWord *word in self.mutableWords) {
+            NSString *key = [NSString stringWithFormat:@"%@|%.3f|%@", word.sourceMediaPath ?: @"",
+                             word.sourceMediaTime, word.text ?: @""];
+            SpliceKitTranscriptWord *source = byPlace[key];
+            if (!source) {
+                source = SpliceKitTranscript_copyWord(word);
+                byPlace[key] = source;
+                [sources addObject:source];
+            }
+            word.sourceWord = source;
+        }
+        self.sourceWords = sources;
+    }
+}
+
+- (void)appendSignatureOf:(id)item primaryObject:(id)primary to:(NSMutableString *)signature {
+    double start = 0, duration = 0;
+    [self effectiveRangeForTimelineObject:item primaryObject:primary start:&start duration:&duration];
+    CMTimeRange clipped;
+    double trim = [self readTimeRange:@"clippedRange" of:item into:&clipped]
+        ? SpliceKit_secondsFromTime(clipped.start) : -1;
+    [signature appendFormat:@"%p:%.4f+%.4f@%.4f;", item, start, duration, trim];
+}
+
+// What the words' places depend on: every primary storyline and connected clip, where it
+// sits and what part of its media it plays. Main thread. nil without an open timeline.
+- (NSString *)timelineSignatureOfTimeline:(id)timeline {
+    id sequence = [timeline respondsToSelector:@selector(sequence)]
+        ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+    if (!sequence) return nil;
+    id primary = [sequence respondsToSelector:@selector(primaryObject)]
+        ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+    NSArray *items = [primary respondsToSelector:@selector(containedItems)]
+        ? ((id (*)(id, SEL))objc_msgSend)(primary, @selector(containedItems)) : nil;
+    NSMutableString *signature = [NSMutableString stringWithFormat:@"%p|%d|%lu|", sequence,
+                                  self.primaryStorylineOnly, (unsigned long)[items count]];
+    if (![items isKindOfClass:[NSArray class]]) return signature;
+    for (id item in items) {
+        [self appendSignatureOf:item primaryObject:primary to:signature];
+        for (id anchored in [self anchoredItemsForTimelineItem:item]) {
+            [signature appendString:@"^"];
+            [self appendSignatureOf:anchored primaryObject:primary to:signature];
+        }
+    }
+    return signature;
+}
+
+- (NSString *)currentTimelineSignature {
+    __block NSString *signature = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            signature = [self timelineSignatureOfTimeline:SpliceKit_getActiveTimelineModule()];
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[Transcript] Reading the timeline failed: %@", e.reason);
+        }
+    });
+    return signature;
+}
+
+// Places every transcribed word where the timeline plays it now (see above). NO, and the
+// words left as they were, without an open timeline or while a run is going.
+- (BOOL)placeWordsFromTimeline {
+    if (self.sourceFilePath.length > 0) return NO;   // a file transcript is on no timeline
+    if (self.status == SpliceKitTranscriptStatusTranscribing) return NO;
 
     __block NSArray *clipInfos = nil;
-
+    __block NSString *signature = nil;
+    __block double frame = 0;
     SpliceKit_executeOnMainThread(^{
         @try {
             id timeline = SpliceKit_getActiveTimelineModule();
-            if (!timeline) return;
-
-            id sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+            id sequence = [timeline respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
             if (!sequence) return;
-
             id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
-                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject))
-                : nil;
-            clipInfos = [self collectClipInfosForSequence:sequence primaryObject:primaryObj errorMessage:nil];
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            clipInfos = [self collectClipInfosForSequence:sequence primaryObject:primaryObj errorMessage:nil] ?: @[];
+            signature = [self timelineSignatureOfTimeline:timeline];
+            frame = [self frameSecondsOfTimeline:timeline];
         } @catch (NSException *e) {
-            SpliceKit_log(@"[Transcript] Resync error: %@", e.reason);
+            SpliceKit_log(@"[Transcript] Placing words: reading the timeline failed: %@", e.reason);
+            clipInfos = nil;
         }
     });
-
-    if (!clipInfos || clipInfos.count == 0) {
-        SpliceKit_log(@"[Transcript] Resync: no clips found");
-        return;
+    if (!clipInfos || !signature) {
+        SpliceKit_log(@"[Transcript] Placing words: no open timeline, words left as they were");
+        return NO;
     }
 
-    // Build actual clip segments with media paths for matching
-    NSMutableArray *actualClips = [NSMutableArray array];
+    // The clips a run transcribes: with a media file, not turned down to -60 dB or lower.
+    NSMutableArray<NSDictionary *> *clips = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *clipRows = [NSMutableArray array];
     for (NSDictionary *info in clipInfos) {
         NSURL *mediaURL = info[@"mediaURL"];
-        if (mediaURL) {
-            [actualClips addObject:@{
-                @"timelineStart": info[@"timelineStart"] ?: @0,
-                @"trimStart": info[@"trimStart"] ?: @0,
-                @"duration": info[@"duration"] ?: @0,
-                @"path": mediaURL.path ?: @"",
+        if (!mediaURL.path.length) continue;
+        if (info[@"volumeDB"] && [info[@"volumeDB"] doubleValue] <= -60.0) continue;
+        [clips addObject:@{
+            @"path": mediaURL.path,
+            @"trimStart": info[@"trimStart"] ?: @0,
+            @"duration": info[@"duration"] ?: @0,
+            @"timelineStart": info[@"timelineStart"] ?: @0,
+            @"rateFactor": info[@"rateFactor"] ?: @1,
+        }];
+        [clipRows addObject:info];
+    }
+
+    NSUInteger sourceCount = 0, placedCount = 0, offTimeline = 0;
+    @synchronized (self.mutableWords) {
+        if (self.sourceWords.count == 0 && self.mutableWords.count > 0) [self adoptWordsAsSourceWords];
+        NSArray<SpliceKitTranscriptWord *> *sources = [self.sourceWords copy];
+        sourceCount = sources.count;
+        NSMutableArray<NSDictionary *> *wordRows = [NSMutableArray arrayWithCapacity:sources.count];
+        for (SpliceKitTranscriptWord *source in sources) {
+            [wordRows addObject:@{
+                @"path": source.sourceMediaPath ?: @"",
+                @"sourceMediaTime": @(source.sourceMediaTime),
+                @"duration": @(source.duration),
             }];
         }
-    }
 
-    SpliceKit_log(@"[Transcript] Resync: found %lu clips on timeline", (unsigned long)actualClips.count);
-
-    @synchronized (self.mutableWords) {
-        if (self.mutableWords.count == 0) return;
-
-        NSUInteger matched = 0, unmatched = 0;
-
-        for (SpliceKitTranscriptWord *word in self.mutableWords) {
-            double smt = word.sourceMediaTime;
-            NSString *path = word.sourceMediaPath;
-            BOOL found = NO;
-
-            // Find the clip on the timeline that contains this word's source media time.
-            // After blade operations, the original clip may be split into multiple
-            // clips with different trimStart/duration ranges.
-            for (NSDictionary *clip in actualClips) {
-                double clipTrimStart = [clip[@"trimStart"] doubleValue];
-                double clipDuration = [clip[@"duration"] doubleValue];
-                double clipTimelineStart = [clip[@"timelineStart"] doubleValue];
-                NSString *clipPath = clip[@"path"];
-
-                // Match by source media path and source time within clip's trim range
-                BOOL pathMatch = (!path || !clipPath || path.length == 0 ||
-                                  [path isEqualToString:clipPath]);
-                BOOL timeMatch = (smt >= clipTrimStart - 0.01 &&
-                                  smt < clipTrimStart + clipDuration + 0.01);
-
-                if (pathMatch && timeMatch) {
-                    double newStartTime = clipTimelineStart + (smt - clipTrimStart);
-                    word.startTime = newStartTime;
-                    word.clipTimelineStart = clipTimelineStart;
-                    word.sourceMediaOffset = clipTrimStart;
-                    found = YES;
-                    matched++;
-                    break;
-                }
-            }
-
-            if (!found) {
-                unmatched++;
-            }
+        NSArray<NSDictionary *> *placements = SpliceKitTranscript_placeWords(wordRows, clips, frame);
+        NSMutableArray<SpliceKitTranscriptWord *> *placed = [NSMutableArray arrayWithCapacity:placements.count];
+        NSMutableIndexSet *onTimeline = [NSMutableIndexSet indexSet];
+        for (NSDictionary *placement in placements) {
+            NSUInteger w = [placement[@"word"] unsignedIntegerValue];
+            NSDictionary *info = clipRows[[placement[@"clip"] unsignedIntegerValue]];
+            SpliceKitTranscriptWord *source = sources[w];
+            SpliceKitTranscriptWord *word = SpliceKitTranscript_copyWord(source);
+            word.startTime = [placement[@"startTime"] doubleValue];
+            word.duration = [placement[@"duration"] doubleValue];
+            word.clipHandle = info[@"handle"];
+            word.clipTimelineStart = [info[@"timelineStart"] doubleValue];
+            word.sourceMediaOffset = [info[@"trimStart"] doubleValue];
+            word.sourceWord = source;
+            word.wordIndex = placed.count;
+            [placed addObject:word];
+            [onTimeline addIndex:w];
         }
-
-        SpliceKit_log(@"[Transcript] Resync: matched %lu words, %lu unmatched",
-                      (unsigned long)matched, (unsigned long)unmatched);
+        [self.mutableWords setArray:placed];
+        placedCount = placed.count;
+        offTimeline = sourceCount - onTimeline.count;
+        self.wordsNotOnTimeline = offTimeline;
     }
+    self.placedTimelineSignature = signature;
 
+    SpliceKit_log(@"[Transcript] Placed %lu words on %lu clips; %lu of the %lu transcribed words are on "
+                  @"no clip now (cut, or their clip removed)",
+                  (unsigned long)placedCount, (unsigned long)clips.count,
+                  (unsigned long)offTimeline, (unsigned long)sourceCount);
     [self detectSilences];
-    SpliceKit_log(@"[Transcript] Resync complete");
+    return YES;
+}
+
+// After an edit through the transcript: let Final Cut Pro settle, then place every word.
+- (BOOL)resyncTimestampsFromTimeline {
+    [NSThread sleepForTimeInterval:0.3];
+    return [self placeWordsFromTimeline];
+}
+
+- (void)refreshTranscriptViewAfterPlacing {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self rebuildTextView];
+        self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
+    });
+}
+
+// Readers (getState, search, the Transcript Editor) call this: when the timeline is not the
+// one the words were placed on, place them again first.
+- (void)refreshWordPositionsIfTimelineChanged {
+    if (self.sourceFilePath.length > 0) return;
+    if (self.status != SpliceKitTranscriptStatusReady) return;
+    if (self.mutableWords.count == 0 && self.sourceWords.count == 0) return;
+    NSString *now = [self currentTimelineSignature];
+    if (!now || [now isEqualToString:self.placedTimelineSignature]) return;
+    SpliceKit_log(@"[Transcript] The timeline changed since the words were placed; placing them again");
+    if ([self placeWordsFromTimeline]) [self refreshTranscriptViewAfterPlacing];
+}
+
+// Edits call this before cutting. Word numbers and times are only good for the timeline they
+// were read from: after an undo or an edit in Final Cut Pro the same numbers name other words
+// at other times. The words are placed again and the edit refused, so nothing is cut at a
+// position the transcript no longer knows.
+- (NSDictionary *)refusalIfTimelineChanged {
+    if (self.sourceFilePath.length > 0) return nil;
+    NSString *now = [self currentTimelineSignature];
+    if (!now) return nil;   // no open timeline: the edit itself says so
+    if ([now isEqualToString:self.placedTimelineSignature]) return nil;
+    BOOL placed = [self placeWordsFromTimeline];
+    [self refreshTranscriptViewAfterPlacing];
+    SpliceKit_log(@"[Transcript] Edit refused: the timeline changed since the words were placed");
+    return @{@"error": [NSString stringWithFormat:
+                        @"The timeline changed since the transcript's word positions were read (an undo, or an "
+                        @"edit in Final Cut Pro), so nothing was cut. %@ Read the transcript again "
+                        @"(get_transcript) and repeat the edit with the new word numbers.",
+                        placed ? [NSString stringWithFormat:@"The words were placed again from the timeline "
+                                                            @"(%lu words now).", (unsigned long)self.mutableWords.count]
+                               : @"The words could not be placed again."],
+             @"timelineChanged": @YES};
 }
 
 - (void)updatePlayheadHighlight:(double)timeInSeconds {
@@ -2078,6 +2280,7 @@ static double SpliceKitTranscript_optDouble(NSDictionary *opts, NSString *key, d
 // fields is a few KB, which is what an MCP client can take in one answer.
 - (NSDictionary *)getStateWithOptions:(NSDictionary *)opts {
     [self ensurePersistedStateLoaded];
+    [self refreshWordPositionsIfTimelineChanged];
     if (![opts isKindOfClass:[NSDictionary class]]) opts = @{};
 
     BOOL wordsOnly = SpliceKitTranscript_optBool(opts, @"wordsOnly", NO);
@@ -2117,6 +2320,11 @@ static double SpliceKitTranscript_optDouble(NSDictionary *opts, NSString *key, d
     state[@"wordCount"] = @(self.mutableWords.count);
     state[@"silenceCount"] = @(self.mutableSilences.count);
     state[@"silenceThreshold"] = @(self.silenceThreshold);
+    // Transcribed words on no clip of the timeline now (cut, or their clip removed). They
+    // come back if their media does (an undo).
+    if (self.sourceFilePath.length == 0 && self.sourceWords.count > 0) {
+        state[@"wordsNotOnTimeline"] = @(self.wordsNotOnTimeline);
+    }
     // The 24 fps default is not a reading: say so until a timeline run (or a
     // restored transcript) has told us the sequence's rate.
     if (self.frameRateKnown) {
@@ -2193,6 +2401,14 @@ static double SpliceKitTranscript_optDouble(NSDictionary *opts, NSString *key, d
                     NSMutableDictionary *picked = [NSMutableDictionary dictionary];
                     for (NSString *key in full) {
                         if ([fields containsObject:key]) picked[key] = full[key];
+                    }
+                    // Only on request: where the word is in its media file, which is how it
+                    // is placed on the timeline (tests/live check every word with it).
+                    if ([fields containsObject:@"sourceMediaTime"]) {
+                        picked[@"sourceMediaTime"] = @(round(word.sourceMediaTime * 1000.0) / 1000.0);
+                    }
+                    if ([fields containsObject:@"sourceMediaPath"]) {
+                        picked[@"sourceMediaPath"] = word.sourceMediaPath ?: @"";
                     }
                     [wordList addObject:picked];
                 } else {

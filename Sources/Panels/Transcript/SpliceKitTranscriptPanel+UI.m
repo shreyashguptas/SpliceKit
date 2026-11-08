@@ -1017,8 +1017,12 @@ static NSString * const kEngineAppleSpeech = @"Apple Speech";
 
 - (void)playheadTimerFired:(NSTimer *)timer {
     if (self.status != SpliceKitTranscriptStatusReady) return;
-    if (self.mutableWords.count == 0) return;
     if (![self isVisible]) return;
+    // About once a second: when the timeline changed (an undo, an edit in Final Cut Pro),
+    // place the words again so the editor shows what the timeline plays.
+    static NSUInteger ticks = 0;
+    if (++ticks % 10 == 0) [self refreshWordPositionsIfTimelineChanged];
+    if (self.mutableWords.count == 0) return;
 
     __block double playheadTime = -1;
     @try {

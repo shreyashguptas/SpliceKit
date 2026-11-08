@@ -68,6 +68,7 @@ Panels/Transcript/SpliceKitTranscriptPanel+Clips.m
 Panels/Transcript/SpliceKitTranscriptPanel+Engines.m
 Panels/Transcript/SpliceKitTranscriptPanel+Parakeet.m
 Panels/Transcript/SpliceKitTranscriptDiagnostics.m
+Panels/Transcript/SpliceKitTranscriptPlacement.m
 Panels/Captions/SpliceKitCaptionPanel.m
 Panels/Captions/SpliceKitCaptionStyle.m
 Panels/Captions/SpliceKitCaptionPanel+UI.m

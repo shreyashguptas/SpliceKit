@@ -255,6 +255,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     });
 
     [self.mutableWords removeAllObjects];
+    [self.sourceWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
 
     // Call FFTranscriptionCoordinator.modalTranscriptsForClips:locale:
@@ -451,6 +452,10 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
             [self assignSpeakers];
 
             self.status = SpliceKitTranscriptStatusReady;
+            // What this run transcribed, placed where the timeline plays it (and the
+            // timeline it was placed on, which edits check before cutting).
+            [self adoptWordsAsSourceWords];
+            [self placeWordsFromTimeline];
             [self rebuildTextView];
             [self startPlayheadTimer];
 
@@ -542,6 +547,7 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
     SpliceKitTranscriptDiag_logClipInfos(clips, @"Apple Speech");
 
     [self.mutableWords removeAllObjects];
+    [self.sourceWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
     self.completedTranscriptions = 0;
     self.totalTranscriptions = 0;
@@ -587,6 +593,10 @@ static NSString *SpliceKitSpeechAuthStatusName(NSInteger status) {
             [self assignSpeakers];
 
             self.status = SpliceKitTranscriptStatusReady;
+            // What this run transcribed, placed where the timeline plays it (and the
+            // timeline it was placed on, which edits check before cutting).
+            [self adoptWordsAsSourceWords];
+            [self placeWordsFromTimeline];
             [self rebuildTextView];
             [self startPlayheadTimer];
 
