@@ -105,6 +105,19 @@ that this fork has removed.
   It also recognises **`/Applications/Final Cut Pro Modified.app`** when that is the patched install.
 
 ### Fixed
+- **Transcript words stay where the timeline plays them after edits.** After deletes, moves,
+  Delete Silences or an undo, some words lost their place ("Resync: matched 49 words, 16
+  unmatched") and kept their old times, so the next edit cut at the wrong place or past the end
+  of the timeline (one delete aimed at 22.57-23.37 s on a 17.97 s timeline) and dropped the words
+  anyway. A cut rounded to a frame left part of a deleted word or clipped the start of the next
+  one, and a saved transcript loaded after the timeline changed kept every word of a removed
+  clip. Now every transcribed word is placed again on the clips the timeline plays after each
+  edit, after an undo or redo, after an edit made in Final Cut Pro, and when a saved transcript
+  is loaded: a word comes back when its media does (undo), shows twice when a clip is used twice,
+  and a pause cut from a long word's tail keeps the word (`Sources/Panels/Transcript/SpliceKitTranscriptPlacement.m`,
+  `tests/test_transcript_placement.py`). A transcript edit made after the timeline changed since
+  the transcript was last read is refused, with nothing cut, and asks for `get_transcript` again,
+  since the old word numbers name other words. `get_transcript` reports `wordsNotOnTimeline`.
 - **Transcript edits no longer delete B-roll.** Deleting words or pauses, and moving words,
   selected the clip at the playhead, which is the connected clip when one sits above the
   words: a pause under B-roll deleted the B-roll and left the pause. They now select the

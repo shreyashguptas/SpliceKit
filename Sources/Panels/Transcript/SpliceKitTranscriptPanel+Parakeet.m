@@ -402,6 +402,7 @@
     }
 
     [self.mutableWords removeAllObjects];
+    [self.sourceWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -931,6 +932,10 @@
 
         self.completedTranscriptions = self.totalTranscriptions;
         self.status = SpliceKitTranscriptStatusReady;
+        // What this run transcribed, placed where the timeline plays it (and the
+        // timeline it was placed on, which edits check before cutting).
+        [self adoptWordsAsSourceWords];
+        [self placeWordsFromTimeline];
         [self rebuildTextView];
         [self startPlayheadTimer];
 
@@ -1123,6 +1128,7 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         @synchronized (self.mutableWords) {
             [self.mutableWords removeAllObjects];
+            [self.sourceWords removeAllObjects];
             [self.mutableWords addObjectsFromArray:words];
         }
         [self.mutableSilences removeAllObjects];
@@ -1131,6 +1137,10 @@
 
         self.completedTranscriptions = 1;
         self.status = SpliceKitTranscriptStatusReady;
+        // What this run transcribed, placed where the timeline plays it (and the
+        // timeline it was placed on, which edits check before cutting).
+        [self adoptWordsAsSourceWords];
+        [self placeWordsFromTimeline];
         self.errorMessage = nil;
         [self rebuildTextView];
         [self startPlayheadTimer];

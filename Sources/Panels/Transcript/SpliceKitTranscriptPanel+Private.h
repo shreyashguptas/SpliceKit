@@ -34,6 +34,12 @@
 @property (nonatomic) NSPoint dragOrigin;
 @end
 
+@interface SpliceKitTranscriptWord ()
+// The word as transcribed, in sourceWords: a word on the timeline is a placement of it
+// (see -placeWordsFromTimeline). Weak: sourceWords holds it.
+@property (nonatomic, weak) SpliceKitTranscriptWord *sourceWord;
+@end
+
 @interface SpliceKitTranscriptPanel () <NSTextViewDelegate, NSWindowDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) NSPanel *panel;
 // Every control of the editor. It sits docked in FCP's main window, or in `panel` when
@@ -62,6 +68,15 @@
 @property (nonatomic, readwrite) SpliceKitTranscriptStatus status;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptWord *> *mutableWords;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptSilence *> *mutableSilences;
+// Every word the last run transcribed, with its place in its media file. mutableWords is
+// where those words play on the timeline now, placed again after every edit (and after an
+// undo or an edit made in Final Cut Pro), so a deleted word comes back when its media does.
+// Guarded by @synchronized (self.mutableWords) like mutableWords.
+@property (nonatomic, strong) NSMutableArray<SpliceKitTranscriptWord *> *sourceWords;
+// The timeline as it was when mutableWords was last placed (-timelineSignature), and how many
+// transcribed words were on none of its clips then.
+@property (atomic, copy) NSString *placedTimelineSignature;
+@property (atomic) NSUInteger wordsNotOnTimeline;
 @property (nonatomic, readwrite, copy) NSString *fullText;
 @property (nonatomic, readwrite, copy) NSString *errorMessage;
 
@@ -154,6 +169,9 @@ extern NSString *const FCPAttrSegmentEndIndex;
 - (void)clearSelectionAndRangeOfTimeline:(id)timeline;
 - (NSString *)selectPrimaryStorylinePieceFrom:(double)start to:(double)end timeline:(id)timeline;
 - (void)setPlayheadToTime:(double)seconds;
+- (void)adoptWordsAsSourceWords;
+- (BOOL)placeWordsFromTimeline;
+- (void)refreshWordPositionsIfTimelineChanged;
 @end
 
 // Implemented in SpliceKitTranscriptPanel+UI.m, called from another file.
@@ -177,6 +195,8 @@ extern NSString *const FCPAttrSegmentEndIndex;
                                   start:(double *)startOut
                                duration:(double *)durationOut;
 - (void)performTimelineTranscription;
+- (NSArray *)anchoredItemsForTimelineItem:(id)item;
+- (BOOL)readTimeRange:(NSString *)selectorName of:(id)object into:(CMTimeRange *)out;
 - (id)transcriptAssetCandidateForClipInfo:(NSDictionary *)clipInfo assetsSelector:(SEL)assetsSel;
 - (NSString *)mediaPathForTranscriptAsset:(id)asset;
 @end
